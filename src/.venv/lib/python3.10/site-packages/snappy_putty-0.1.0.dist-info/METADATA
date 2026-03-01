@@ -1,0 +1,51 @@
+Metadata-Version: 2.4
+Name: snappy-putty
+Version: 0.1.0
+Summary: Suggestion-only CLI planner with safety-aware command guidance
+Author: Snappy PuTTy Contributors
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: openai-agents
+Requires-Dist: typer>=0.12
+Requires-Dist: rich>=13.0
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: pydantic>=2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+
+# Snappy PuTTy
+
+Snappy PuTTy is a suggestion-only Python CLI for planning shell actions with risk-aware guidance.
+
+## Requirements
+
+- Python 3.10+
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## CLI
+
+```bash
+snappy_putty --help
+snappy_putty ask "rotate nginx logs"
+snappy_putty explain "kubectl rollout restart deployment api"
+snappy_putty doctor --verbose
+```
+
+## Development
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
+## Project Notes
+
+- `SKILLS.md` defines output contract and safety policy.
+- `TASKS.md` tracks delivery phases.

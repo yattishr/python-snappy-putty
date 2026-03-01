@@ -1,0 +1,2 @@
+[console_scripts]
+snappy_putty = snappy_putty.cli:app
