@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from snappy_putty.context import ContextSnapshot
 from snappy_putty.models import AgentOutput, PlanStep, Snippet, SuggestedCommand
 from snappy_putty.safety import attach_risk_tags
+from snappy_putty.status import busy, get_status_message
 from snappy_putty.tools_safe import list_dir, pwd
 
 try:
@@ -452,7 +453,8 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
             return _listing_followup_output(user_text)
 
         selected_path = _extract_requested_path(user_text) or "."
-        listing_text = list_dir(path=selected_path)
+        with busy(get_status_message("fs")):
+            listing_text = list_dir(path=selected_path)
         return _listing_output(
             user_text=user_text,
             target_path=selected_path,

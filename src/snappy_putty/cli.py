@@ -10,6 +10,7 @@ from rich.panel import Panel
 from snappy_putty.agent import AgentRunResult, plan_with_agent
 from snappy_putty.context import collect_context
 from snappy_putty.render import render_agent_output, render_agent_parse_error, render_directory_listing, render_doctor_report
+from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
 console = Console()
@@ -115,8 +116,9 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
 
 def handle_ask(intent: str) -> AgentRunResult:
     """Run ask flow and render output."""
-    snapshot = collect_context()
-    result = plan_with_agent(mode="ask", user_text=intent, snapshot=snapshot)
+    with busy(get_status_message("ask"), console=console):
+        snapshot = collect_context()
+        result = plan_with_agent(mode="ask", user_text=intent, snapshot=snapshot)
     if result.parse_error:
         render_agent_parse_error(console=console, parse_error=result.parse_error, raw_model_text=result.raw_model_text)
     if result.directory_listing is not None:
@@ -133,7 +135,8 @@ def explain(command: str = typer.Argument(..., help="Command to explain.")) -> N
 
 def handle_explain(command: str) -> AgentRunResult:
     """Run explain flow and render output."""
-    result = plan_with_agent(mode="explain", user_text=command, snapshot=None)
+    with busy(get_status_message("explain"), console=console):
+        result = plan_with_agent(mode="explain", user_text=command, snapshot=None)
     if result.parse_error:
         render_agent_parse_error(console=console, parse_error=result.parse_error, raw_model_text=result.raw_model_text)
     render_agent_output(console=console, output=result.output, title="explain")
