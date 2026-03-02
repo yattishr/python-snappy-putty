@@ -11,10 +11,10 @@ from typing import Any
 from pydantic import ValidationError
 
 from snappy_putty.context import ContextSnapshot
+from snappy_putty.fs_ops import list_dir
 from snappy_putty.models import AgentOutput, PlanStep, Snippet, SuggestedCommand
 from snappy_putty.safety import attach_risk_tags
 from snappy_putty.status import busy, get_status_message
-from snappy_putty.tools_safe import list_dir, pwd
 
 try:
     from agents import Agent, Runner
@@ -173,7 +173,7 @@ def _listing_request_is_ambiguous(text: str) -> bool:
 
 
 def _listing_output(user_text: str, target_path: str, listing_text: str, requested_path: bool) -> AgentRunResult:
-    assumption = f"Using requested directory: {target_path}" if requested_path else f"No path provided; defaulting to cwd: {pwd()}"
+    assumption = f"Using requested directory: {target_path}" if requested_path else f"No path provided; defaulting to cwd: {Path.cwd()}"
     output = AgentOutput(
         goal=user_text,
         assumptions=[assumption],
@@ -184,8 +184,8 @@ def _listing_output(user_text: str, target_path: str, listing_text: str, request
         ],
         commands=[
             SuggestedCommand(
-                cmd=f"ls {target_path}",
-                explain="Read-only listing command used for context gathering.",
+                cmd=f"python-native listing: {target_path}",
+                explain="Read-only listing performed via pathlib in-process.",
                 risk="low",
             )
         ],
@@ -348,8 +348,8 @@ def _fallback_output(mode: str, user_text: str, snapshot: ContextSnapshot) -> Ag
     else:
         suggestions = [
             SuggestedCommand(
-                cmd="ls -la",
-                explain="Read-only listing command placeholder.",
+                cmd="snappy_putty doctor",
+                explain="Inspect local context safely without changing filesystem state.",
                 risk="low",
             )
         ]

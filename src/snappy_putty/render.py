@@ -7,6 +7,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from snappy_putty.context import ContextSnapshot
+from snappy_putty.fs_models import FsApplyResult, FsPlan
 from snappy_putty.models import AgentOutput
 
 
@@ -27,6 +28,42 @@ def single_line_command(command: str) -> str:
 
 def render_directory_listing(console: Console, content: str) -> None:
     console.print(Panel(content, title="Directory Listing", border_style="bright_green"))
+
+
+def render_dir_listing(console: Console, listing_text: str) -> None:
+    render_directory_listing(console=console, content=listing_text)
+
+
+def render_fs_plan(console: Console, plan: FsPlan) -> None:
+    ops_table = Table(title="Planned Changes")
+    ops_table.add_column("Op", style="cyan")
+    ops_table.add_column("Action", style="green")
+    ops_table.add_column("From", style="magenta")
+    ops_table.add_column("To", style="blue")
+    ops_table.add_column("Risk", style="yellow")
+    for op in plan.ops:
+        ops_table.add_row(op.op_id, op.action, op.src or "-", op.dst or "-", op.risk.upper())
+
+    if not plan.ops:
+        console.print(Panel.fit("No filesystem changes planned.", title="Planned Changes", border_style="yellow"))
+    else:
+        console.print(ops_table)
+
+    warning_text = "\n".join(f"- {item}" for item in plan.warnings) or "- none"
+    console.print(Panel(Markdown(warning_text), title="Plan Warnings", border_style="yellow"))
+
+
+def render_fs_apply_result(console: Console, result: FsApplyResult) -> None:
+    table = Table(title="Applied Changes")
+    table.add_column("Op", style="cyan")
+    table.add_column("Action", style="green")
+    table.add_column("Status", style="magenta")
+    table.add_column("Message", style="blue")
+    for item in result.results:
+        table.add_row(item.op_id, item.action, item.status.upper(), item.message)
+    console.print(table)
+    warning_text = "\n".join(f"- {item}" for item in result.warnings) or "- none"
+    console.print(Panel(Markdown(warning_text), title="Apply Warnings", border_style="yellow"))
 
 
 def render_agent_output(console: Console, output: AgentOutput, title: str) -> None:
