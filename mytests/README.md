@@ -90,19 +90,19 @@ pip install -e .
 Start REPL by running without subcommand:
 
 ```bash
-snappy_putty
+snappy
 ```
 
 Or explicitly:
 
 ```bash
-snappy_putty shell
+snappy shell
 ```
 
 Prompt:
 
 ```text
-snappy_putty [ask]>
+snappy [ask]>
 ```
 
 REPL commands:
@@ -120,10 +120,10 @@ History is stored at:
 ### 2. Non-interactive commands
 
 ```bash
-snappy_putty ask "give me a file listing"
-snappy_putty ask "deploy this to google cloud"
-snappy_putty explain "git worktree list"
-snappy_putty doctor --verbose
+snappy ask "give me a file listing"
+snappy ask "deploy this to google cloud"
+snappy explain "git worktree list"
+snappy doctor --verbose
 ```
 
 ## Special Ask Behaviors
@@ -190,7 +190,7 @@ Tests cover:
 
 ## Troubleshooting
 
-### `snappy_putty` command not found
+### `snappy` command not found
 
 Ensure editable install is active in your current virtualenv:
 

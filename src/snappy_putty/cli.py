@@ -71,9 +71,9 @@ def run_shell() -> None:
     while True:
         try:
             if session is None:
-                line = input("snappy_putty [ask]> ")
+                line = input("snappy [ask]> ")
             else:
-                line = session.prompt("snappy_putty [ask]> ")
+                line = session.prompt("snappy [ask]> ")
         except KeyboardInterrupt:
             continue
         except EOFError:

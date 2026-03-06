@@ -7,9 +7,9 @@ Snappy PuTTy is suggestion-only.
 - It may ask at most 1 clarifying question if needed.
 
 ## CLI Commands
-- `snappy_putty ask "<intent>"`
-- `snappy_putty explain "<command>"`
-- `snappy_putty doctor`
+- `snappy ask "<intent>"`
+- `snappy explain "<command>"`
+- `snappy doctor`
 
 ## Output Contract (Structured)
 All agent responses must map to this schema:
@@ -50,7 +50,7 @@ Collect and pass to the agent:
 - Tests: simple smoke tests in `tests/`
 
 ## Definition of Done for v0.1
-- `snappy_putty --help` works
+- `snappy --help` works
 - `ask/explain/doctor` commands work
 - Agent returns structured output
 - Render shows Rich panels + commands table

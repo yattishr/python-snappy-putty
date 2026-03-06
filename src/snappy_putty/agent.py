@@ -247,7 +247,7 @@ def _cloud_deploy_cli_branch_output(user_text: str) -> AgentOutput:
             "WORKDIR /app\n"
             "COPY . /app\n"
             "RUN pip install --no-cache-dir -e .\n"
-            'CMD ["snappy_putty", "--help"]\n'
+            'CMD ["snappy", "--help"]\n'
         ),
     )
     return AgentOutput(
@@ -348,7 +348,7 @@ def _fallback_output(mode: str, user_text: str, snapshot: ContextSnapshot) -> Ag
     else:
         suggestions = [
             SuggestedCommand(
-                cmd="snappy_putty doctor",
+                cmd="snappy doctor",
                 explain="Inspect local context safely without changing filesystem state.",
                 risk="low",
             )
