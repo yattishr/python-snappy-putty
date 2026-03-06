@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 from typing import Callable, Optional
@@ -33,6 +34,15 @@ from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
 console = Console()
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("SNAPPY_PUTTY_DEBUG") == "1"
+
+
+def _debug(message: str) -> None:
+    if _debug_enabled():
+        print(f"[snappy_putty:debug] {message}")
 
 
 def print_repl_cheatsheet() -> None:
@@ -100,6 +110,8 @@ def run_shell() -> None:
 
         decision = classify_input(text)
         route = decision.route
+        _debug(f"raw user input={text!r}")
+        _debug(f"classified route={route}")
         if route == ROUTE_BUILTIN_EXIT:
             break
         if route == ROUTE_BUILTIN_HELP:
@@ -151,6 +163,8 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     """Generate suggestion-only plan for an intent."""
     decision = classify_input(intent)
     route = decision.route
+    _debug(f"raw user input={intent!r}")
+    _debug(f"classified route={route}")
 
     if route == ROUTE_BUILTIN_HELP:
         print_repl_cheatsheet()
@@ -228,11 +242,13 @@ def _prompt_reader(session) -> Callable[[str], str]:
 
 def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, workspace_root: Path | None = None) -> bool:
     root = (workspace_root or Path.cwd()).resolve()
+    _debug(f"raw fs intent={intent!r}")
     plan = plan_fs_intent(intent=intent, cwd=Path.cwd(), workspace_root=root)
     if plan is None:
         partial = parse_incomplete_fs_intent(intent)
         if partial is not None:
             action, src = partial
+            _debug(f"incomplete fs parse action={action!r} src={src!r} dst=None")
             if prompt_reader is None:
                 console.print(f"Usage: {action} <source> to <destination>")
                 return True
@@ -245,6 +261,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
             if not destination:
                 console.print(Panel.fit("Cancelled. No destination was provided.", title="Apply Cancelled", border_style="yellow"))
                 return True
+            _debug(f"destination prompt value={destination!r}")
             plan = plan_fs_intent(intent=f"{action} {src} to {destination}", cwd=Path.cwd(), workspace_root=root)
         elif looks_like_fs_mutation_intent(intent):
             console.print("Could not parse filesystem action. Try examples: copy A to B, move A to B, rename A to B, make a folder called X.")
@@ -273,6 +290,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
                 break
 
     if overwrite_needed:
+        _debug("overwrite protection required=True")
         try:
             overwrite_confirmation = prompt_reader("Destination exists. Type OVERWRITE to replace, or anything else to cancel: ").strip()
         except EOFError:
@@ -285,6 +303,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
 
     excess_ops = len(plan.ops) > MAX_OPS
     if excess_ops:
+        _debug(f"operation limit exceeded count={len(plan.ops)}")
         try:
             limit_confirmation = prompt_reader(
                 f"Plan exceeds {MAX_OPS} operations. Type PROCEED to continue, or anything else to cancel: "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 import re
 import shlex
@@ -20,6 +21,15 @@ PATH_SEPARATORS = {"to", "into"}
 class PathResolution:
     path: Path | None
     warning: str | None = None
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("SNAPPY_PUTTY_DEBUG") == "1"
+
+
+def _debug(message: str) -> None:
+    if _debug_enabled():
+        print(f"[snappy_putty:debug] {message}")
 
 
 def _format_entry(entry: Path, long: bool = False) -> str:
@@ -54,19 +64,10 @@ def _resolve_in_scope(raw_path: str, cwd: Path, workspace_root: Path | None = No
     if not value:
         return PathResolution(path=None, warning="Path is required.")
 
-    candidate = Path(value).expanduser()
-    if candidate.is_absolute():
-        return PathResolution(path=None, warning="Absolute paths are blocked in v0.1. Use a path under the current working directory.")
-    if ".." in candidate.parts:
-        return PathResolution(path=None, warning="Paths containing '..' are blocked in v0.1 for safety.")
-
     resolved_cwd = cwd.resolve()
     resolved_workspace = (workspace_root or resolved_cwd).resolve()
-    resolved_target = (resolved_cwd / candidate).resolve()
-    try:
-        resolved_target.relative_to(resolved_cwd)
-    except ValueError:
-        return PathResolution(path=None, warning="Path escapes the current working directory subtree.")
+    candidate = Path(value).expanduser()
+    resolved_target = candidate.resolve() if candidate.is_absolute() else (resolved_cwd / candidate).resolve()
     try:
         resolved_target.relative_to(resolved_workspace)
     except ValueError:
@@ -112,19 +113,29 @@ def _validate_destination(
     dst: str,
     cwd: Path,
     *,
+    src_path: Path | None = None,
     op_id: str,
     allow_missing_parent: bool = False,
     allow_existing: bool = False,
     workspace_root: Path | None = None,
-) -> tuple[Path, PlannedOp | None, bool]:
+) -> tuple[Path, PlannedOp | None, bool, str]:
     resolved_dst = _resolve_in_scope(dst, cwd, workspace_root=workspace_root)
     if resolved_dst.warning:
         raise ValueError(resolved_dst.warning)
     assert resolved_dst.path is not None
-    destination_exists = resolved_dst.path.exists()
+    raw_value = dst.strip()
+    ends_as_dir = raw_value.endswith("/") or raw_value.endswith("\\")
+    destination_is_dir = resolved_dst.path.exists() and resolved_dst.path.is_dir()
+    destination_kind = "directory" if destination_is_dir or ends_as_dir else "file"
+    resolved_target = resolved_dst.path
+    if destination_kind == "directory":
+        if src_path is None:
+            raise ValueError("A source file is required when destination is a directory.")
+        resolved_target = resolved_dst.path / src_path.name
+    destination_exists = resolved_target.exists()
     if destination_exists and not allow_existing:
-        raise ValueError(f"Destination already exists: {_as_display_path(resolved_dst.path, cwd)}")
-    parent = resolved_dst.path.parent
+        raise ValueError(f"Destination already exists: {_as_display_path(resolved_target, cwd)}")
+    parent = resolved_target.parent
     mkdir_op = None
     if not parent.exists():
         if not allow_missing_parent:
@@ -140,7 +151,12 @@ def _validate_destination(
             notes=["Destination parent is missing and must be created first."],
             risk="low",
         )
-    return resolved_dst.path, mkdir_op, destination_exists
+    _debug(
+        "resolved destination "
+        f"raw='{dst}' target='{_as_display_path(resolved_target, cwd)}' "
+        f"kind={destination_kind} parent_exists={parent.exists()} create_parent={mkdir_op is not None}"
+    )
+    return resolved_target, mkdir_op, destination_exists, destination_kind
 
 
 def plan_copy_file(
@@ -155,15 +171,17 @@ def plan_copy_file(
 ) -> PlannedOp:
     base = (cwd or Path.cwd()).resolve()
     src_path = _validate_file_source(src, base, workspace_root=workspace_root)
-    dst_path, _, destination_exists = _validate_destination(
+    dst_path, _, destination_exists, destination_kind = _validate_destination(
         dst,
         base,
+        src_path=src_path,
         op_id=op_id,
         allow_missing_parent=allow_missing_parent,
         allow_existing=allow_existing,
         workspace_root=workspace_root,
     )
     notes = ["Copies file contents without removing the source."]
+    notes.append(f"Destination interpreted as {destination_kind} path.")
     if destination_exists:
         notes.append("Destination exists; overwrite confirmation is required before apply.")
     return PlannedOp(
@@ -188,15 +206,17 @@ def plan_move_file(
 ) -> PlannedOp:
     base = (cwd or Path.cwd()).resolve()
     src_path = _validate_file_source(src, base, workspace_root=workspace_root)
-    dst_path, _, destination_exists = _validate_destination(
+    dst_path, _, destination_exists, destination_kind = _validate_destination(
         dst,
         base,
+        src_path=src_path,
         op_id=op_id,
         allow_missing_parent=allow_missing_parent,
         allow_existing=allow_existing,
         workspace_root=workspace_root,
     )
     notes = ["Moves a file to a new destination path."]
+    notes.append(f"Destination interpreted as {destination_kind} path.")
     if destination_exists:
         notes.append("Destination exists; overwrite confirmation is required before apply.")
     return PlannedOp(
@@ -221,19 +241,21 @@ def plan_rename_file(
 ) -> PlannedOp:
     base = (cwd or Path.cwd()).resolve()
     src_path = _validate_file_source(src, base, workspace_root=workspace_root)
-    if "/" not in new_name_or_dst and "\\" not in new_name_or_dst:
+    if "/" not in new_name_or_dst and "\\" not in new_name_or_dst and not new_name_or_dst.endswith(("/", "\\")):
         dst_hint = str(Path(src).parent / new_name_or_dst)
     else:
         dst_hint = new_name_or_dst
-    dst_path, _, destination_exists = _validate_destination(
+    dst_path, _, destination_exists, destination_kind = _validate_destination(
         dst_hint,
         base,
+        src_path=src_path,
         op_id=op_id,
         allow_missing_parent=allow_missing_parent,
         allow_existing=allow_existing,
         workspace_root=workspace_root,
     )
     notes = ["Renames a file; source and destination stay within the working tree scope."]
+    notes.append(f"Destination interpreted as {destination_kind} path.")
     if destination_exists:
         notes.append("Destination exists; overwrite confirmation is required before apply.")
     return PlannedOp(
@@ -302,73 +324,74 @@ def _parse_two_path_intent(intent: str) -> tuple[str, str | None, str | None] | 
         dst_tokens = [token for token in rest[separator_idx + 1 :] if token.lower() not in PATH_FILLER_WORDS]
         src = src_tokens[0] if src_tokens else None
         dst = dst_tokens[0] if dst_tokens else None
+        _debug(f"parsed two-path intent action={action} src={src!r} dst={dst!r} mode=separator")
         return action, src, dst
 
     path_tokens = [token for token in rest if token.lower() not in PATH_FILLER_WORDS]
     if not path_tokens:
         return action, None, None
     if len(path_tokens) == 1:
+        _debug(f"parsed two-path intent action={action} src={path_tokens[0]!r} dst=None mode=single")
         return action, path_tokens[0], None
+    _debug(f"parsed two-path intent action={action} src={path_tokens[0]!r} dst={path_tokens[1]!r} mode=pair")
     return action, path_tokens[0], path_tokens[1]
 
 
 def plan_fs_intent(intent: str, cwd: Path | None = None, workspace_root: Path | None = None) -> FsPlan | None:
     base = (cwd or Path.cwd()).resolve()
-    normalized = re.sub(r"\bplease\b", "", intent.strip(), flags=re.IGNORECASE).strip()
+    normalized = intent.strip()
     lower = normalized.lower()
+    _debug(f"plan raw input={intent!r}")
 
     mkdir_pattern = re.compile(
         r"\b(?:make|create|mkdir)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory)?\s*(?:called|named)?\s*[\"']?(?P<dst>[^\"']+?)[\"']?\s*$",
         flags=re.IGNORECASE,
     )
-    copy_pattern = re.compile(
-        r"\bcopy\s+(?:file\s+)?(?:[\"'](?P<src_q>[^\"']+)[\"']|(?P<src>\S+))(?:\s+file)?\s+to\s+(?:[\"'](?P<dst_q>[^\"']+)[\"']|(?P<dst>\S+))\s*$",
-        flags=re.IGNORECASE,
-    )
-    move_pattern = re.compile(
-        r"\bmove\s+(?:file\s+)?(?:[\"'](?P<src_q>[^\"']+)[\"']|(?P<src>\S+))(?:\s+file)?\s+to\s+(?:[\"'](?P<dst_q>[^\"']+)[\"']|(?P<dst>\S+))\s*$",
-        flags=re.IGNORECASE,
-    )
-    rename_pattern = re.compile(
-        r"\brename\s+(?:file\s+)?(?:[\"'](?P<src_q>[^\"']+)[\"']|(?P<src>\S+))(?:\s+file)?\s+to\s+(?:[\"'](?P<dst_q>[^\"']+)[\"']|(?P<dst>\S+))\s*$",
-        flags=re.IGNORECASE,
-    )
-
     ops: list[PlannedOp] = []
     warnings: list[str] = []
 
     try:
-        if "copy " in lower:
-            parsed = _extract_two_paths(normalized, copy_pattern)
-            if parsed:
-                src, dst = parsed
-            else:
-                token_parsed = _parse_two_path_intent(normalized)
-                if token_parsed is None or token_parsed[0] != "copy":
-                    return None
-                _, src, dst = token_parsed
-                if not src or not dst:
-                    return None
+        parsed_two_path = _parse_two_path_intent(normalized)
+        if parsed_two_path and parsed_two_path[0] == "copy":
+            _, src, dst = parsed_two_path
+            if not src or not dst:
+                return None
+            _debug(f"parsed fs action=copy src={src!r} dst={dst!r}")
             resolved_dst = _resolve_in_scope(dst, base, workspace_root=workspace_root)
             if resolved_dst.warning:
                 warnings.append(resolved_dst.warning)
             else:
                 assert resolved_dst.path is not None
-                if not resolved_dst.path.parent.exists():
+                src_path = _validate_file_source(src, base, workspace_root=workspace_root)
+                dst_path, _, _, destination_kind = _validate_destination(
+                    dst,
+                    base,
+                    src_path=src_path,
+                    op_id="op1",
+                    allow_missing_parent=True,
+                    allow_existing=True,
+                    workspace_root=workspace_root,
+                )
+                _debug(
+                    f"normalized src={_as_display_path(src_path, base)!r} dst={_as_display_path(dst_path, base)!r} "
+                    f"destination_kind={destination_kind}"
+                )
+                if not dst_path.parent.exists():
                     ops.append(
                         PlannedOp(
                             op_id="op1",
                             action="mkdir",
                             src=None,
-                            dst=_as_display_path(resolved_dst.path.parent, base),
+                            dst=_as_display_path(dst_path.parent, base),
                             notes=["Destination parent does not exist and will be created first."],
                             risk="low",
                         )
                     )
+                    _debug(f"parent directory missing; planned mkdir for {_as_display_path(dst_path.parent, base)!r}")
                 ops.append(
                     plan_copy_file(
                         src=src,
-                        dst=dst,
+                        dst=_as_display_path(dst_path, base),
                         cwd=base,
                         op_id=f"op{len(ops) + 1}",
                         allow_missing_parent=True,
@@ -376,37 +399,46 @@ def plan_fs_intent(intent: str, cwd: Path | None = None, workspace_root: Path | 
                         workspace_root=workspace_root,
                     )
                 )
-        elif "move " in lower:
-            parsed = _extract_two_paths(normalized, move_pattern)
-            if parsed:
-                src, dst = parsed
-            else:
-                token_parsed = _parse_two_path_intent(normalized)
-                if token_parsed is None or token_parsed[0] != "move":
-                    return None
-                _, src, dst = token_parsed
-                if not src or not dst:
-                    return None
+        elif parsed_two_path and parsed_two_path[0] == "move":
+            _, src, dst = parsed_two_path
+            if not src or not dst:
+                return None
+            _debug(f"parsed fs action=move src={src!r} dst={dst!r}")
             resolved_dst = _resolve_in_scope(dst, base, workspace_root=workspace_root)
             if resolved_dst.warning:
                 warnings.append(resolved_dst.warning)
             else:
                 assert resolved_dst.path is not None
-                if not resolved_dst.path.parent.exists():
+                src_path = _validate_file_source(src, base, workspace_root=workspace_root)
+                dst_path, _, _, destination_kind = _validate_destination(
+                    dst,
+                    base,
+                    src_path=src_path,
+                    op_id="op1",
+                    allow_missing_parent=True,
+                    allow_existing=True,
+                    workspace_root=workspace_root,
+                )
+                _debug(
+                    f"normalized src={_as_display_path(src_path, base)!r} dst={_as_display_path(dst_path, base)!r} "
+                    f"destination_kind={destination_kind}"
+                )
+                if not dst_path.parent.exists():
                     ops.append(
                         PlannedOp(
                             op_id="op1",
                             action="mkdir",
                             src=None,
-                            dst=_as_display_path(resolved_dst.path.parent, base),
+                            dst=_as_display_path(dst_path.parent, base),
                             notes=["Destination parent does not exist and will be created first."],
                             risk="low",
                         )
                     )
+                    _debug(f"parent directory missing; planned mkdir for {_as_display_path(dst_path.parent, base)!r}")
                 ops.append(
                     plan_move_file(
                         src=src,
-                        dst=dst,
+                        dst=_as_display_path(dst_path, base),
                         cwd=base,
                         op_id=f"op{len(ops) + 1}",
                         allow_missing_parent=True,
@@ -414,50 +446,55 @@ def plan_fs_intent(intent: str, cwd: Path | None = None, workspace_root: Path | 
                         workspace_root=workspace_root,
                     )
                 )
-        elif "rename " in lower:
-            parsed = _extract_two_paths(normalized, rename_pattern)
-            if parsed:
-                src, dst = parsed
-            else:
-                token_parsed = _parse_two_path_intent(normalized)
-                if token_parsed is None or token_parsed[0] != "rename":
-                    return None
-                _, src, dst = token_parsed
-                if not src or not dst:
-                    return None
-            resolved_dst = _resolve_in_scope(dst, base, workspace_root=workspace_root)
-            if resolved_dst.warning and "/" in dst:
+        elif parsed_two_path and parsed_two_path[0] == "rename":
+            _, src, dst = parsed_two_path
+            if not src or not dst:
+                return None
+            _debug(f"parsed fs action=rename src={src!r} dst={dst!r}")
+            src_path = _validate_file_source(src, base, workspace_root=workspace_root)
+            rename_dst_hint = dst
+            if "/" not in dst and "\\" not in dst and not dst.endswith(("/", "\\")):
+                rename_dst_hint = str(Path(src).parent / dst)
+            resolved_dst = _resolve_in_scope(rename_dst_hint, base, workspace_root=workspace_root)
+            if resolved_dst.warning:
                 warnings.append(resolved_dst.warning)
             else:
-                src_resolved = _resolve_in_scope(src, base, workspace_root=workspace_root)
-                if src_resolved.warning:
-                    warnings.append(src_resolved.warning)
-                else:
-                    assert src_resolved.path is not None
-                    if "/" in dst or "\\" in dst:
-                        target_parent = _resolve_in_scope(dst, base, workspace_root=workspace_root).path
-                        if target_parent is not None and not target_parent.parent.exists():
-                            ops.append(
-                                PlannedOp(
-                                    op_id="op1",
-                                    action="mkdir",
-                                    src=None,
-                                    dst=_as_display_path(target_parent.parent, base),
-                                    notes=["Destination parent does not exist and will be created first."],
-                                    risk="low",
-                                )
-                            )
+                dst_path, _, _, destination_kind = _validate_destination(
+                    rename_dst_hint,
+                    base,
+                    src_path=src_path,
+                    op_id="op1",
+                    allow_missing_parent=True,
+                    allow_existing=True,
+                    workspace_root=workspace_root,
+                )
+                _debug(
+                    f"normalized src={_as_display_path(src_path, base)!r} dst={_as_display_path(dst_path, base)!r} "
+                    f"destination_kind={destination_kind}"
+                )
+                if not dst_path.parent.exists():
                     ops.append(
-                        plan_rename_file(
-                            src=src,
-                            new_name_or_dst=dst,
-                            cwd=base,
-                            op_id=f"op{len(ops) + 1}",
-                            allow_missing_parent=True,
-                            allow_existing=True,
-                            workspace_root=workspace_root,
+                        PlannedOp(
+                            op_id="op1",
+                            action="mkdir",
+                            src=None,
+                            dst=_as_display_path(dst_path.parent, base),
+                            notes=["Destination parent does not exist and will be created first."],
+                            risk="low",
                         )
                     )
+                    _debug(f"parent directory missing; planned mkdir for {_as_display_path(dst_path.parent, base)!r}")
+                ops.append(
+                    plan_rename_file(
+                        src=src,
+                        new_name_or_dst=_as_display_path(dst_path, base),
+                        cwd=base,
+                        op_id=f"op{len(ops) + 1}",
+                        allow_missing_parent=True,
+                        allow_existing=True,
+                        workspace_root=workspace_root,
+                    )
+                )
         elif any(token in lower for token in ("make ", "create ", "mkdir ")):
             match = mkdir_pattern.search(normalized)
             if not match:
@@ -473,6 +510,8 @@ def plan_fs_intent(intent: str, cwd: Path | None = None, workspace_root: Path | 
         warnings.append(f"Plan has {len(ops)} operations, which exceeds the maximum of {MAX_OPS}. Confirmation is required to continue.")
 
     deduped_warnings = list(dict.fromkeys(warnings))
+    if deduped_warnings:
+        _debug(f"plan warnings={deduped_warnings!r}")
     return FsPlan(
         goal=intent,
         cwd=str(base),
@@ -551,8 +590,14 @@ def apply_fs_plan(
                     raise ValueError(dst.warning or "Invalid destination path.")
                 if not src.path.is_file():
                     raise ValueError(f"Source must be a file: {op.src}")
+                if not dst.path.parent.exists():
+                    raise ValueError(f"Destination parent does not exist: {_as_display_path(dst.path.parent, base)}")
                 if dst.path.exists() and not allow_overwrite:
                     raise ValueError(f"Destination already exists: {op.dst}")
+                _debug(
+                    f"apply action=copy src={_as_display_path(src.path, base)!r} "
+                    f"dst={_as_display_path(dst.path, base)!r} destination_kind=file"
+                )
                 shutil.copy2(src.path, dst.path)
                 results.append(
                     FsApplyItem(
@@ -573,9 +618,26 @@ def apply_fs_plan(
                     raise ValueError(dst.warning or "Invalid destination path.")
                 if not src.path.is_file():
                     raise ValueError(f"Source must be a file: {op.src}")
+                if not dst.path.parent.exists():
+                    raise ValueError(f"Destination parent does not exist: {_as_display_path(dst.path.parent, base)}")
                 if dst.path.exists() and not allow_overwrite:
                     raise ValueError(f"Destination already exists: {op.dst}")
-                src.path.replace(dst.path)
+                if dst.path.exists() and allow_overwrite:
+                    if dst.path.is_dir():
+                        raise ValueError(f"Destination already exists and is a directory: {op.dst}")
+                    dst.path.unlink()
+                if op.action == "move":
+                    _debug(
+                        f"apply action=move src={_as_display_path(src.path, base)!r} "
+                        f"dst={_as_display_path(dst.path, base)!r} destination_kind=file"
+                    )
+                    shutil.move(str(src.path), str(dst.path))
+                else:
+                    _debug(
+                        f"apply action=rename src={_as_display_path(src.path, base)!r} "
+                        f"dst={_as_display_path(dst.path, base)!r} destination_kind=file"
+                    )
+                    src.path.rename(dst.path)
                 verb = "Moved file" if op.action == "move" else "Renamed file"
                 results.append(
                     FsApplyItem(
