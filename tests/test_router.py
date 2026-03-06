@@ -18,6 +18,7 @@ from snappy_putty.router import classify_input
         ("explain git worktree list", "explain"),
         ("explain copy README.md", "explain"),
         ("copy README.md", "fs_mutation"),
+        ("copy README.md ../../README2.md", "fs_mutation"),
         ("copy README.md file", "fs_mutation"),
         ("make a folder called sandbox", "fs_mutation"),
         ("create folder named docs", "fs_mutation"),

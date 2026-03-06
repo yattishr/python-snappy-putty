@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Callable, Optional
 
 import typer
@@ -9,7 +10,7 @@ from rich.panel import Panel
 
 from snappy_putty.agent import AgentRunResult, plan_with_agent
 from snappy_putty.context import collect_context
-from snappy_putty.fs_ops import apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
+from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.render import (
     render_agent_output,
     render_agent_parse_error,
@@ -66,17 +67,19 @@ def print_repl_cheatsheet() -> None:
 
 
 def run_shell() -> None:
+    workspace_root = Path.cwd().resolve()
     session = None
-    try:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.history import FileHistory
+    if sys.stdin.isatty():
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.history import FileHistory
 
-        history_file = Path.home() / ".snappy_putty_history"
-        history_file.parent.mkdir(parents=True, exist_ok=True)
-        history_file.touch(exist_ok=True)
-        session = PromptSession(history=FileHistory(str(history_file)))
-    except Exception:
-        session = None
+            history_file = Path.home() / ".snappy_putty_history"
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            history_file.touch(exist_ok=True)
+            session = PromptSession(history=FileHistory(str(history_file)))
+        except Exception:
+            session = None
 
     print_repl_cheatsheet()
 
@@ -114,7 +117,11 @@ def run_shell() -> None:
             continue
 
         if route == ROUTE_FS_MUTATION:
-            _handle_fs_intent(intent=decision.payload.get("intent", text), prompt_reader=_prompt_reader(session))
+            _handle_fs_intent(
+                intent=decision.payload.get("intent", text),
+                prompt_reader=_prompt_reader(session),
+                workspace_root=workspace_root,
+            )
             continue
 
         if route not in {ROUTE_SAFE_INSPECT, ROUTE_ASK}:
@@ -162,7 +169,11 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
         handle_explain(command)
         return
     if route == ROUTE_FS_MUTATION:
-        _handle_fs_intent(intent=decision.payload.get("intent", intent), prompt_reader=lambda prompt: input(prompt))
+        _handle_fs_intent(
+            intent=decision.payload.get("intent", intent),
+            prompt_reader=lambda prompt: input(prompt),
+            workspace_root=Path.cwd().resolve(),
+        )
         return
     handle_ask(decision.payload.get("intent", intent))
 
@@ -215,8 +226,9 @@ def _prompt_reader(session) -> Callable[[str], str]:
     return lambda prompt: session.prompt(prompt)
 
 
-def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None) -> bool:
-    plan = plan_fs_intent(intent=intent, cwd=Path.cwd())
+def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, workspace_root: Path | None = None) -> bool:
+    root = (workspace_root or Path.cwd()).resolve()
+    plan = plan_fs_intent(intent=intent, cwd=Path.cwd(), workspace_root=root)
     if plan is None:
         partial = parse_incomplete_fs_intent(intent)
         if partial is not None:
@@ -233,7 +245,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None) -
             if not destination:
                 console.print(Panel.fit("Cancelled. No destination was provided.", title="Apply Cancelled", border_style="yellow"))
                 return True
-            plan = plan_fs_intent(intent=f"{action} {src} to {destination}", cwd=Path.cwd())
+            plan = plan_fs_intent(intent=f"{action} {src} to {destination}", cwd=Path.cwd(), workspace_root=root)
         elif looks_like_fs_mutation_intent(intent):
             console.print("Could not parse filesystem action. Try examples: copy A to B, move A to B, rename A to B, make a folder called X.")
             return True
@@ -252,6 +264,39 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None) -
         console.print("Skipping apply: confirmation input is unavailable.")
         return True
 
+    overwrite_needed = False
+    for op in plan.ops:
+        if op.action in {"copy", "move", "rename"} and op.dst:
+            destination = (Path.cwd() / op.dst).resolve()
+            if destination.exists():
+                overwrite_needed = True
+                break
+
+    if overwrite_needed:
+        try:
+            overwrite_confirmation = prompt_reader("Destination exists. Type OVERWRITE to replace, or anything else to cancel: ").strip()
+        except EOFError:
+            overwrite_confirmation = ""
+        except KeyboardInterrupt:
+            overwrite_confirmation = ""
+        if overwrite_confirmation != "OVERWRITE":
+            console.print(Panel.fit("Cancelled. Existing files were not overwritten.", title="Apply Cancelled", border_style="yellow"))
+            return True
+
+    excess_ops = len(plan.ops) > MAX_OPS
+    if excess_ops:
+        try:
+            limit_confirmation = prompt_reader(
+                f"Plan exceeds {MAX_OPS} operations. Type PROCEED to continue, or anything else to cancel: "
+            ).strip()
+        except EOFError:
+            limit_confirmation = ""
+        except KeyboardInterrupt:
+            limit_confirmation = ""
+        if limit_confirmation != "PROCEED":
+            console.print(Panel.fit("Cancelled. Large plan was not applied.", title="Apply Cancelled", border_style="yellow"))
+            return True
+
     try:
         confirmation = prompt_reader("Type YES to apply, or anything else to cancel: ").strip()
     except EOFError:
@@ -264,7 +309,13 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None) -
         return True
 
     with busy(get_status_message("fs"), console=console):
-        result = apply_fs_plan(plan=plan, cwd=Path.cwd())
+        result = apply_fs_plan(
+            plan=plan,
+            cwd=Path.cwd(),
+            workspace_root=root,
+            allow_overwrite=overwrite_needed,
+            allow_excess_ops=excess_ops,
+        )
     render_fs_apply_result(console=console, result=result)
     return True
 

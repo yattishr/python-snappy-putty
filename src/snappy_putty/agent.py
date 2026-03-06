@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from snappy_putty.context import ContextSnapshot
 from snappy_putty.fs_ops import list_dir
 from snappy_putty.models import AgentOutput, PlanStep, Snippet, SuggestedCommand
+from snappy_putty.security import sanitize_user_prompt
 from snappy_putty.safety import attach_risk_tags
 from snappy_putty.status import busy, get_status_message
 
@@ -448,29 +449,32 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
     if mode == "ask" and snapshot is None:
         raise ValueError("AskMode requires context snapshot.")
 
-    if mode == "ask" and _is_git_worktree_listing_request(user_text):
-        return _git_worktree_output(user_text=user_text, snapshot=snapshot)
+    sanitized_user_text = sanitize_user_prompt(user_text)
+    effective_text = sanitized_user_text
 
-    if mode == "ask" and _is_listing_request(user_text):
-        if _listing_request_is_ambiguous(user_text):
-            return _listing_followup_output(user_text)
+    if mode == "ask" and _is_git_worktree_listing_request(effective_text):
+        return _git_worktree_output(user_text=effective_text, snapshot=snapshot)
 
-        selected_path = _extract_requested_path(user_text) or "."
+    if mode == "ask" and _is_listing_request(effective_text):
+        if _listing_request_is_ambiguous(effective_text):
+            return _listing_followup_output(effective_text)
+
+        selected_path = _extract_requested_path(effective_text) or "."
         with busy(get_status_message("fs")):
             listing_text = list_dir(path=selected_path)
         return _listing_output(
-            user_text=user_text,
+            user_text=effective_text,
             target_path=selected_path,
             listing_text=listing_text,
-            requested_path=_extract_requested_path(user_text) is not None,
+            requested_path=_extract_requested_path(effective_text) is not None,
         )
 
-    if mode == "ask" and _is_google_cloud_deploy_request(user_text) and _looks_like_cli_project(snapshot):
-        output = _apply_safety(_cloud_deploy_cli_branch_output(user_text))
+    if mode == "ask" and _is_google_cloud_deploy_request(effective_text) and _looks_like_cli_project(snapshot):
+        output = _apply_safety(_cloud_deploy_cli_branch_output(effective_text))
         return AgentRunResult(output=output)
 
     try:
-        raw_text = asyncio.run(_run_with_sdk(mode=mode, user_text=user_text, snapshot=snapshot))
+        raw_text = asyncio.run(_run_with_sdk(mode=mode, user_text=effective_text, snapshot=snapshot))
         parsed = parse_agent_output(raw_text)
         return AgentRunResult(output=_apply_safety(parsed))
     except (ValidationError, ValueError) as err:
@@ -484,7 +488,7 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
             tools={},
             project_types=[],
         )
-        fallback = _apply_safety(_fallback_output(mode=mode, user_text=user_text, snapshot=fallback_snapshot))
+        fallback = _apply_safety(_fallback_output(mode=mode, user_text=effective_text, snapshot=fallback_snapshot))
         return AgentRunResult(output=fallback, raw_model_text=locals().get("raw_text"), parse_error=str(err))
     except Exception:
         fallback_snapshot = snapshot if snapshot is not None else ContextSnapshot(
@@ -497,5 +501,5 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
             tools={},
             project_types=[],
         )
-        fallback = _apply_safety(_fallback_output(mode=mode, user_text=user_text, snapshot=fallback_snapshot))
+        fallback = _apply_safety(_fallback_output(mode=mode, user_text=effective_text, snapshot=fallback_snapshot))
         return AgentRunResult(output=fallback)
