@@ -9,6 +9,9 @@ from snappy_putty.fs_ops import looks_like_fs_mutation_intent
 ROUTE_BUILTIN_HELP = "builtin_help"
 ROUTE_BUILTIN_DOCTOR = "builtin_doctor"
 ROUTE_BUILTIN_EXIT = "builtin_exit"
+ROUTE_BUILTIN_AFTER = "builtin_after"
+ROUTE_BUILTIN_STATUS = "builtin_status"
+ROUTE_BUILTIN_CANCEL = "builtin_cancel"
 ROUTE_EXPLAIN = "explain"
 ROUTE_FS_MUTATION = "fs_mutation"
 ROUTE_SAFE_INSPECT = "safe_inspect"
@@ -42,6 +45,12 @@ def classify_input(text: str) -> RouteDecision:
         return RouteDecision(route=ROUTE_BUILTIN_HELP, payload={"text": stripped})
     if lowered == "doctor":
         return RouteDecision(route=ROUTE_BUILTIN_DOCTOR, payload={"text": stripped})
+    if lowered == "after":
+        return RouteDecision(route=ROUTE_BUILTIN_AFTER, payload={"text": stripped})
+    if lowered == "status":
+        return RouteDecision(route=ROUTE_BUILTIN_STATUS, payload={"text": stripped})
+    if lowered == "cancel":
+        return RouteDecision(route=ROUTE_BUILTIN_CANCEL, payload={"text": stripped})
     if lowered in {"exit", "quit"}:
         return RouteDecision(route=ROUTE_BUILTIN_EXIT, payload={"text": stripped})
 

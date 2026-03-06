@@ -13,6 +13,9 @@ from snappy_putty.router import classify_input
     [
         ("help", "builtin_help"),
         ("doctor", "builtin_doctor"),
+        ("after", "builtin_after"),
+        ("status", "builtin_status"),
+        ("cancel", "builtin_cancel"),
         ("exit", "builtin_exit"),
         ("quit", "builtin_exit"),
         ("explain git worktree list", "explain"),

@@ -13,6 +13,15 @@
 - `builtin_exit`
   - For the exact `exit` or `quit` command.
   - Allowed behavior: exit REPL loop.
+- `builtin_after`
+  - For the exact `after` command.
+  - Allowed behavior: continue/restate next pending step in session.
+- `builtin_status`
+  - For the exact `status` command.
+  - Allowed behavior: show in-session goal/pending/route status.
+- `builtin_cancel`
+  - For the exact `cancel` command.
+  - Allowed behavior: clear pending session state.
 - `explain`
   - For inputs beginning with `explain` (for example `explain git worktree list`).
   - Allowed behavior: route to ExplainMode with parsed command payload.
@@ -28,7 +37,7 @@
 
 ## Precedence Order
 
-1. Built-ins: `help`, `doctor`, `exit`, `quit`
+1. Built-ins: `help`, `doctor`, `after`, `status`, `cancel`, `exit`, `quit`
 2. `explain <command>`
 3. Filesystem mutation intents
 4. Safe inspection intents
@@ -40,6 +49,9 @@
 - `doctor` -> `builtin_doctor`
 - `exit` -> `builtin_exit`
 - `quit` -> `builtin_exit`
+- `after` -> `builtin_after`
+- `status` -> `builtin_status`
+- `cancel` -> `builtin_cancel`
 - `explain git worktree list` -> `explain`
 - `copy README.md` -> `fs_mutation`
 - `copy README.md file` -> `fs_mutation`
