@@ -39,6 +39,14 @@ from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
 console = Console()
+RESERVED_CONTROL_ROUTES = {
+    ROUTE_BUILTIN_HELP,
+    ROUTE_BUILTIN_DOCTOR,
+    ROUTE_BUILTIN_STATUS,
+    ROUTE_BUILTIN_AFTER,
+    ROUTE_BUILTIN_CANCEL,
+    ROUTE_BUILTIN_EXIT,
+}
 
 
 def _debug_enabled() -> bool:
@@ -117,18 +125,19 @@ def run_shell() -> None:
         if not text:
             continue
 
-        if state.awaiting_confirmation and text.upper() in {"YES", "NO"}:
-            _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)
-            continue
-
-        if state.pending_question:
-            _consume_pending_question_answer(answer=text, state=state)
-            continue
-
         decision = classify_input(text)
         route = decision.route
         _debug(f"raw user input={text!r}")
         _debug(f"classified route={route}")
+
+        if state.awaiting_confirmation and text.upper() in {"YES", "NO"}:
+            _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)
+            continue
+
+        if state.pending_question and route not in RESERVED_CONTROL_ROUTES:
+            _consume_pending_question_answer(answer=text, state=state)
+            continue
+
         if route == ROUTE_BUILTIN_EXIT:
             break
         if route == ROUTE_BUILTIN_AFTER:
@@ -139,6 +148,9 @@ def run_shell() -> None:
             continue
         if route == ROUTE_BUILTIN_CANCEL:
             state.clear_pending()
+            state.current_goal = None
+            state.last_route = route
+            state.last_result = "Cancelled active task state."
             console.print("Cleared pending question/plan state.")
             continue
         if route == ROUTE_BUILTIN_HELP:
