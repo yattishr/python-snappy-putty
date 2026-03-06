@@ -386,7 +386,10 @@ def _git_worktree_output(user_text: str, snapshot: ContextSnapshot) -> AgentRunR
 
     output = AgentOutput(
         goal=user_text,
-        assumptions=[f"Current repo branch context: {snapshot.git_branch or 'unknown'}"],
+        assumptions=[
+            f"Current repo branch context: {snapshot.git_branch or 'unknown'}",
+            "This request should be run from a git repository context.",
+        ],
         question=None,
         plan=[
             PlanStep(step=1, action="Check repository worktrees", why="Gather current worktree topology."),

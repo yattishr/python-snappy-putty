@@ -18,6 +18,16 @@ from snappy_putty.render import (
     render_fs_apply_result,
     render_fs_plan,
 )
+from snappy_putty.router import (
+    ROUTE_ASK,
+    ROUTE_BUILTIN_DOCTOR,
+    ROUTE_BUILTIN_EXIT,
+    ROUTE_BUILTIN_HELP,
+    ROUTE_EXPLAIN,
+    ROUTE_FS_MUTATION,
+    ROUTE_SAFE_INSPECT,
+    classify_input,
+)
 from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
@@ -61,9 +71,11 @@ def run_shell() -> None:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
 
-        history_path = str(Path.home() / ".snappy_putty_history")
-        session = PromptSession(history=FileHistory(history_path))
-    except ImportError:
+        history_file = Path.home() / ".snappy_putty_history"
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        history_file.touch(exist_ok=True)
+        session = PromptSession(history=FileHistory(str(history_file)))
+    except Exception:
         session = None
 
     print_repl_cheatsheet()
@@ -82,24 +94,33 @@ def run_shell() -> None:
         text = line.strip()
         if not text:
             continue
-        if text in {"exit", "quit"}:
+
+        decision = classify_input(text)
+        route = decision.route
+        if route == ROUTE_BUILTIN_EXIT:
             break
-        if text == "help":
+        if route == ROUTE_BUILTIN_HELP:
             print_repl_cheatsheet()
             continue
-        if text == "doctor":
+        if route == ROUTE_BUILTIN_DOCTOR:
             doctor(verbose=False)
             continue
-        if text.startswith("explain"):
-            command = text[len("explain") :].strip()
+        if route == ROUTE_EXPLAIN:
+            command = decision.payload.get("command", "").strip()
             if not command:
                 console.print("Usage: explain <command>")
                 continue
             handle_explain(command=command)
             continue
-        if _handle_fs_intent(intent=text, prompt_reader=_prompt_reader(session)):
+
+        if route == ROUTE_FS_MUTATION:
+            _handle_fs_intent(intent=decision.payload.get("intent", text), prompt_reader=_prompt_reader(session))
             continue
-        result = handle_ask(intent=text)
+
+        if route not in {ROUTE_SAFE_INSPECT, ROUTE_ASK}:
+            continue
+
+        result = handle_ask(intent=decision.payload.get("intent", text))
         question = result.output.question.lower() if result.output.question else ""
         if "directory" in question and session is not None:
             followup = session.prompt("path> ").strip()
@@ -121,9 +142,29 @@ def main(ctx: typer.Context) -> None:
 @app.command()
 def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) -> None:
     """Generate suggestion-only plan for an intent."""
-    if _handle_fs_intent(intent=intent, prompt_reader=lambda prompt: input(prompt)):
+    decision = classify_input(intent)
+    route = decision.route
+
+    if route == ROUTE_BUILTIN_HELP:
+        print_repl_cheatsheet()
         return
-    handle_ask(intent)
+    if route == ROUTE_BUILTIN_DOCTOR:
+        doctor(verbose=False)
+        return
+    if route == ROUTE_BUILTIN_EXIT:
+        console.print("Use `snappy shell` for interactive exit/quit controls.")
+        return
+    if route == ROUTE_EXPLAIN:
+        command = decision.payload.get("command", "").strip()
+        if not command:
+            console.print("Usage: explain <command>")
+            return
+        handle_explain(command)
+        return
+    if route == ROUTE_FS_MUTATION:
+        _handle_fs_intent(intent=decision.payload.get("intent", intent), prompt_reader=lambda prompt: input(prompt))
+        return
+    handle_ask(decision.payload.get("intent", intent))
 
 
 def handle_ask(intent: str) -> AgentRunResult:
