@@ -50,7 +50,7 @@ def test_repl_after_status_cancel(tmp_path: Path) -> None:
     source.write_text("demo", encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
-        input="copy README.md README-copy.md\nstatus\nafter\ncancel\nafter\nexit\n",
+        input="copy README.md README-copy.md\nstatus\nafter\ncancel\nstatus\nafter\nexit\n",
         text=True,
         capture_output=True,
         cwd=tmp_path,
@@ -62,6 +62,8 @@ def test_repl_after_status_cancel(tmp_path: Path) -> None:
     assert "Awaiting confirmation: yes" in proc.stdout
     assert "Pending confirmation: type YES to continue or NO to cancel." in proc.stdout
     assert "Cleared pending question/plan state." in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Last cancelled goal: copy README.md README-copy.md" in proc.stdout
     assert "No active task." in proc.stdout
     assert not (tmp_path / "README-copy.md").exists()
 
@@ -80,10 +82,34 @@ def test_reserved_commands_not_consumed_as_pending_question_answers(tmp_path: Pa
     )
     assert proc.returncode == 0
     assert "Session Status" in proc.stdout
+    assert "Active goal: copy README.md" in proc.stdout
     assert "Pending question: destination path>" in proc.stdout
     assert "Cleared pending question/plan state." in proc.stdout
-    assert "Current goal: (none)" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
     assert "Pending question: (none)" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
     assert "Awaiting confirmation: no" in proc.stdout
+    assert "Last cancelled goal: copy README.md" in proc.stdout
     assert "copy README.md -> status" not in proc.stdout
+
+
+def test_repl_successful_fs_apply_moves_goal_to_last_completed(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nYES\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert (tmp_path / "README-copy.md").exists()
+    assert "Session Status" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending question: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Awaiting confirmation: no" in proc.stdout
+    assert "Last completed goal: copy README.md README-copy.md" in proc.stdout

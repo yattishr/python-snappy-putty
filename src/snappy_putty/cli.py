@@ -147,8 +147,10 @@ def run_shell() -> None:
             _handle_status(state)
             continue
         if route == ROUTE_BUILTIN_CANCEL:
+            if state.active_goal:
+                state.last_cancelled_goal = state.active_goal
             state.clear_pending()
-            state.current_goal = None
+            state.active_goal = None
             state.last_route = route
             state.last_result = "Cancelled active task state."
             console.print("Cleared pending question/plan state.")
@@ -165,7 +167,7 @@ def run_shell() -> None:
                 console.print("Usage: explain <command>")
                 continue
             result = handle_explain(command=command)
-            state.current_goal = command
+            state.active_goal = command
             state.last_route = route
             state.last_result = result.output.goal
             state.pending_plan = result.output.plan
@@ -187,7 +189,7 @@ def run_shell() -> None:
 
         current_intent = decision.payload.get("intent", text)
         result = handle_ask(intent=current_intent)
-        state.current_goal = current_intent
+        state.active_goal = current_intent
         state.last_route = route
         state.last_result = result.output.goal
         state.pending_plan = result.output.plan
@@ -386,6 +388,8 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
         )
     render_fs_apply_result(console=console, result=result)
     state.last_result = f"Applied {sum(1 for item in result.results if item.status == 'applied')} filesystem operation(s)."
+    state.last_completed_goal = state.active_goal
+    state.active_goal = None
     state.clear_pending()
 
 
@@ -400,12 +404,12 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         _handle_fs_intent_repl(intent=f"{action} {src} to {answer.strip()}", workspace_root=root, state=state)
         return
 
-    base_intent = str(question_context.get("base_intent") or state.current_goal or "").strip()
+    base_intent = str(question_context.get("base_intent") or state.active_goal or "").strip()
     state.pending_question = None
     state.pending_context = {}
     followup_intent = f"{base_intent} for {answer.strip()}" if base_intent else answer.strip()
     result = handle_ask(intent=followup_intent)
-    state.current_goal = followup_intent
+    state.active_goal = followup_intent
     state.last_route = ROUTE_ASK
     state.last_result = result.output.goal
     state.pending_plan = result.output.plan
@@ -439,7 +443,7 @@ def _handle_after(state: SessionState) -> None:
 
 
 def _handle_status(state: SessionState) -> None:
-    current_goal = state.current_goal or "(none)"
+    active_goal = state.active_goal or "(none)"
     last_route = state.last_route or "(none)"
     pending_question = state.pending_question or "(none)"
     if isinstance(state.pending_plan, FsPlan):
@@ -449,12 +453,16 @@ def _handle_status(state: SessionState) -> None:
     else:
         pending_plan = "(none)"
     awaiting = "yes" if state.awaiting_confirmation else "no"
+    last_completed_goal = state.last_completed_goal or "(none)"
+    last_cancelled_goal = state.last_cancelled_goal or "(none)"
     lines = [
-        f"Current goal: {current_goal}",
+        f"Active goal: {active_goal}",
         f"Last route: {last_route}",
         f"Pending question: {pending_question}",
         f"Pending plan: {pending_plan}",
         f"Awaiting confirmation: {awaiting}",
+        f"Last completed goal: {last_completed_goal}",
+        f"Last cancelled goal: {last_cancelled_goal}",
     ]
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
@@ -463,7 +471,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
     root = workspace_root.resolve()
     _debug(f"raw fs intent={intent!r}")
     plan = plan_fs_intent(intent=intent, cwd=Path.cwd(), workspace_root=root)
-    state.current_goal = intent
+    state.active_goal = intent
     state.last_route = ROUTE_FS_MUTATION
 
     if plan is None:
