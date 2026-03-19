@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class LifecycleState(str, Enum):
+    IDLE = "IDLE"
+    INTENT_RECEIVED = "INTENT_RECEIVED"
+    PLANNING = "PLANNING"
+    CLARIFICATION = "CLARIFICATION"
+    CONFIRMATION = "CONFIRMATION"
+    EXECUTING = "EXECUTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass
 class SessionState:
+    current_state: LifecycleState = LifecycleState.IDLE
     active_goal: str | None = None
     last_route: str | None = None
     last_result: str | None = None
@@ -14,6 +28,8 @@ class SessionState:
     awaiting_confirmation: bool = False
     last_completed_goal: str | None = None
     last_cancelled_goal: str | None = None
+    last_failed_goal: str | None = None
+    error_message: str | None = None
     pending_context: dict[str, Any] = field(default_factory=dict)
 
     def clear_pending(self) -> None:

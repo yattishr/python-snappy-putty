@@ -34,7 +34,7 @@ from snappy_putty.router import (
     ROUTE_SAFE_INSPECT,
     classify_input,
 )
-from snappy_putty.session import SessionState
+from snappy_putty.session import LifecycleState, SessionState
 from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
@@ -47,6 +47,84 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_CANCEL,
     ROUTE_BUILTIN_EXIT,
 }
+
+
+def _set_state(state: SessionState, lifecycle: LifecycleState) -> None:
+    state.current_state = lifecycle
+
+
+def _begin_goal(state: SessionState, *, goal: str, route: str) -> None:
+    state.active_goal = goal
+    state.last_route = route
+    state.error_message = None
+    _set_state(state, LifecycleState.INTENT_RECEIVED)
+
+
+def _enter_planning(state: SessionState) -> None:
+    _set_state(state, LifecycleState.PLANNING)
+
+
+def _record_clarification(state: SessionState, *, question: str, pending_context: dict[str, object]) -> None:
+    state.pending_question = question
+    state.pending_plan = None
+    state.awaiting_confirmation = False
+    state.pending_context = pending_context
+    _set_state(state, LifecycleState.CLARIFICATION)
+
+
+def _record_agent_planning_result(
+    state: SessionState,
+    *,
+    route: str,
+    goal: str,
+    result: AgentRunResult,
+    pending_context: dict[str, object] | None = None,
+) -> None:
+    _begin_goal(state, goal=goal, route=route)
+    _enter_planning(state)
+    state.last_result = result.output.goal
+    state.pending_plan = result.output.plan
+    state.pending_question = result.output.question
+    state.awaiting_confirmation = False
+    state.pending_context = dict(pending_context or {})
+    if result.output.question:
+        _set_state(state, LifecycleState.CLARIFICATION)
+
+
+def _finish_terminal_state(state: SessionState) -> None:
+    state.active_goal = None
+    state.clear_pending()
+    _set_state(state, LifecycleState.IDLE)
+
+
+def _cancel_active_goal(state: SessionState, *, message: str) -> None:
+    goal = state.active_goal
+    _set_state(state, LifecycleState.CANCELLED)
+    if goal:
+        state.last_cancelled_goal = goal
+    state.last_result = message
+    state.error_message = None
+    _finish_terminal_state(state)
+
+
+def _fail_active_goal(state: SessionState, *, message: str) -> None:
+    goal = state.active_goal
+    _set_state(state, LifecycleState.FAILED)
+    if goal:
+        state.last_failed_goal = goal
+    state.last_result = message
+    state.error_message = message
+    _finish_terminal_state(state)
+
+
+def _complete_active_goal(state: SessionState, *, message: str) -> None:
+    goal = state.active_goal
+    _set_state(state, LifecycleState.COMPLETED)
+    if goal:
+        state.last_completed_goal = goal
+    state.last_result = message
+    state.error_message = None
+    _finish_terminal_state(state)
 
 
 def _debug_enabled() -> bool:
@@ -147,12 +225,8 @@ def run_shell() -> None:
             _handle_status(state)
             continue
         if route == ROUTE_BUILTIN_CANCEL:
-            if state.active_goal:
-                state.last_cancelled_goal = state.active_goal
-            state.clear_pending()
-            state.active_goal = None
             state.last_route = route
-            state.last_result = "Cancelled active task state."
+            _cancel_active_goal(state, message="Cancelled active task state.")
             console.print("Cleared pending question/plan state.")
             continue
         if route == ROUTE_BUILTIN_HELP:
@@ -167,13 +241,8 @@ def run_shell() -> None:
                 console.print("Usage: explain <command>")
                 continue
             result = handle_explain(command=command)
-            state.active_goal = command
-            state.last_route = route
-            state.last_result = result.output.goal
-            state.pending_plan = result.output.plan
-            state.pending_question = result.output.question
-            state.awaiting_confirmation = False
-            state.pending_context = {"type": "ask_followup", "base_intent": command} if result.output.question else {}
+            pending_context = {"type": "ask_followup", "base_intent": command} if result.output.question else {}
+            _record_agent_planning_result(state, route=route, goal=command, result=result, pending_context=pending_context)
             continue
 
         if route == ROUTE_FS_MUTATION:
@@ -189,13 +258,8 @@ def run_shell() -> None:
 
         current_intent = decision.payload.get("intent", text)
         result = handle_ask(intent=current_intent)
-        state.active_goal = current_intent
-        state.last_route = route
-        state.last_result = result.output.goal
-        state.pending_plan = result.output.plan
-        state.pending_question = result.output.question
-        state.awaiting_confirmation = False
-        state.pending_context = {"type": "ask_followup", "base_intent": current_intent} if result.output.question else {}
+        pending_context = {"type": "ask_followup", "base_intent": current_intent} if result.output.question else {}
+        _record_agent_planning_result(state, route=route, goal=current_intent, result=result, pending_context=pending_context)
 
 
 @app.callback(invoke_without_command=True)
@@ -301,6 +365,7 @@ def _set_fs_confirmation_state(
     excess_ops: bool,
 ) -> None:
     state.pending_plan = plan
+    state.pending_question = None
     state.awaiting_confirmation = True
     state.pending_context = {
         "type": "fs_confirmation",
@@ -310,6 +375,7 @@ def _set_fs_confirmation_state(
         "allow_excess_ops": allow_excess_ops,
         "excess_ops": excess_ops,
     }
+    _set_state(state, LifecycleState.CONFIRMATION)
 
 
 def _consume_confirmation_response(response: str, state: SessionState, workspace_root: Path) -> None:
@@ -317,19 +383,16 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
     if value not in {"YES", "NO"}:
         return
     if value == "NO":
-        state.clear_pending()
-        state.last_result = "Cancelled pending action."
+        _cancel_active_goal(state, message="Cancelled pending action.")
         console.print(Panel.fit("Cancelled. No pending action was applied.", title="Apply Cancelled", border_style="yellow"))
         return
 
     context = state.pending_context
     if context.get("type") != "fs_confirmation":
-        state.clear_pending()
-        state.last_result = "Confirmation received, but no actionable pending state remained."
+        _fail_active_goal(state, message="Confirmation received, but no actionable pending state remained.")
         return
     if not isinstance(state.pending_plan, FsPlan):
-        state.clear_pending()
-        state.last_result = "Confirmation received, but no plan was available."
+        _fail_active_goal(state, message="Confirmation received, but no plan was available.")
         return
 
     stage = str(context.get("stage", "apply"))
@@ -378,6 +441,7 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
         console.print("Type YES to apply, or NO to cancel.")
         return
 
+    _set_state(state, LifecycleState.EXECUTING)
     with busy(get_status_message("fs"), console=console):
         result = apply_fs_plan(
             plan=state.pending_plan,
@@ -387,10 +451,15 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             allow_excess_ops=allow_excess_ops,
         )
     render_fs_apply_result(console=console, result=result)
-    state.last_result = f"Applied {sum(1 for item in result.results if item.status == 'applied')} filesystem operation(s)."
-    state.last_completed_goal = state.active_goal
-    state.active_goal = None
-    state.clear_pending()
+    applied_count = sum(1 for item in result.results if item.status == "applied")
+    failed_messages = [item.message for item in result.results if item.status == "failed" and item.message]
+    message = f"Applied {applied_count} filesystem operation(s)."
+    if any(item.status == "failed" for item in result.results):
+        if failed_messages:
+            message = f"{message} Failure: {failed_messages[0]}"
+        _fail_active_goal(state, message=message)
+        return
+    _complete_active_goal(state, message=message)
 
 
 def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
@@ -401,6 +470,7 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         root = Path(str(question_context.get("workspace_root", Path.cwd()))).resolve()
         state.pending_question = None
         state.pending_context = {}
+        _enter_planning(state)
         _handle_fs_intent_repl(intent=f"{action} {src} to {answer.strip()}", workspace_root=root, state=state)
         return
 
@@ -408,15 +478,16 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
     state.pending_question = None
     state.pending_context = {}
     followup_intent = f"{base_intent} for {answer.strip()}" if base_intent else answer.strip()
+    _begin_goal(state, goal=followup_intent, route=ROUTE_ASK)
+    _enter_planning(state)
     result = handle_ask(intent=followup_intent)
-    state.active_goal = followup_intent
-    state.last_route = ROUTE_ASK
     state.last_result = result.output.goal
     state.pending_plan = result.output.plan
     state.pending_question = result.output.question
     state.awaiting_confirmation = False
     if result.output.question:
         state.pending_context = {"type": "ask_followup", "base_intent": base_intent or followup_intent}
+        _set_state(state, LifecycleState.CLARIFICATION)
     else:
         state.pending_context = {}
 
@@ -443,6 +514,7 @@ def _handle_after(state: SessionState) -> None:
 
 
 def _handle_status(state: SessionState) -> None:
+    current_state = state.current_state.value
     active_goal = state.active_goal or "(none)"
     last_route = state.last_route or "(none)"
     pending_question = state.pending_question or "(none)"
@@ -455,7 +527,10 @@ def _handle_status(state: SessionState) -> None:
     awaiting = "yes" if state.awaiting_confirmation else "no"
     last_completed_goal = state.last_completed_goal or "(none)"
     last_cancelled_goal = state.last_cancelled_goal or "(none)"
+    last_failed_goal = state.last_failed_goal or "(none)"
+    error_message = state.error_message or "(none)"
     lines = [
+        f"Current state: {current_state}",
         f"Active goal: {active_goal}",
         f"Last route: {last_route}",
         f"Pending question: {pending_question}",
@@ -463,6 +538,8 @@ def _handle_status(state: SessionState) -> None:
         f"Awaiting confirmation: {awaiting}",
         f"Last completed goal: {last_completed_goal}",
         f"Last cancelled goal: {last_cancelled_goal}",
+        f"Last failed goal: {last_failed_goal}",
+        f"Error message: {error_message}",
     ]
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
@@ -470,24 +547,25 @@ def _handle_status(state: SessionState) -> None:
 def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionState) -> bool:
     root = workspace_root.resolve()
     _debug(f"raw fs intent={intent!r}")
+    _begin_goal(state, goal=intent, route=ROUTE_FS_MUTATION)
+    _enter_planning(state)
     plan = plan_fs_intent(intent=intent, cwd=Path.cwd(), workspace_root=root)
-    state.active_goal = intent
-    state.last_route = ROUTE_FS_MUTATION
 
     if plan is None:
         partial = parse_incomplete_fs_intent(intent)
         if partial is not None:
             action, src = partial
-            state.pending_question = "destination path>"
-            state.pending_plan = None
-            state.awaiting_confirmation = False
-            state.pending_context = {"type": "fs_destination", "action": action, "src": src, "workspace_root": str(root)}
+            _record_clarification(
+                state,
+                question="destination path>",
+                pending_context={"type": "fs_destination", "action": action, "src": src, "workspace_root": str(root)},
+            )
             state.last_result = "Awaiting destination path."
             console.print("destination path>")
             return True
         if looks_like_fs_mutation_intent(intent):
             console.print("Could not parse filesystem action. Try examples: copy A to B, move A to B, rename A to B, make a folder called X.")
-            state.last_result = "Failed to parse filesystem action."
+            _fail_active_goal(state, message="Failed to parse filesystem action.")
             return True
         return False
 

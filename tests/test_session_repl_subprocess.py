@@ -59,9 +59,11 @@ def test_repl_after_status_cancel(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0
     assert "Session Status" in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
     assert "Awaiting confirmation: yes" in proc.stdout
     assert "Pending confirmation: type YES to continue or NO to cancel." in proc.stdout
     assert "Cleared pending question/plan state." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
     assert "Active goal: (none)" in proc.stdout
     assert "Last cancelled goal: copy README.md README-copy.md" in proc.stdout
     assert "No active task." in proc.stdout
@@ -82,6 +84,7 @@ def test_reserved_commands_not_consumed_as_pending_question_answers(tmp_path: Pa
     )
     assert proc.returncode == 0
     assert "Session Status" in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
     assert "Active goal: copy README.md" in proc.stdout
     assert "Pending question: destination path>" in proc.stdout
     assert "Cleared pending question/plan state." in proc.stdout
@@ -108,6 +111,7 @@ def test_repl_successful_fs_apply_moves_goal_to_last_completed(tmp_path: Path) -
     assert proc.returncode == 0
     assert (tmp_path / "README-copy.md").exists()
     assert "Session Status" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
     assert "Active goal: (none)" in proc.stdout
     assert "Pending question: (none)" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
