@@ -13,6 +13,7 @@ from snappy_putty.agent import AgentRunResult, plan_with_agent
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
+from snappy_putty.git_read import execute_git_read, parse_git_read_intent
 from snappy_putty.render import (
     render_agent_output,
     render_agent_parse_error,
@@ -20,6 +21,7 @@ from snappy_putty.render import (
     render_doctor_report,
     render_fs_apply_result,
     render_fs_plan,
+    render_git_read,
 )
 from snappy_putty.router import (
     ROUTE_ASK,
@@ -31,6 +33,7 @@ from snappy_putty.router import (
     ROUTE_BUILTIN_STATUS,
     ROUTE_EXPLAIN,
     ROUTE_FS_MUTATION,
+    ROUTE_GIT_READ,
     ROUTE_SAFE_INSPECT,
     classify_input,
 )
@@ -47,6 +50,24 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_CANCEL,
     ROUTE_BUILTIN_EXIT,
 }
+
+
+def _should_consume_pending_question(*, text: str, route: str, state: SessionState) -> bool:
+    if not state.pending_question:
+        return False
+    if route in RESERVED_CONTROL_ROUTES:
+        return False
+
+    question_context = dict(state.pending_context)
+    context_type = question_context.get("type")
+
+    if context_type == "fs_destination":
+        return route == ROUTE_ASK
+
+    if context_type == "ask_followup":
+        return route == ROUTE_ASK
+
+    return True
 
 
 def _set_state(state: SessionState, lifecycle: LifecycleState) -> None:
@@ -212,7 +233,7 @@ def run_shell() -> None:
             _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)
             continue
 
-        if state.pending_question and route not in RESERVED_CONTROL_ROUTES:
+        if _should_consume_pending_question(text=text, route=route, state=state):
             _consume_pending_question_answer(answer=text, state=state)
             continue
 
@@ -247,6 +268,14 @@ def run_shell() -> None:
 
         if route == ROUTE_FS_MUTATION:
             _handle_fs_intent_repl(
+                intent=decision.payload.get("intent", text),
+                workspace_root=workspace_root,
+                state=state,
+            )
+            continue
+
+        if route == ROUTE_GIT_READ:
+            _handle_git_read_repl(
                 intent=decision.payload.get("intent", text),
                 workspace_root=workspace_root,
                 state=state,
@@ -308,6 +337,9 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
             prompt_reader=lambda prompt: input(prompt),
             workspace_root=Path.cwd().resolve(),
         )
+        return
+    if route == ROUTE_GIT_READ:
+        _handle_git_read(intent=decision.payload.get("intent", intent), workspace_root=Path.cwd().resolve())
         return
     handle_ask(decision.payload.get("intent", intent))
 
@@ -544,6 +576,26 @@ def _handle_status(state: SessionState) -> None:
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
 
+def _handle_git_read_repl(intent: str, workspace_root: Path, state: SessionState) -> bool:
+    git_intent = parse_git_read_intent(intent)
+    _begin_goal(state, goal=intent, route=ROUTE_GIT_READ)
+    _enter_planning(state)
+    if git_intent is None:
+        _fail_active_goal(state, message="Could not map the Git request to a supported read-only action.")
+        render_git_read(console=console, title="Git Read Failed", content="Supported Git reads: status, recent commits, current branch, branches, remotes, diff summary, and show commit <sha>.", ok=False)
+        return True
+
+    _set_state(state, LifecycleState.EXECUTING)
+    with busy(get_status_message("ask"), console=console):
+        result = execute_git_read(git_intent, workspace_root.resolve())
+    render_git_read(console=console, title=result.title, content=result.body, ok=result.ok)
+    if result.ok:
+        _complete_active_goal(state, message=result.summary)
+    else:
+        _fail_active_goal(state, message=result.error_message or result.summary)
+    return True
+
+
 def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionState) -> bool:
     root = workspace_root.resolve()
     _debug(f"raw fs intent={intent!r}")
@@ -633,6 +685,16 @@ def _prompt_reader(session) -> Callable[[str], str]:
     if session is None:
         return lambda prompt: input(prompt)
     return lambda prompt: session.prompt(prompt)
+
+
+def _handle_git_read(intent: str, workspace_root: Path | None = None) -> bool:
+    git_intent = parse_git_read_intent(intent)
+    if git_intent is None:
+        return False
+    with busy(get_status_message("ask"), console=console):
+        result = execute_git_read(git_intent, (workspace_root or Path.cwd()).resolve())
+    render_git_read(console=console, title=result.title, content=result.body, ok=result.ok)
+    return True
 
 
 def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, workspace_root: Path | None = None) -> bool:

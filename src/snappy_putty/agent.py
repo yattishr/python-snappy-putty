@@ -144,13 +144,22 @@ def _is_listing_request(text: str) -> bool:
 
 
 def _extract_requested_path(text: str) -> str | None:
+    lowered = text.lower()
+    if re.search(r"\b(?:the\s+)?(?:current|working)\s+(?:directory|folder)\b", lowered):
+        return "."
+    if re.search(r"\b(?:cwd|current dir|current folder|here)\b", lowered):
+        return "."
+
     quoted = re.search(r"[\"']([^\"']+)[\"']", text)
     if quoted:
         return quoted.group(1).strip()
 
     marker = re.search(r"\b(?:for|in|under|of)\s+([./~\w-][\w./~-]*)\b", text, flags=re.IGNORECASE)
     if marker:
-        return marker.group(1).strip()
+        candidate = marker.group(1).strip()
+        if candidate.lower() in {"the", "a", "an", "my", "this", "that"}:
+            return None
+        return candidate
     return None
 
 

@@ -30,6 +30,11 @@ def render_directory_listing(console: Console, content: str) -> None:
     console.print(Panel(content, title="Directory Listing", border_style="bright_green"))
 
 
+def render_git_read(console: Console, *, title: str, content: str, ok: bool = True) -> None:
+    border = "bright_blue" if ok else "red"
+    console.print(Panel(content, title=title, border_style=border))
+
+
 def render_dir_listing(console: Console, listing_text: str) -> None:
     render_directory_listing(console=console, content=listing_text)
 

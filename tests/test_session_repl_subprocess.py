@@ -3,6 +3,12 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from snappy_putty.session import SessionState
+
 
 def _repl_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -117,3 +123,33 @@ def test_repl_successful_fs_apply_moves_goal_to_last_completed(tmp_path: Path) -
     assert "Pending plan: (none)" in proc.stdout
     assert "Awaiting confirmation: no" in proc.stdout
     assert "Last completed goal: copy README.md README-copy.md" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("route", "expected"),
+    [
+        ("ask", True),
+        ("safe_inspect", False),
+        ("git_read", False),
+        ("fs_mutation", False),
+    ],
+)
+def test_ask_followup_only_consumes_plain_ask_responses(route: str, expected: bool) -> None:
+    from snappy_putty import cli
+
+    state = SessionState(
+        pending_question="Which target do you mean?",
+        pending_context={"type": "ask_followup", "base_intent": "git push"},
+    )
+
+    assert cli._should_consume_pending_question(
+        text="give me a file listing for the current directory",
+        route=route,
+        state=state,
+    ) is expected
+
+
+def test_current_directory_listing_request_resolves_to_cwd() -> None:
+    from snappy_putty.agent import _extract_requested_path
+
+    assert _extract_requested_path("give me a file listing for the current directory") == "."

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import re
 
 from snappy_putty.fs_ops import looks_like_fs_mutation_intent
+from snappy_putty.git_read import parse_git_read_intent
 
 
 ROUTE_BUILTIN_HELP = "builtin_help"
@@ -14,6 +15,7 @@ ROUTE_BUILTIN_STATUS = "builtin_status"
 ROUTE_BUILTIN_CANCEL = "builtin_cancel"
 ROUTE_EXPLAIN = "explain"
 ROUTE_FS_MUTATION = "fs_mutation"
+ROUTE_GIT_READ = "git_read"
 ROUTE_SAFE_INSPECT = "safe_inspect"
 ROUTE_ASK = "ask"
 
@@ -61,6 +63,15 @@ def classify_input(text: str) -> RouteDecision:
 
     if looks_like_fs_mutation_intent(stripped):
         return RouteDecision(route=ROUTE_FS_MUTATION, payload={"intent": stripped})
+
+    git_intent = parse_git_read_intent(stripped)
+    if git_intent is not None:
+        payload = {"intent": stripped, "kind": git_intent.kind}
+        if git_intent.count is not None:
+            payload["count"] = str(git_intent.count)
+        if git_intent.commit is not None:
+            payload["commit"] = git_intent.commit
+        return RouteDecision(route=ROUTE_GIT_READ, payload=payload)
 
     if _is_safe_inspection_intent(stripped):
         return RouteDecision(route=ROUTE_SAFE_INSPECT, payload={"intent": stripped})
