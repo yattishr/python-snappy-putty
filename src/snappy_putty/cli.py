@@ -112,6 +112,24 @@ def _record_agent_planning_result(
         _set_state(state, LifecycleState.CLARIFICATION)
 
 
+def _handle_safe_inspect_repl(intent: str, state: SessionState) -> bool:
+    _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+    _enter_planning(state)
+    result = handle_ask(intent=intent)
+    if result.output.question:
+        state.last_result = result.output.goal
+        state.pending_plan = result.output.plan
+        state.pending_question = result.output.question
+        state.awaiting_confirmation = False
+        state.pending_context = {"type": "ask_followup", "base_intent": intent}
+        _set_state(state, LifecycleState.CLARIFICATION)
+        return True
+
+    _set_state(state, LifecycleState.EXECUTING)
+    _complete_active_goal(state, message=f"Completed safe inspection for: {intent}")
+    return True
+
+
 def _finish_terminal_state(state: SessionState) -> None:
     state.active_goal = None
     state.clear_pending()
@@ -282,7 +300,11 @@ def run_shell() -> None:
             )
             continue
 
-        if route not in {ROUTE_SAFE_INSPECT, ROUTE_ASK}:
+        if route == ROUTE_SAFE_INSPECT:
+            _handle_safe_inspect_repl(intent=decision.payload.get("intent", text), state=state)
+            continue
+
+        if route != ROUTE_ASK:
             continue
 
         current_intent = decision.payload.get("intent", text)

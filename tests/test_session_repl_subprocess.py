@@ -153,3 +153,25 @@ def test_current_directory_listing_request_resolves_to_cwd() -> None:
     from snappy_putty.agent import _extract_requested_path
 
     assert _extract_requested_path("give me a file listing for the current directory") == "."
+
+
+def test_safe_inspect_success_returns_lifecycle_to_idle(tmp_path: Path) -> None:
+    (tmp_path / "alpha.txt").write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="give me a file listing for the current directory\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Directory Listing" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending question: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Awaiting confirmation: no" in proc.stdout
+    assert "Last route: safe_inspect" in proc.stdout
+    assert "Last completed goal: give me a file listing for the current directory" in proc.stdout
