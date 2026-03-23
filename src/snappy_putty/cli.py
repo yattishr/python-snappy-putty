@@ -52,6 +52,33 @@ RESERVED_CONTROL_ROUTES = {
 }
 
 
+def looks_like_new_command(text: str) -> bool:
+    lowered = text.strip().lower()
+    command_prefixes = (
+        "git",
+        "copy",
+        "move",
+        "delete",
+        "remove",
+        "list",
+        "show",
+        "status",
+        "give me",
+        "create",
+        "make",
+    )
+    return any(lowered.startswith(prefix) for prefix in command_prefixes)
+
+
+def is_valid_clarification_response(user_input: str, state: SessionState) -> bool:
+    text = user_input.strip().lower()
+    if text in {"yes", "no"}:
+        return True
+    if state.pending_question and not looks_like_new_command(text):
+        return True
+    return False
+
+
 def _should_consume_pending_question(*, text: str, route: str, state: SessionState) -> bool:
     if not state.pending_question:
         return False
@@ -246,6 +273,14 @@ def run_shell() -> None:
         route = decision.route
         _debug(f"raw user input={text!r}")
         _debug(f"classified route={route}")
+
+        if (
+            state.current_state == LifecycleState.CLARIFICATION
+            and route not in RESERVED_CONTROL_ROUTES
+            and route != ROUTE_BUILTIN_EXIT
+            and not is_valid_clarification_response(text, state)
+        ):
+            state.reset()
 
         if state.awaiting_confirmation and text.upper() in {"YES", "NO"}:
             _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)

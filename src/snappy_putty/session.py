@@ -37,3 +37,12 @@ class SessionState:
         self.pending_plan = None
         self.awaiting_confirmation = False
         self.pending_context = {}
+
+    def reset(self) -> None:
+        self.current_state = LifecycleState.IDLE
+        self.active_goal = None
+        self.pending_question = None
+        self.pending_plan = None
+        self.awaiting_confirmation = False
+        self.error_message = None
+        self.pending_context = {}
