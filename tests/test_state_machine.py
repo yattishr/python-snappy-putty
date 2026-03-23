@@ -201,6 +201,17 @@ def test_guided_listing_custom_selection_switches_to_custom_path_prompt(monkeypa
     cli._consume_pending_question_answer("custom", state)
 
     assert state.current_state == LifecycleState.CLARIFICATION
-    assert state.pending_question == "Enter custom path:"
+    assert state.pending_question == {"type": "path", "prompt": "Enter custom path:"}
     assert state.pending_context == {"type": "guided_listing_custom_path", "base_intent": "give me a file listing"}
-    assert "Enter custom path:" in buffer.getvalue()
+    assert buffer.getvalue() == ""
+
+
+def test_render_prompt_uses_inline_clarification_prompt() -> None:
+    state = SessionState(
+        current_state=LifecycleState.CLARIFICATION,
+        pending_question={"type": "path", "prompt": "destination path>"},
+    )
+
+    assert cli.render_prompt(state) == "destination path>"
+    state.current_state = LifecycleState.IDLE
+    assert cli.render_prompt(state) == "snappy> "

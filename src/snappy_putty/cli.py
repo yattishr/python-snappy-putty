@@ -111,6 +111,12 @@ def _pending_question_message(question: object) -> str:
     return str(question or "(none)")
 
 
+def render_prompt(state: SessionState) -> str:
+    if state.current_state == LifecycleState.CLARIFICATION and state.pending_question and not _is_choice_question(state.pending_question):
+        return _pending_question_message(state.pending_question)
+    return "snappy> "
+
+
 def _build_listing_choice_question() -> dict[str, object]:
     return {
         "type": "choice",
@@ -409,10 +415,12 @@ def run_shell() -> None:
                     line = _prompt_choice_fallback(state.pending_question)
                 else:
                     line = _prompt_choice_question(session, state.pending_question)
-            elif session is None:
-                line = input("snappy [ask]> ")
             else:
-                line = session.prompt("snappy [ask]> ")
+                prompt = render_prompt(state)
+                if session is None:
+                    line = input(prompt)
+                else:
+                    line = session.prompt(prompt)
         except KeyboardInterrupt:
             continue
         except EOFError:
@@ -721,11 +729,10 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         if selected == "custom":
             _record_clarification(
                 state,
-                question="Enter custom path:",
+                question={"type": "path", "prompt": "Enter custom path:"},
                 pending_context={"type": "guided_listing_custom_path", "base_intent": str(question_context.get("base_intent", ""))},
             )
             state.last_result = "Awaiting custom listing path."
-            console.print("Enter custom path:")
             return
         state.pending_question = None
         state.pending_context = {}
@@ -857,7 +864,6 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
                 pending_context={"type": "fs_destination", "action": action, "src": src, "workspace_root": str(root)},
             )
             state.last_result = "Awaiting destination path."
-            console.print("destination path>")
             return True
         if looks_like_fs_mutation_intent(intent):
             console.print("Could not parse filesystem action. Try examples: copy A to B, move A to B, rename A to B, make a folder called X.")

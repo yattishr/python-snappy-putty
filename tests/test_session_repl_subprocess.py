@@ -276,6 +276,8 @@ def test_fs_path_clarification_accepts_relative_directory_input(tmp_path: Path) 
     assert (destination_dir / "README.md").exists()
     assert "Current state: IDLE" in proc.stdout
     assert "Last completed goal: copy README.md to tests/" in proc.stdout
+    assert "snappy [ask]>" not in proc.stdout
+    assert "snappy> " in proc.stdout
 
 
 def test_fs_path_clarification_still_allows_command_override(tmp_path: Path) -> None:
