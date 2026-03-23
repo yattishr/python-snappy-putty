@@ -175,3 +175,21 @@ def test_safe_inspect_success_returns_lifecycle_to_idle(tmp_path: Path) -> None:
     assert "Awaiting confirmation: no" in proc.stdout
     assert "Last route: safe_inspect" in proc.stdout
     assert "Last completed goal: give me a file listing for the current directory" in proc.stdout
+
+
+def test_unknown_command_resets_session_to_idle(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="do something random and undefined\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "I don't recognize that command. Try 'help' to see what I can do." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending question: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout

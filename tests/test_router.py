@@ -41,6 +41,7 @@ from snappy_putty.router import classify_input
         ("show files", "safe_inspect"),
         ("deploy this to google cloud", "ask"),
         ("what should I run to rotate nginx logs", "ask"),
+        ("do something random and undefined", "unknown"),
     ],
 )
 def test_classify_input_routes(text: str, expected_route: str) -> None:

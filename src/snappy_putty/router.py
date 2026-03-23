@@ -18,6 +18,7 @@ ROUTE_FS_MUTATION = "fs_mutation"
 ROUTE_GIT_READ = "git_read"
 ROUTE_SAFE_INSPECT = "safe_inspect"
 ROUTE_ASK = "ask"
+ROUTE_UNKNOWN = "unknown"
 
 _EXPLAIN_PATTERN = re.compile(r"^\s*explain(?:\s+(?P<command>.+))?\s*$", flags=re.IGNORECASE | re.DOTALL)
 
@@ -37,6 +38,37 @@ def _is_safe_inspection_intent(text: str) -> bool:
     if "git worktree" in lowered and any(token in lowered for token in ("list", "listing", "show")):
         return True
     return False
+
+
+def _is_supported_ask_intent(text: str) -> bool:
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+    if "?" in lowered:
+        return True
+
+    ask_prefixes = (
+        "deploy",
+        "what ",
+        "how ",
+        "why ",
+        "when ",
+        "where ",
+        "which ",
+        "who ",
+        "can ",
+        "could ",
+        "should ",
+        "would ",
+        "help ",
+        "plan ",
+        "suggest ",
+        "recommend ",
+        "troubleshoot ",
+        "fix ",
+        "debug ",
+    )
+    return any(lowered.startswith(prefix) for prefix in ask_prefixes)
 
 
 def classify_input(text: str) -> RouteDecision:
@@ -76,4 +108,7 @@ def classify_input(text: str) -> RouteDecision:
     if _is_safe_inspection_intent(stripped):
         return RouteDecision(route=ROUTE_SAFE_INSPECT, payload={"intent": stripped})
 
-    return RouteDecision(route=ROUTE_ASK, payload={"intent": stripped})
+    if _is_supported_ask_intent(stripped):
+        return RouteDecision(route=ROUTE_ASK, payload={"intent": stripped})
+
+    return RouteDecision(route=ROUTE_UNKNOWN, payload={"text": stripped})

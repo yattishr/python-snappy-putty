@@ -105,3 +105,13 @@ def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "Fenced Goal" in result.stdout
     assert "Commands" in result.stdout
+
+
+def test_ask_unknown_command_stays_local_and_does_not_call_agent(monkeypatch) -> None:
+    def fail_handle_ask(*args, **kwargs):
+        raise AssertionError("handle_ask should not run for unknown commands")
+
+    monkeypatch.setattr("snappy_putty.cli.handle_ask", fail_handle_ask)
+    result = runner.invoke(app, ["ask", "do something random and undefined"])
+    assert result.exit_code == 0
+    assert "I don't recognize that command. Try 'help' to see what I can do." in result.stdout

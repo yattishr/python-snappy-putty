@@ -35,6 +35,7 @@ from snappy_putty.router import (
     ROUTE_FS_MUTATION,
     ROUTE_GIT_READ,
     ROUTE_SAFE_INSPECT,
+    ROUTE_UNKNOWN,
     classify_input,
 )
 from snappy_putty.session import LifecycleState, SessionState
@@ -42,6 +43,7 @@ from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
 console = Console()
+UNKNOWN_COMMAND_MESSAGE = "I don't recognize that command. Try 'help' to see what I can do."
 RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_HELP,
     ROUTE_BUILTIN_DOCTOR,
@@ -309,6 +311,10 @@ def run_shell() -> None:
         if route == ROUTE_BUILTIN_DOCTOR:
             doctor(verbose=False)
             continue
+        if route == ROUTE_UNKNOWN:
+            console.print(UNKNOWN_COMMAND_MESSAGE)
+            state.reset()
+            continue
         if route == ROUTE_EXPLAIN:
             command = decision.payload.get("command", "").strip()
             if not command:
@@ -387,6 +393,9 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
             console.print("Usage: explain <command>")
             return
         handle_explain(command)
+        return
+    if route == ROUTE_UNKNOWN:
+        console.print(UNKNOWN_COMMAND_MESSAGE)
         return
     if route == ROUTE_FS_MUTATION:
         _handle_fs_intent(
