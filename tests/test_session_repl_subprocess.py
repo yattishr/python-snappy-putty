@@ -196,3 +196,62 @@ def test_unknown_command_resets_session_to_idle(tmp_path: Path) -> None:
     assert "Last route: unknown" in proc.stdout
     assert "Last failed goal: do something random and undefined" in proc.stdout
     assert "Error message: Unrecognized command" in proc.stdout
+
+
+def test_guided_listing_fallback_selection_executes_current_directory_listing(tmp_path: Path) -> None:
+    (tmp_path / "alpha.txt").write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="give me a file listing\n1\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Where would you like the file listing from?" in proc.stdout
+    assert "Current directory (.)" in proc.stdout
+    assert "Directory Listing" in proc.stdout
+    assert "alpha.txt" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Last route: safe_inspect" in proc.stdout
+
+
+def test_guided_listing_fallback_custom_path_executes_selected_directory(tmp_path: Path) -> None:
+    custom_dir = tmp_path / "logs"
+    custom_dir.mkdir()
+    (custom_dir / "app.log").write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="give me a file listing\n3\nlogs\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Specify a custom path" in proc.stdout
+    assert "Enter custom path:" in proc.stdout
+    assert "Directory Listing" in proc.stdout
+    assert "app.log" in proc.stdout
+
+
+def test_guided_listing_override_runs_new_command_without_state_contamination(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="give me a file listing\ngit status\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Where would you like the file listing from?" in proc.stdout
+    assert "Git Read Failed" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Last route: git_read" in proc.stdout
+    assert "Last failed goal: git status" in proc.stdout

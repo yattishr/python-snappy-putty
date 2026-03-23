@@ -136,6 +136,15 @@ def test_clarification_response_validation_distinguishes_answers_from_new_comman
     assert cli.is_valid_clarification_response("give me a file listing for the current directory", state) is False
 
 
+def test_resolve_choice_menu_input_maps_numeric_selection_to_value() -> None:
+    question = cli._build_listing_choice_question()
+
+    assert cli._resolve_choice_menu_input("1", question) == "."
+    assert cli._resolve_choice_menu_input("2", question) == "/"
+    assert cli._resolve_choice_menu_input("3", question) == "custom"
+    assert cli._resolve_choice_menu_input("git status", question) == "git status"
+
+
 def test_new_command_in_clarification_resets_before_pending_question_can_consume_it() -> None:
     state = SessionState(
         current_state=LifecycleState.CLARIFICATION,
@@ -155,3 +164,20 @@ def test_new_command_in_clarification_resets_before_pending_question_can_consume
     assert state.pending_question is None
     assert state.pending_plan is None
     assert cli._should_consume_pending_question(text=text, route=decision.route, state=state) is False
+
+
+def test_guided_listing_custom_selection_switches_to_custom_path_prompt(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(
+        current_state=LifecycleState.CLARIFICATION,
+        active_goal="give me a file listing",
+        pending_question=cli._build_listing_choice_question(),
+        pending_context={"type": "guided_listing_choice", "base_intent": "give me a file listing"},
+    )
+
+    cli._consume_pending_question_answer("custom", state)
+
+    assert state.current_state == LifecycleState.CLARIFICATION
+    assert state.pending_question == "Enter custom path:"
+    assert state.pending_context == {"type": "guided_listing_custom_path", "base_intent": "give me a file listing"}
+    assert "Enter custom path:" in buffer.getvalue()

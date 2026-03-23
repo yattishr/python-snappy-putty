@@ -23,7 +23,7 @@ class SessionState:
     active_goal: str | None = None
     last_route: str | None = None
     last_result: str | None = None
-    pending_question: str | None = None
+    pending_question: Any | None = None
     pending_plan: Any | None = None
     awaiting_confirmation: bool = False
     last_completed_goal: str | None = None

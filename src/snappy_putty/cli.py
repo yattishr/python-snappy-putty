@@ -9,7 +9,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from snappy_putty.agent import AgentRunResult, plan_with_agent
+from snappy_putty.agent import AgentRunResult, _extract_requested_path, _is_listing_request, plan_with_agent
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
@@ -81,6 +81,104 @@ def is_valid_clarification_response(user_input: str, state: SessionState) -> boo
     return False
 
 
+def _is_choice_question(question: object) -> bool:
+    return isinstance(question, dict) and question.get("type") == "choice"
+
+
+def _pending_question_message(question: object) -> str:
+    if _is_choice_question(question):
+        return str(question.get("message", "(none)"))
+    return str(question or "(none)")
+
+
+def _build_listing_choice_question() -> dict[str, object]:
+    return {
+        "type": "choice",
+        "message": "Where would you like the file listing from?",
+        "options": [
+            {"label": "Current directory (.)", "value": "."},
+            {"label": "Root directory (/)", "value": "/"},
+            {"label": "Specify a custom path", "value": "custom"},
+        ],
+        "selected_index": 0,
+    }
+
+
+def _resolve_choice_menu_input(raw_value: str, question: dict[str, object]) -> str:
+    value = raw_value.strip()
+    options = question.get("options", [])
+    if value.isdigit() and isinstance(options, list):
+        selected_index = int(value) - 1
+        if 0 <= selected_index < len(options):
+            option = options[selected_index]
+            if isinstance(option, dict):
+                return str(option.get("value", value))
+    return value
+
+
+def _render_choice_prompt_text(question: dict[str, object]) -> str:
+    options = question.get("options", [])
+    selected_index = int(question.get("selected_index", 0))
+    lines = [str(question.get("message", "")), ""]
+    if isinstance(options, list):
+        for index, option in enumerate(options):
+            if not isinstance(option, dict):
+                continue
+            prefix = ">" if index == selected_index else " "
+            lines.append(f"{prefix} {option.get('label', option.get('value', ''))}")
+    lines.extend(["", "(Use ↑/↓ to navigate, ENTER to select, or type a command/path)", "> "])
+    return "\n".join(lines)
+
+
+def _prompt_choice_question(session, question: dict[str, object]) -> str:
+    options = question.get("options", [])
+    if not isinstance(options, list) or not options:
+        return ""
+
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _handle_up(event) -> None:
+        question["selected_index"] = (int(question.get("selected_index", 0)) - 1) % len(options)
+        event.app.invalidate()
+
+    @kb.add("down")
+    def _handle_down(event) -> None:
+        question["selected_index"] = (int(question.get("selected_index", 0)) + 1) % len(options)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _handle_enter(event) -> None:
+        typed = event.app.current_buffer.text.strip()
+        if typed:
+            event.app.exit(result=typed)
+            return
+        selected = options[int(question.get("selected_index", 0))]
+        selected_value = selected.get("value", "") if isinstance(selected, dict) else ""
+        event.app.exit(result=str(selected_value))
+
+    return str(
+        session.prompt(
+            message=lambda: _render_choice_prompt_text(question),
+            key_bindings=kb,
+            default="",
+        )
+    ).strip()
+
+
+def _prompt_choice_fallback(question: dict[str, object]) -> str:
+    console.print(_pending_question_message(question))
+    options = question.get("options", [])
+    if isinstance(options, list):
+        for index, option in enumerate(options, start=1):
+            if not isinstance(option, dict):
+                continue
+            console.print(f"{index}. {option.get('label', option.get('value', ''))}")
+    return _resolve_choice_menu_input(input("Enter 1, 2, 3, or a path/command: "), question)
+
+
 def _should_consume_pending_question(*, text: str, route: str, state: SessionState) -> bool:
     if not state.pending_question:
         return False
@@ -114,7 +212,7 @@ def _enter_planning(state: SessionState) -> None:
     _set_state(state, LifecycleState.PLANNING)
 
 
-def _record_clarification(state: SessionState, *, question: str, pending_context: dict[str, object]) -> None:
+def _record_clarification(state: SessionState, *, question: object, pending_context: dict[str, object]) -> None:
     state.pending_question = question
     state.pending_plan = None
     state.awaiting_confirmation = False
@@ -142,6 +240,16 @@ def _record_agent_planning_result(
 
 
 def _handle_safe_inspect_repl(intent: str, state: SessionState) -> bool:
+    if _is_listing_request(intent) and _extract_requested_path(intent) is None:
+        _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+        _record_clarification(
+            state,
+            question=_build_listing_choice_question(),
+            pending_context={"type": "guided_listing_choice", "base_intent": intent},
+        )
+        state.last_result = "Awaiting guided listing selection."
+        return True
+
     _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
     _enter_planning(state)
     result = handle_ask(intent=intent)
@@ -258,7 +366,12 @@ def run_shell() -> None:
 
     while True:
         try:
-            if session is None:
+            if _is_choice_question(state.pending_question):
+                if session is None:
+                    line = _prompt_choice_fallback(state.pending_question)
+                else:
+                    line = _prompt_choice_question(session, state.pending_question)
+            elif session is None:
                 line = input("snappy [ask]> ")
             else:
                 line = session.prompt("snappy [ask]> ")
@@ -565,6 +678,30 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
 
 def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
     question_context = dict(state.pending_context)
+    if question_context.get("type") == "guided_listing_choice":
+        selected = answer.strip()
+        if selected == "custom":
+            _record_clarification(
+                state,
+                question="Enter custom path:",
+                pending_context={"type": "guided_listing_custom_path", "base_intent": str(question_context.get("base_intent", ""))},
+            )
+            state.last_result = "Awaiting custom listing path."
+            console.print("Enter custom path:")
+            return
+        state.pending_question = None
+        state.pending_context = {}
+        _enter_planning(state)
+        _handle_safe_inspect_repl(intent=f'give me a file listing for "{selected}"', state=state)
+        return
+
+    if question_context.get("type") == "guided_listing_custom_path":
+        state.pending_question = None
+        state.pending_context = {}
+        _enter_planning(state)
+        _handle_safe_inspect_repl(intent=f'give me a file listing for "{answer.strip()}"', state=state)
+        return
+
     if question_context.get("type") == "fs_destination":
         action = str(question_context.get("action", "copy"))
         src = str(question_context.get("src", "")).strip()
@@ -595,7 +732,7 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
 
 def _handle_after(state: SessionState) -> None:
     if state.pending_question:
-        console.print(f"Pending question: {state.pending_question}")
+        console.print(f"Pending question: {_pending_question_message(state.pending_question)}")
         return
     if state.awaiting_confirmation:
         console.print("Pending confirmation: type YES to continue or NO to cancel.")
@@ -618,7 +755,7 @@ def _handle_status(state: SessionState) -> None:
     current_state = state.current_state.value
     active_goal = state.active_goal or "(none)"
     last_route = state.last_route or "(none)"
-    pending_question = state.pending_question or "(none)"
+    pending_question = _pending_question_message(state.pending_question)
     if isinstance(state.pending_plan, FsPlan):
         pending_plan = f"filesystem plan with {len(state.pending_plan.ops)} op(s)"
     elif isinstance(state.pending_plan, list):
