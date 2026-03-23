@@ -136,6 +136,20 @@ def test_clarification_response_validation_distinguishes_answers_from_new_comman
     assert cli.is_valid_clarification_response("give me a file listing for the current directory", state) is False
 
 
+def test_path_clarification_accepts_path_like_input_and_rejects_command_like_input() -> None:
+    state = SessionState(
+        current_state=LifecycleState.CLARIFICATION,
+        active_goal="copy README.md",
+        pending_question={"type": "path", "prompt": "destination path>"},
+        pending_context={"type": "fs_destination", "action": "copy", "src": "README.md"},
+    )
+
+    assert cli.is_valid_clarification_response("tests/", state) is True
+    assert cli.is_valid_clarification_response("./backup", state) is True
+    assert cli.is_valid_clarification_response("../dir", state) is True
+    assert cli.is_valid_clarification_response("git status", state) is False
+
+
 def test_resolve_choice_menu_input_maps_numeric_selection_to_value() -> None:
     question = cli._build_listing_choice_question()
 
@@ -143,6 +157,15 @@ def test_resolve_choice_menu_input_maps_numeric_selection_to_value() -> None:
     assert cli._resolve_choice_menu_input("2", question) == "/"
     assert cli._resolve_choice_menu_input("3", question) == "custom"
     assert cli._resolve_choice_menu_input("git status", question) == "git status"
+
+
+def test_should_consume_path_clarification_response_even_when_route_is_unknown() -> None:
+    state = SessionState(
+        pending_question={"type": "path", "prompt": "destination path>"},
+        pending_context={"type": "fs_destination", "action": "copy", "src": "README.md"},
+    )
+
+    assert cli._should_consume_pending_question(text="tests/", route="unknown", state=state) is True
 
 
 def test_new_command_in_clarification_resets_before_pending_question_can_consume_it() -> None:

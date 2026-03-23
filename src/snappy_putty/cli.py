@@ -9,7 +9,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from snappy_putty.agent import AgentRunResult, _extract_requested_path, _is_listing_request, plan_with_agent
+from snappy_putty.agent import AgentRunResult, _extract_requested_path, _is_listing_request, _listing_request_is_ambiguous, plan_with_agent
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
@@ -73,12 +73,32 @@ def looks_like_new_command(text: str) -> bool:
 
 
 def is_valid_clarification_response(user_input: str, state: SessionState) -> bool:
-    text = user_input.strip().lower()
+    raw_text = user_input.strip()
+    text = raw_text.lower()
     if text in {"yes", "no"}:
         return True
+    if isinstance(state.pending_question, dict):
+        question_type = state.pending_question.get("type")
+        if question_type == "path":
+            return looks_like_path(raw_text)
+        if question_type == "choice":
+            return _is_choice_input(raw_text, state.pending_question)
     if state.pending_question and not looks_like_new_command(text):
         return True
     return False
+
+
+def looks_like_path(text: str) -> bool:
+    value = text.strip()
+    return bool(
+        value
+        and (
+            "/" in value
+            or value.startswith(".")
+            or value.endswith("/")
+            or value.isalnum()
+        )
+    )
 
 
 def _is_choice_question(question: object) -> bool:
@@ -86,8 +106,8 @@ def _is_choice_question(question: object) -> bool:
 
 
 def _pending_question_message(question: object) -> str:
-    if _is_choice_question(question):
-        return str(question.get("message", "(none)"))
+    if isinstance(question, dict):
+        return str(question.get("message") or question.get("prompt") or "(none)")
     return str(question or "(none)")
 
 
@@ -114,6 +134,22 @@ def _resolve_choice_menu_input(raw_value: str, question: dict[str, object]) -> s
             if isinstance(option, dict):
                 return str(option.get("value", value))
     return value
+
+
+def _is_choice_input(raw_value: str, question: dict[str, object]) -> bool:
+    value = raw_value.strip()
+    if not value:
+        return False
+    resolved = _resolve_choice_menu_input(value, question)
+    options = question.get("options", [])
+    if not isinstance(options, list):
+        return False
+    option_values = {
+        str(option.get("value"))
+        for option in options
+        if isinstance(option, dict) and option.get("value") is not None
+    }
+    return resolved in option_values
 
 
 def _render_choice_prompt_text(question: dict[str, object]) -> str:
@@ -189,10 +225,12 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
     context_type = question_context.get("type")
 
     if context_type == "fs_destination":
+        if isinstance(state.pending_question, dict) and state.pending_question.get("type") == "path":
+            return looks_like_path(text)
         return route == ROUTE_ASK
 
     if context_type == "ask_followup":
-        return route == ROUTE_ASK
+        return route == ROUTE_ASK or is_valid_clarification_response(text, state)
 
     return True
 
@@ -240,7 +278,7 @@ def _record_agent_planning_result(
 
 
 def _handle_safe_inspect_repl(intent: str, state: SessionState) -> bool:
-    if _is_listing_request(intent) and _extract_requested_path(intent) is None:
+    if _is_listing_request(intent) and _extract_requested_path(intent) is None and not _listing_request_is_ambiguous(intent):
         _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
         _record_clarification(
             state,
@@ -815,7 +853,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             action, src = partial
             _record_clarification(
                 state,
-                question="destination path>",
+                question={"type": "path", "prompt": "destination path>"},
                 pending_context={"type": "fs_destination", "action": action, "src": src, "workspace_root": str(root)},
             )
             state.last_result = "Awaiting destination path."

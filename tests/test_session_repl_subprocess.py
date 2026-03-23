@@ -255,3 +255,44 @@ def test_guided_listing_override_runs_new_command_without_state_contamination(tm
     assert "Active goal: (none)" in proc.stdout
     assert "Last route: git_read" in proc.stdout
     assert "Last failed goal: git status" in proc.stdout
+
+
+def test_fs_path_clarification_accepts_relative_directory_input(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    destination_dir = tmp_path / "tests"
+    destination_dir.mkdir()
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\ntests/\nYES\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert (destination_dir / "README.md").exists()
+    assert "Current state: IDLE" in proc.stdout
+    assert "Last completed goal: copy README.md to tests/" in proc.stdout
+
+
+def test_fs_path_clarification_still_allows_command_override(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\ngit status\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "destination path>" in proc.stdout
+    assert "Git Read Failed" in proc.stdout
+    assert not (tmp_path / "README-copy.md").exists()
+    assert "Current state: IDLE" in proc.stdout
+    assert "Last route: git_read" in proc.stdout
