@@ -312,8 +312,11 @@ def run_shell() -> None:
             doctor(verbose=False)
             continue
         if route == ROUTE_UNKNOWN:
+            state.last_route = ROUTE_UNKNOWN
+            state.last_failed_goal = text
+            state.error_message = "Unrecognized command"
             console.print(UNKNOWN_COMMAND_MESSAGE)
-            state.reset()
+            state.reset_to_idle_preserving_history()
             continue
         if route == ROUTE_EXPLAIN:
             command = decision.payload.get("command", "").strip()

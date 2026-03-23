@@ -193,3 +193,6 @@ def test_unknown_command_resets_session_to_idle(tmp_path: Path) -> None:
     assert "Active goal: (none)" in proc.stdout
     assert "Pending question: (none)" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
+    assert "Last route: unknown" in proc.stdout
+    assert "Last failed goal: do something random and undefined" in proc.stdout
+    assert "Error message: Unrecognized command" in proc.stdout

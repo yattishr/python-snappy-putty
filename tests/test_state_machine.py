@@ -69,6 +69,32 @@ def test_session_reset_clears_active_and_pending_state() -> None:
     assert state.last_completed_goal == "done"
 
 
+def test_reset_to_idle_preserving_history_keeps_failure_metadata() -> None:
+    state = SessionState(
+        current_state=LifecycleState.CLARIFICATION,
+        active_goal="git push",
+        last_route="unknown",
+        pending_question="Which remote?",
+        pending_plan=["step"],
+        awaiting_confirmation=True,
+        last_failed_goal="git push",
+        error_message="Unrecognized command",
+        pending_context={"type": "ask_followup", "base_intent": "git push"},
+    )
+
+    state.reset_to_idle_preserving_history()
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.pending_question is None
+    assert state.pending_plan is None
+    assert state.awaiting_confirmation is False
+    assert state.pending_context == {}
+    assert state.last_route == "unknown"
+    assert state.last_failed_goal == "git push"
+    assert state.error_message == "Unrecognized command"
+
+
 def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState(
