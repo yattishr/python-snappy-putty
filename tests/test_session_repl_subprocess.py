@@ -238,6 +238,83 @@ def test_guided_listing_fallback_custom_path_executes_selected_directory(tmp_pat
     assert "app.log" in proc.stdout
 
 
+def test_repl_skills_command_shows_skill_registry(tmp_path: Path) -> None:
+    skills_dir = tmp_path / ".snappy" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "docker.md").write_text(
+        "\n".join(
+            [
+                "# Skill: Docker Logs",
+                "Description:",
+                "Inspect running container logs safely.",
+                "Intent examples:",
+                "- show docker logs for api",
+                "Risk: low",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="skills\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Loaded skills:" in proc.stdout
+    assert "Docker Logs [low]" in proc.stdout
+
+
+def test_repl_rules_command_shows_rule_registry(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "safety.md").write_text(
+        "# Rule: Confirm Destructive Actions\nAlways ask for confirmation before destructive commands.\n",
+        encoding="utf-8",
+    )
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="rules\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Loaded rules:" in proc.stdout
+    assert "Confirm Destructive Actions" in proc.stdout
+
+
+def test_repl_help_includes_init_skills_and_rules(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "- init" in proc.stdout
+    assert "- skills" in proc.stdout
+    assert "- rules" in proc.stdout
+
+
 def test_guided_listing_override_runs_new_command_without_state_contamination(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],

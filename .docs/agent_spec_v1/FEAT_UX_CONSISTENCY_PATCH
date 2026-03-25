@@ -1,0 +1,22 @@
+Implement a small UX consistency patch for Snappy Agent Spec V1.
+
+Goal:
+Make `skills` and `rules` available inside the interactive REPL, and update the custom REPL help text accordingly.
+
+Requirements:
+- Do not change existing natural-language routing behavior
+- Add exact-match REPL handling for:
+  - skills
+  - rules
+- Reuse the existing top-level CLI command implementations if possible
+- Update the custom REPL help/cheat sheet to include:
+  - init
+  - skills
+  - rules
+- Do not make skills or rules affect routing/execution behavior
+- Keep this additive and low-risk
+
+Add tests for:
+1. typing `skills` inside REPL shows the skills registry output
+2. typing `rules` inside REPL shows the rules registry output
+3. `help` inside REPL includes init, skills, and rules

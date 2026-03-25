@@ -373,6 +373,9 @@ def print_repl_cheatsheet() -> None:
             "",
             "[bold]Quick commands[/bold]",
             "- doctor",
+            "- init",
+            "- skills",
+            "- rules",
             "- explain <command>",
             "- after",
             "- status",
@@ -471,6 +474,12 @@ def run_shell() -> None:
             continue
         if route == ROUTE_BUILTIN_DOCTOR:
             doctor(verbose=False)
+            continue
+        if text == "skills":
+            skills()
+            continue
+        if text == "rules":
+            rules()
             continue
         if route == ROUTE_UNKNOWN:
             state.last_route = ROUTE_UNKNOWN
