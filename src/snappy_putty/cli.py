@@ -10,6 +10,8 @@ from rich.console import Console
 from rich.panel import Panel
 
 from snappy_putty.agent import AgentRunResult, _extract_requested_path, _is_listing_request, _listing_request_is_ambiguous, plan_with_agent
+from snappy_putty.agent_discovery import get_agent_mode, load_agent_memory, load_agent_project_config, load_agent_rule_registry, load_agent_skill_registry
+from snappy_putty.agent_init import init_agent_project
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
@@ -609,6 +611,41 @@ def doctor(verbose: Optional[bool] = typer.Option(False, "--verbose", help="Show
 
 
 @app.command()
+def init(force: bool = typer.Option(False, "--force", help="Overwrite scaffold files if .snappy already exists.")) -> None:
+    """Scaffold a minimal .snappy/ directory."""
+    result = init_agent_project(Path.cwd(), force=force)
+    console.print(result.message)
+
+
+@app.command()
+def skills() -> None:
+    """List passive skills loaded from .snappy/skills/*.md."""
+    registry = load_agent_skill_registry(Path.cwd())
+    if not registry.skills:
+        console.print("No skills loaded.")
+    else:
+        console.print("Loaded skills:")
+        for skill in registry.skills:
+            console.print(f"- {skill.name} [{skill.risk}]", markup=False)
+    for warning in registry.warnings:
+        console.print(warning)
+
+
+@app.command()
+def rules() -> None:
+    """List passive rules loaded from .snappy/rules/*.md."""
+    registry = load_agent_rule_registry(Path.cwd())
+    if not registry.rules:
+        console.print("No rules loaded.")
+    else:
+        console.print("Loaded rules:")
+        for rule in registry.rules:
+            console.print(f"- {rule.name}", markup=False)
+    for warning in registry.warnings:
+        console.print(warning)
+
+
+@app.command()
 def shell() -> None:
     """Start interactive REPL mode."""
     run_shell()
@@ -823,7 +860,27 @@ def _handle_status(state: SessionState) -> None:
         f"Last cancelled goal: {last_cancelled_goal}",
         f"Last failed goal: {last_failed_goal}",
         f"Error message: {error_message}",
+        f"Agent feature mode: {get_agent_mode()}",
     ]
+    agent_config = load_agent_project_config(Path.cwd())
+    if agent_config.manifest is not None:
+        if agent_config.manifest.name:
+            lines.append(f"Agent: {agent_config.manifest.name}")
+        if agent_config.manifest.mode:
+            lines.append(f"Agent mode: {agent_config.manifest.mode}")
+    if agent_config.warning:
+        lines.append(f"Agent warning: {agent_config.warning}")
+    rule_registry = load_agent_rule_registry(Path.cwd())
+    if rule_registry.rules:
+        rule_names = ", ".join(rule.name for rule in rule_registry.rules)
+        lines.append(f"Loaded rules: {rule_names}")
+    memory = load_agent_memory(Path.cwd())
+    lines.append(f"Agent memory: {'present' if memory.memory_found else 'absent'}")
+    if memory.session_data is not None:
+        session_keys = ", ".join(sorted(memory.session_data.keys())) or "(empty)"
+        lines.append(f"Agent memory session keys: {session_keys}")
+    if memory.warning:
+        lines.append(f"Agent memory warning: {memory.warning}")
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
 

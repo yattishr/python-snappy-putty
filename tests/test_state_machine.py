@@ -111,6 +111,116 @@ def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     assert "Error message: Applied 0 filesystem operation(s)." in output
 
 
+def test_status_displays_agent_metadata_when_manifest_is_valid(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    agent_root = tmp_path / ".snappy"
+    agent_root.mkdir()
+    (agent_root / "snappy.yaml").write_text(
+        "name: Snappy Dev Agent\nmode: supervised\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent: Snappy Dev Agent" in output
+    assert "Agent mode: supervised" in output
+
+
+def test_status_displays_agent_warning_when_manifest_is_invalid(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    agent_root = tmp_path / ".snappy"
+    agent_root.mkdir()
+    (agent_root / "snappy.yaml").write_text("name: Broken: Value\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent warning: Invalid agent manifest:" in output
+
+
+def test_status_displays_loaded_rule_names(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "safety.md").write_text(
+        "# Rule: Confirm Destructive Actions\nAlways ask first.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Loaded rules: Confirm Destructive Actions" in output
+
+
+def test_status_displays_agent_memory_metadata(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    memory_dir = tmp_path / ".snappy" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "session.json").write_text('{"last_goal": "inspect logs"}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent memory: present" in output
+    assert "Agent memory session keys: last_goal" in output
+
+
+def test_status_displays_agent_memory_warning(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    memory_dir = tmp_path / ".snappy" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "session.json").write_text('{"last_goal": invalid}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent memory: present" in output
+    assert "Agent memory warning: Invalid agent memory session:" in output
+
+
+def test_status_displays_agent_feature_mode_off(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    agent_root = tmp_path / ".snappy"
+    agent_root.mkdir()
+    (agent_root / "snappy.yaml").write_text("name: Hidden Agent\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "off")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent feature mode: off" in output
+    assert "Agent: Hidden Agent" not in output
+    assert "Loaded rules:" not in output
+    assert "Agent memory: absent" in output
+
+
+def test_status_displays_agent_feature_mode_passive(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    agent_root = tmp_path / ".snappy"
+    agent_root.mkdir()
+    (agent_root / "snappy.yaml").write_text("name: Passive Agent\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent feature mode: passive" in output
+    assert "Agent: Passive Agent" in output
+
+
 def test_confirmation_without_pending_plan_records_failed_goal() -> None:
     state = SessionState(active_goal="copy a b", current_state=LifecycleState.CONFIRMATION)
 

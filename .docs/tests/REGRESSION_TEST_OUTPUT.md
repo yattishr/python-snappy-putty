@@ -1,21 +1,20 @@
 # Snappy Regression Test Output
 
-Run date: 2026-03-21
+Run date: 2026-03-25
 
 Execution notes:
-- CLI used: `PYTHONPATH=src SNAPPY_PUTTY_NO_SPINNER=1 .venv/bin/python -m snappy_putty.cli shell`
+- CLI used: `PYTHONPATH=src SNAPPY_PUTTY_NO_SPINNER=1 /home/yattishr/Projects/snappy-putty/.venv/bin/python -m snappy_putty.cli shell`
 - Each regression case was run in a fresh REPL session.
 - `exit` was appended after each case only to terminate the REPL cleanly.
 - Filesystem mutation cases that referenced `a.txt` were run in isolated temp directories with `a.txt` pre-created.
-- Tests 10 and 11 were capped with a 12 second shell timeout because the CLI did not return.
+- Git-read and git-write cases were run inside a fresh temporary git repository with one initial commit.
+- `SNAPPY_AGENT_MODE` was left unset, so the default feature mode (`off`) was used during regression execution.
 
 ## Summary
 
-- PASS: 9
-- FAIL: 2
-- Failed tests:
-  - 10. Git Write Safety
-  - 11. Command Override After Ask
+- PASS: 11
+- FAIL: 0
+- Failed tests: (none)
 
 ## Per-Test Results
 
@@ -30,14 +29,19 @@ status
 
 Output excerpt:
 ```text
-Current state: IDLE
-Active goal: (none)
-Pending question: (none)
-Pending plan: (none)
-Awaiting confirmation: no
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: (none)
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: (none)
+│ Last cancelled goal: (none)
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected baseline state.
+Comparison: Matches expected outcome.
 
 ### 2. Clarification Flow (FS Intent)
 
@@ -51,15 +55,19 @@ status
 
 Output excerpt:
 ```text
-destination path>
-Current state: CLARIFICATION
-Active goal: copy README.md
-Pending question: destination path>
-Pending plan: (none)
-Awaiting confirmation: no
+│ Current state: CLARIFICATION
+│ Active goal: copy README.md
+│ Last route: fs_mutation
+│ Pending question: destination path>
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: (none)
+│ Last cancelled goal: (none)
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected clarification state.
+Comparison: Matches expected outcome.
 
 ### 3. Confirmation Cancel Flow
 
@@ -75,16 +83,20 @@ status
 Output excerpt:
 ```text
 Type YES to apply, or NO to cancel.
-Cancelled. No pending action was applied.
-Current state: IDLE
-Active goal: (none)
-Last cancelled goal: copy a.txt to c.txt
-Pending question: (none)
-Pending plan: (none)
-Awaiting confirmation: no
+│ Cancelled. No pending action was applied. │
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: fs_mutation
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: (none)
+│ Last cancelled goal: copy a.txt to c.txt
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected cancel behavior.
+Comparison: Matches expected outcome. Verified c.txt was not created.
 
 ### 4. Successful FS Execution
 
@@ -100,16 +112,19 @@ status
 Output excerpt:
 ```text
 Type YES to apply, or NO to cancel.
-Copied file: a.txt -> d.txt. Undo hint: `rm d.txt`.
-Current state: IDLE
-Active goal: (none)
-Last completed goal: copy a.txt to d.txt
-Pending question: (none)
-Pending plan: (none)
-Awaiting confirmation: no
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: fs_mutation
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: copy a.txt to d.txt
+│ Last cancelled goal: (none)
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected completion state. `d.txt` was created.
+Comparison: Matches expected outcome. Verified d.txt was created.
 
 ### 5. FS Failure Path
 
@@ -117,22 +132,26 @@ Status: PASS
 
 Commands:
 ```text
-copy to 
+copy to
 status
 ```
 
 Output excerpt:
 ```text
-Could not parse filesystem action. Try examples: copy A to B, move A to B, rename A to B, make a folder called X.
-Current state: IDLE
-Active goal: (none)
-Last failed goal: copy to
-Error message: Failed to parse filesystem action.
-Pending question: (none)
-Pending plan: (none)
+snappy> Could not parse filesystem action. Try examples: copy A to B, move A to B,
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: fs_mutation
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: (none)
+│ Last cancelled goal: (none)
+│ Last failed goal: copy to
+│ Error message: Failed to parse filesystem action.
 ```
 
-Comparison: Matches expected failure handling.
+Comparison: Matches expected outcome.
 
 ### 6. Explicit Cancel Command
 
@@ -140,24 +159,27 @@ Status: PASS
 
 Commands:
 ```text
-copy a.txt 
-cancel 
+copy a.txt
+cancel
 status
 ```
 
 Output excerpt:
 ```text
-destination path>
-Cleared pending question/plan state.
-Current state: IDLE
-Active goal: (none)
-Last cancelled goal: copy a.txt
-Pending question: (none)
-Pending plan: (none)
-Awaiting confirmation: no
+snappy> destination path>Cleared pending question/plan state.
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: builtin_cancel
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: (none)
+│ Last cancelled goal: copy a.txt
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected explicit cancel behavior.
+Comparison: Matches expected outcome.
 
 ### 7. Safe Inspect (Directory Listing)
 
@@ -171,17 +193,20 @@ status
 
 Output excerpt:
 ```text
-Directory Listing
-Current state: IDLE
-Last route: safe_inspect
-Last completed goal: give me a file listing for the current directory
-Active goal: (none)
-Pending question: (none)
-Pending plan: (none)
-Awaiting confirmation: no
+snappy> ╭───────────────────────────── Directory Listing ──────────────────────────────╮
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: safe_inspect
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: give me a file listing for the current directory
+│ Last cancelled goal: (none)
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected safe inspect behavior.
+Comparison: Matches expected outcome.
 
 ### 8. Git Read: Status
 
@@ -195,16 +220,20 @@ status
 
 Output excerpt:
 ```text
-Git Status
-Current state: IDLE
-Last route: git_read
-Last completed goal: git status
-Active goal: (none)
-Pending question: (none)
-Pending plan: (none)
+snappy> ╭───────────────────────────────── Git Status ─────────────────────────────────╮
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: git_read
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: git status
+│ Last cancelled goal: (none)
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected Git read behavior.
+Comparison: Matches expected outcome.
 
 ### 9. Git Read: Recent Commit
 
@@ -218,20 +247,24 @@ status
 
 Output excerpt:
 ```text
-Recent Commits
-Current state: IDLE
-Last route: git_read
-Last completed goal: show last 5 commits
-Active goal: (none)
-Pending question: (none)
-Pending plan: (none)
+snappy> ╭─────────────────────────────── Recent Commits ───────────────────────────────╮
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: git_read
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: show last 5 commits
+│ Last cancelled goal: (none)
+│ Last failed goal: (none)
+│ Error message: (none)
 ```
 
-Comparison: Matches expected Git read behavior.
+Comparison: Matches expected outcome.
 
 ### 10. Git Write Safety
 
-Status: FAIL
+Status: PASS
 
 Commands:
 ```text
@@ -239,22 +272,26 @@ git push
 status
 ```
 
-Observed output before timeout:
+Output excerpt:
 ```text
-snappy [ask]> [non-fatal] Tracing: request failed: [Errno -3] Temporary failure in name resolution
-[non-fatal] Tracing: request failed: [Errno -3] Temporary failure in name resolution
-[non-fatal] Tracing: request failed: [Errno -3] Temporary failure in name resolution
-[non-fatal] Tracing: max retries reached, giving up on this batch.
+snappy> I don't recognize that command. Try 'help' to see what I can do.
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: unknown
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: (none)
+│ Last cancelled goal: (none)
+│ Last failed goal: git push
+│ Error message: Unrecognized command
 ```
 
-Comparison:
-- PASS condition satisfied: no Git push was executed.
-- FAIL condition: the CLI never returned local guidance or a clean status state within 12 seconds.
-- FAIL condition: `status` was not processed because the first command blocked the REPL.
+Comparison: Matches expected outcome. Verified no git status change before/after.
 
 ### 11. Command Override After Ask
 
-Status: FAIL
+Status: PASS
 
 Commands:
 ```text
@@ -263,55 +300,20 @@ give me a file listing for the current directory
 status
 ```
 
-Observed output before timeout:
+Output excerpt:
 ```text
-snappy [ask]> [non-fatal] Tracing: request failed: [Errno -3] Temporary failure in name resolution
-[non-fatal] Tracing: request failed: [Errno -3] Temporary failure in name resolution
-[non-fatal] Tracing: request failed: [Errno -3] Temporary failure in name resolution
-[non-fatal] Tracing: max retries reached, giving up on this batch.
+snappy> I don't recognize that command. Try 'help' to see what I can do.
+snappy> ╭───────────────────────────── Directory Listing ──────────────────────────────╮
+│ Current state: IDLE
+│ Active goal: (none)
+│ Last route: safe_inspect
+│ Pending question: (none)
+│ Pending plan: (none)
+│ Awaiting confirmation: no
+│ Last completed goal: give me a file listing for the current directory
+│ Last cancelled goal: (none)
+│ Last failed goal: git push
+│ Error message: (none)
 ```
 
-Comparison:
-- FAIL condition: the second command never ran because `git push` blocked in the ask path.
-- FAIL condition: there was no override, no directory listing, and no final `IDLE` state.
-
-## Root Cause Analysis
-
-Primary root cause:
-- Unsupported Git write intents are not classified separately. In [`src/snappy_putty/router.py:42`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/router.py#L42), `git push` does not match `parse_git_read_intent`, so it falls through to `ROUTE_ASK` at [`src/snappy_putty/router.py:79`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/router.py#L79).
-
-Secondary root cause:
-- The ask path is synchronous and blocks the REPL while it waits for the SDK call. In [`src/snappy_putty/cli.py:310`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/cli.py#L310) to [`src/snappy_putty/cli.py:313`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/cli.py#L313), `ROUTE_ASK` immediately calls `handle_ask()`. That then calls `plan_with_agent()` at [`src/snappy_putty/cli.py:369`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/cli.py#L369) to [`src/snappy_putty/cli.py:373`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/cli.py#L373).
-
-Trigger for the hang:
-- In [`src/snappy_putty/agent.py:485`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/agent.py#L485) to [`src/snappy_putty/agent.py:487`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/agent.py#L487), the code tries the OpenAI Agents SDK first for generic ask intents. In this environment, network access is restricted but `OPENAI_API_KEY` is present, so `git push` causes repeated trace/export retries before eventual fallback. During that time, the REPL cannot consume `status` or the next user command.
-
-Behavioral impact:
-- Test 10 fails because Git write requests are not rejected quickly and locally.
-- Test 11 fails because the single-threaded ask flow prevents command override while the first ask request is blocked.
-
-## Suggested Fixes
-
-1. Add explicit Git write detection in the router.
-   - Introduce a `git_write` or `unsupported_git_write` route for commands like `git push`, `git commit`, `git merge`, `git rebase`, `git reset`, `git tag -d`, and `git branch -D`.
-   - Return immediate local guidance instead of sending those intents to the SDK.
-
-2. Keep Git safety handling local and deterministic.
-   - For Git write routes, print a short unsupported/safety message and move the session back to `IDLE`.
-   - Record a stable route value so `status` reflects what happened.
-
-3. Avoid SDK-first behavior for obviously unsupported local intents.
-   - Short-circuit unsupported write operations before [`plan_with_agent()`](/home/yattishr/Projects/snappy-putty/src/snappy_putty/agent.py#L457) is called.
-   - This removes network dependency from safety-critical rejection paths.
-
-4. Add regression coverage for the failing path.
-   - Add a subprocess REPL test for `git push` followed by `status`.
-   - Add a subprocess REPL test for `git push` followed by a safe-inspect command to verify override behavior.
-
-## Final Result
-
-Overall result: FAIL
-
-Failed tests:
-- 10. Git Write Safety
-- 11. Command Override After Ask
+Comparison: Matches expected outcome.

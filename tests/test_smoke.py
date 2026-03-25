@@ -26,6 +26,141 @@ def test_doctor_runs() -> None:
     assert "System Snapshot" in result.stdout
 
 
+def test_init_scaffolds_agent_directory() -> None:
+    with runner.isolated_filesystem():
+        result = runner.invoke(app, ["init"])
+
+        assert result.exit_code == 0
+        assert "Initialized agent scaffold" in result.stdout
+        assert Path(".snappy").is_dir()
+        assert Path(".snappy/snappy.yaml").is_file()
+        assert Path(".snappy/skills").is_dir()
+        assert Path(".snappy/rules").is_dir()
+        assert Path(".snappy/memory").is_dir()
+        manifest = Path(".snappy/snappy.yaml").read_text(encoding="utf-8")
+        assert "version: 1" in manifest
+        assert "mode: supervised" in manifest
+
+
+def test_init_refuses_to_overwrite_existing_agent_directory_without_force() -> None:
+    with runner.isolated_filesystem():
+        agent_root = Path(".snappy")
+        agent_root.mkdir()
+        manifest_path = agent_root / "snappy.yaml"
+        manifest_path.write_text("name: custom\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["init"])
+
+        assert result.exit_code == 0
+        assert "Refusing to overwrite existing .snappy/" in result.stdout
+        assert manifest_path.read_text(encoding="utf-8") == "name: custom\n"
+
+
+def test_init_force_overwrites_scaffold_files() -> None:
+    with runner.isolated_filesystem():
+        agent_root = Path(".snappy")
+        agent_root.mkdir()
+        manifest_path = agent_root / "snappy.yaml"
+        manifest_path.write_text("name: old\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["init", "--force"])
+
+        assert result.exit_code == 0
+        assert "Initialized agent scaffold" in result.stdout
+        manifest = manifest_path.read_text(encoding="utf-8")
+        assert "name: old" not in manifest
+        assert "version: 1" in manifest
+        assert Path(".snappy/skills").is_dir()
+        assert Path(".snappy/rules").is_dir()
+        assert Path(".snappy/memory").is_dir()
+
+
+def test_skills_lists_loaded_skill_names(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        skills_dir = Path(".snappy/skills")
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "docker.md").write_text(
+            "\n".join(
+                [
+                    "# Skill: Docker Logs",
+                    "Description:",
+                    "Inspect running container logs safely.",
+                    "Intent examples:",
+                    "- show docker logs for api",
+                    "Risk: low",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["skills"])
+
+        assert result.exit_code == 0
+        assert "Loaded skills:" in result.stdout
+        assert "Docker Logs [low]" in result.stdout
+
+
+def test_skills_skips_invalid_skill_files_with_warning(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        skills_dir = Path(".snappy/skills")
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "broken.md").write_text(
+            "# Skill: Broken Skill\nDescription:\nOnly description.\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["skills"])
+
+        assert result.exit_code == 0
+        assert "No skills loaded." in result.stdout
+        assert "Skipped invalid skill file broken.md" in result.stdout
+
+
+def test_rules_lists_loaded_rule_names(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        rules_dir = Path(".snappy/rules")
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "safety.md").write_text(
+            "# Rule: Confirm Destructive Actions\nAlways ask for confirmation before destructive commands.\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["rules"])
+
+        assert result.exit_code == 0
+        assert "Loaded rules:" in result.stdout
+        assert "Confirm Destructive Actions" in result.stdout
+
+
+def test_rules_handles_empty_rules_directory(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        Path(".snappy/rules").mkdir(parents=True)
+
+        result = runner.invoke(app, ["rules"])
+
+        assert result.exit_code == 0
+        assert "No rules loaded." in result.stdout
+
+
+def test_rules_skips_malformed_markdown_with_warning(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        rules_dir = Path(".snappy/rules")
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "broken.md").write_text("Rule without heading\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["rules"])
+
+        assert result.exit_code == 0
+        assert "No rules loaded." in result.stdout
+        assert "Skipped invalid rule file broken.md" in result.stdout
+
+
 def test_ask_runs_and_renders_commands() -> None:
     result = runner.invoke(app, ["ask", "give me a file listing"])
     assert result.exit_code == 0
