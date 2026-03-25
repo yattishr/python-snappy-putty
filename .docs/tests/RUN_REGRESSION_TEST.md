@@ -16,5 +16,7 @@ For each test block:
 Mark PASS if all expected values match.
 Otherwise mark FAIL and show diff.
 
+Write the results of all regression tests into REGRESSION_TEST_OUTPUT.md
+
 Do not modify code.
 Only run tests and report.
