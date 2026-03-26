@@ -113,10 +113,46 @@ def test_skills_skips_invalid_skill_files_with_warning(monkeypatch) -> None:
         )
 
         result = runner.invoke(app, ["skills"])
+        output = " ".join(result.stdout.split())
 
         assert result.exit_code == 0
         assert "No skills loaded." in result.stdout
-        assert "Skipped invalid skill file broken.md" in result.stdout
+        assert (
+            "Warning: skipped .snappy/skills/broken.md because Intent examples section was missing or malformed."
+            in output
+        )
+
+
+def test_skills_reports_missing_or_malformed_risk_value(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        skills_dir = Path(".snappy/skills")
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "copy.md").write_text(
+            "\n".join(
+                [
+                    "# Skill: copy",
+                    "Description:",
+                    "Copy files from one place to another.",
+                    "Intent examples:",
+                    "- copy README.md to docs/",
+                    "Risk:",
+                    "LOW",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["skills"])
+        output = " ".join(result.stdout.split())
+
+        assert result.exit_code == 0
+        assert "No skills loaded." in result.stdout
+        assert (
+            "Warning: skipped .snappy/skills/copy.md because Risk value was missing or malformed."
+            in output
+        )
 
 
 def test_rules_lists_loaded_rule_names(monkeypatch) -> None:

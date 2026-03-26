@@ -68,6 +68,13 @@ class AgentMemory:
     warning: str | None = None
 
 
+class SkillFileValidationError(ValueError):
+    def __init__(self, path: Path, detail: str) -> None:
+        self.path = path
+        self.detail = detail
+        super().__init__(detail)
+
+
 _KNOWN_FIELDS: dict[str, type | tuple[type, ...]] = {
     "name": str,
     "version": int,
@@ -228,27 +235,30 @@ def load_agent_skill_registry(cwd: Path | None = None) -> AgentSkillRegistry:
     for path in sorted(skills_dir.glob("*.md")):
         try:
             skills.append(_parse_skill_file(path))
-        except (OSError, ValueError) as exc:
-            warnings.append(f"Skipped invalid skill file {path.name}: {exc}")
+        except SkillFileValidationError as exc:
+            warnings.append(f"Warning: skipped .snappy/skills/{exc.path.name} because {exc.detail}.")
+        except OSError as exc:
+            warnings.append(f"Warning: skipped .snappy/skills/{path.name} because {exc}.")
     return AgentSkillRegistry(skills=skills, warnings=warnings)
 
 
 def _parse_skill_file(path: Path) -> AgentSkill:
     lines = path.read_text(encoding="utf-8").splitlines()
     if not lines:
-        raise ValueError("file is empty")
+        raise SkillFileValidationError(path, "the file was empty")
 
     heading = lines[0].strip()
     prefix = "# Skill:"
     if not heading.startswith(prefix):
-        raise ValueError("missing '# Skill: <name>' heading")
+        raise SkillFileValidationError(path, "the skill heading was missing or malformed")
     name = heading[len(prefix) :].strip()
     if not name:
-        raise ValueError("skill name cannot be empty")
+        raise SkillFileValidationError(path, "the skill heading was missing or malformed")
 
     description: str | None = None
     intent_examples: list[str] = []
     risk: str | None = None
+    risk_section_seen = False
     current_section: str | None = None
 
     for raw_line in lines[1:]:
@@ -262,6 +272,7 @@ def _parse_skill_file(path: Path) -> AgentSkill:
             current_section = "intent_examples"
             continue
         if stripped.startswith("Risk:"):
+            risk_section_seen = True
             risk = stripped.split(":", 1)[1].strip()
             current_section = None
             continue
@@ -279,11 +290,12 @@ def _parse_skill_file(path: Path) -> AgentSkill:
             continue
 
     if not description:
-        raise ValueError("missing Description section")
+        raise SkillFileValidationError(path, "Description section was missing or malformed")
     if not intent_examples:
-        raise ValueError("missing Intent examples section")
+        raise SkillFileValidationError(path, "Intent examples section was missing or malformed")
     if not risk:
-        raise ValueError("missing Risk field")
+        detail = "Risk value was missing or malformed" if risk_section_seen else "Risk section was missing or malformed"
+        raise SkillFileValidationError(path, detail)
 
     return AgentSkill(
         name=name,

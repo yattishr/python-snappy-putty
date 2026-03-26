@@ -161,7 +161,37 @@ def test_load_agent_skill_registry_skips_invalid_skill_files(tmp_path: Path) -> 
 
     assert registry.skills == []
     assert len(registry.warnings) == 1
-    assert "Skipped invalid skill file broken.md" in registry.warnings[0]
+    assert (
+        registry.warnings[0]
+        == "Warning: skipped .snappy/skills/broken.md because Intent examples section was missing or malformed."
+    )
+
+
+def test_load_agent_skill_registry_reports_missing_or_malformed_risk_value(tmp_path: Path) -> None:
+    skills_dir = tmp_path / ".snappy" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "copy.md").write_text(
+        "\n".join(
+            [
+                "# Skill: copy",
+                "Description:",
+                "Copy files from one place to another.",
+                "Intent examples:",
+                "- copy README.md to docs/",
+                "Risk:",
+                "LOW",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    registry = load_agent_skill_registry(tmp_path)
+
+    assert registry.skills == []
+    assert registry.warnings == [
+        "Warning: skipped .snappy/skills/copy.md because Risk value was missing or malformed."
+    ]
 
 
 def test_load_agent_rule_registry_parses_valid_rules(tmp_path: Path) -> None:
