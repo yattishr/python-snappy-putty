@@ -3,6 +3,9 @@ version: 1
 mode: supervised
 confirmations: true
 dry_run: true
-skills: []
-rules: []
-memory: false
+skills:
+  - copy
+  - move
+rules:
+  - require_confirm
+memory: true
