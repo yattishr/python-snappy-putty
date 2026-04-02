@@ -125,6 +125,30 @@ def _pending_question_message(question: object) -> str:
     return str(question or "(none)")
 
 
+def _clarification_input_is_locked(*, text: str, route: str, state: SessionState) -> bool:
+    if state.current_state != LifecycleState.CLARIFICATION:
+        return False
+    if not state.pending_question:
+        return False
+    if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
+        return False
+    return not is_valid_clarification_response(text, state)
+
+
+def _render_clarification_lock_message(state: SessionState) -> None:
+    console.print(
+        "\n".join(
+            [
+                "You have a pending question:",
+                "",
+                _pending_question_message(state.pending_question),
+                "",
+                "Answer it, or type 'cancel' to abandon the current goal.",
+            ]
+        )
+    )
+
+
 def render_prompt(state: SessionState) -> str:
     if state.current_state == LifecycleState.CLARIFICATION and state.pending_question and not _is_choice_question(state.pending_question):
         return _pending_question_message(state.pending_question)
@@ -674,13 +698,9 @@ def run_shell() -> None:
         _debug(f"raw user input={text!r}")
         _debug(f"classified route={route}")
 
-        if (
-            state.current_state == LifecycleState.CLARIFICATION
-            and route not in RESERVED_CONTROL_ROUTES
-            and route != ROUTE_BUILTIN_EXIT
-            and not is_valid_clarification_response(text, state)
-        ):
-            state.reset()
+        if _clarification_input_is_locked(text=text, route=route, state=state):
+            _render_clarification_lock_message(state)
+            continue
 
         if state.awaiting_confirmation and text.upper() in {"YES", "NO"}:
             _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)

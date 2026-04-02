@@ -452,25 +452,38 @@ def test_should_consume_path_clarification_response_even_when_route_is_unknown()
     assert cli._should_consume_pending_question(text="tests/", route="unknown", state=state) is True
 
 
-def test_new_command_in_clarification_resets_before_pending_question_can_consume_it() -> None:
+def test_clarification_lock_rejects_new_command_without_mutating_state(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
     state = SessionState(
         current_state=LifecycleState.CLARIFICATION,
         active_goal="git push",
         pending_question="Which remote do you mean?",
         pending_plan=["step"],
+        last_route="ask",
+        last_completed_goal="completed",
+        last_failed_goal="failed",
+        last_cancelled_goal="cancelled",
         pending_context={"type": "ask_followup", "base_intent": "git push"},
     )
     text = "give me a file listing for the current directory"
     decision = cli.classify_input(text)
 
-    if state.current_state == LifecycleState.CLARIFICATION and not cli.is_valid_clarification_response(text, state):
-        state.reset()
+    assert cli._clarification_input_is_locked(text=text, route=decision.route, state=state) is True
 
-    assert state.current_state == LifecycleState.IDLE
-    assert state.active_goal is None
-    assert state.pending_question is None
-    assert state.pending_plan is None
+    cli._render_clarification_lock_message(state)
+
+    assert state.current_state == LifecycleState.CLARIFICATION
+    assert state.active_goal == "git push"
+    assert state.pending_question == "Which remote do you mean?"
+    assert state.pending_plan == ["step"]
+    assert state.last_route == "ask"
+    assert state.last_completed_goal == "completed"
+    assert state.last_failed_goal == "failed"
+    assert state.last_cancelled_goal == "cancelled"
     assert cli._should_consume_pending_question(text=text, route=decision.route, state=state) is False
+    assert "You have a pending question:" in buffer.getvalue()
+    assert "Which remote do you mean?" in buffer.getvalue()
+    assert "Answer it, or type 'cancel' to abandon the current goal." in buffer.getvalue()
 
 
 def test_guided_listing_custom_selection_switches_to_custom_path_prompt(monkeypatch) -> None:

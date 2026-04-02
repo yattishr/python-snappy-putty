@@ -103,6 +103,59 @@ def test_reserved_commands_not_consumed_as_pending_question_answers(tmp_path: Pa
     assert "copy README.md -> status" not in proc.stdout
 
 
+def test_repl_clarification_blocks_new_safe_inspect_goal(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\ngive me a file listing for the current directory\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "You have a pending question:" in proc.stdout
+    assert "destination path>" in proc.stdout
+    assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
+    assert "Directory Listing" not in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
+    assert "Active goal: copy README.md" in proc.stdout
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Last route: fs_mutation" in proc.stdout
+    assert "Last completed goal: (none)" in proc.stdout
+    assert "Last failed goal: (none)" in proc.stdout
+    assert "Last cancelled goal: (none)" in proc.stdout
+
+
+def test_repl_clarification_blocks_git_read_goal(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\ngit status\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "You have a pending question:" in proc.stdout
+    assert "destination path>" in proc.stdout
+    assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
+    assert "Git Status" not in proc.stdout
+    assert "Git Read Failed" not in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
+    assert "Active goal: copy README.md" in proc.stdout
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Last route: fs_mutation" in proc.stdout
+    assert "Last completed goal: (none)" in proc.stdout
+    assert "Last failed goal: (none)" in proc.stdout
+    assert "Last cancelled goal: (none)" in proc.stdout
+
+
 def test_repl_successful_fs_apply_moves_goal_to_last_completed(tmp_path: Path) -> None:
     source = tmp_path / "README.md"
     source.write_text("demo", encoding="utf-8")
