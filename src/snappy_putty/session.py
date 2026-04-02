@@ -19,6 +19,7 @@ class LifecycleState(str, Enum):
 
 @dataclass
 class SessionState:
+    agent_mode: str | None = None
     current_state: LifecycleState = LifecycleState.IDLE
     active_goal: str | None = None
     last_route: str | None = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Callable, Optional
 
@@ -10,7 +11,15 @@ from rich.console import Console
 from rich.panel import Panel
 
 from snappy_putty.agent import AgentRunResult, _extract_requested_path, _is_listing_request, _listing_request_is_ambiguous, plan_with_agent
-from snappy_putty.agent_discovery import get_agent_mode, load_agent_memory, load_agent_project_config, load_agent_rule_registry, load_agent_skill_registry
+from snappy_putty.agent_discovery import (
+    get_agent_mode,
+    get_agent_mode_source,
+    load_agent_memory,
+    load_agent_project_config,
+    load_agent_rule_registry,
+    load_agent_skill_registry,
+    normalize_agent_mode,
+)
 from snappy_putty.agent_init import init_agent_project
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
@@ -55,6 +64,7 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_CANCEL,
     ROUTE_BUILTIN_EXIT,
 }
+_AGENT_MODE_PATTERN = re.compile(r"^\s*agent\s+mode(?:\s+(?P<mode>\S+))?\s*$", flags=re.IGNORECASE)
 
 
 def looks_like_new_command(text: str) -> bool:
@@ -376,6 +386,7 @@ def print_repl_cheatsheet() -> None:
             "[bold]Quick commands[/bold]",
             "- doctor            Show local planning diagnostics.",
             "- agent             Show the loaded agent summary.",
+            "- agent mode        Inspect or change agent runtime mode.",
             "- init              Scaffold a .snappy/ agent directory.",
             "- skills            List loaded .snappy skills.",
             "- rules             List loaded .snappy rules.",
@@ -398,13 +409,22 @@ def print_repl_cheatsheet() -> None:
     console.print(Panel(content, title="Welcome", border_style="bright_blue"))
 
 
-def _build_agent_summary_lines(cwd: Path | None = None) -> list[str]:
+def _build_agent_mode_lines(session_mode: str | None = None) -> list[str]:
+    current_mode = get_agent_mode(session_mode)
+    source = get_agent_mode_source(session_mode)
+    return [
+        f"Current: {current_mode}",
+        f"Source: {source}",
+    ]
+
+
+def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None = None) -> list[str]:
     active_cwd = (cwd or Path.cwd()).resolve()
-    feature_mode = get_agent_mode()
-    agent_config = load_agent_project_config(active_cwd)
-    skill_registry = load_agent_skill_registry(active_cwd)
-    rule_registry = load_agent_rule_registry(active_cwd)
-    memory = load_agent_memory(active_cwd)
+    feature_mode = get_agent_mode(session_mode)
+    agent_config = load_agent_project_config(active_cwd, session_mode=session_mode)
+    skill_registry = load_agent_skill_registry(active_cwd, session_mode=session_mode)
+    rule_registry = load_agent_rule_registry(active_cwd, session_mode=session_mode)
+    memory = load_agent_memory(active_cwd, session_mode=session_mode)
 
     if not agent_config.discovery.agent_found:
         return [
@@ -442,13 +462,15 @@ def _build_agent_summary_lines(cwd: Path | None = None) -> list[str]:
     return lines
 
 
-def _handle_agent_summary() -> None:
-    console.print(Panel.fit("\n".join(_build_agent_summary_lines()), title="Agent Summary", border_style="bright_blue"))
+def _handle_agent_summary(session_mode: str | None = None) -> None:
+    console.print(
+        Panel.fit("\n".join(_build_agent_summary_lines(session_mode=session_mode)), title="Agent Summary", border_style="bright_blue")
+    )
 
 
-def _build_agent_doctor_lines(cwd: Path | None = None) -> list[str]:
+def _build_agent_doctor_lines(cwd: Path | None = None, session_mode: str | None = None) -> list[str]:
     active_cwd = (cwd or Path.cwd()).resolve()
-    feature_mode = get_agent_mode()
+    feature_mode = get_agent_mode(session_mode)
     agent_root = active_cwd / ".snappy"
     manifest_path = agent_root / "snappy.yaml"
     skills_dir = agent_root / "skills"
@@ -456,10 +478,10 @@ def _build_agent_doctor_lines(cwd: Path | None = None) -> list[str]:
     memory_dir = agent_root / "memory"
     session_path = memory_dir / "session.json"
 
-    agent_config = load_agent_project_config(active_cwd)
-    skill_registry = load_agent_skill_registry(active_cwd)
-    rule_registry = load_agent_rule_registry(active_cwd)
-    memory = load_agent_memory(active_cwd)
+    agent_config = load_agent_project_config(active_cwd, session_mode=session_mode)
+    skill_registry = load_agent_skill_registry(active_cwd, session_mode=session_mode)
+    rule_registry = load_agent_rule_registry(active_cwd, session_mode=session_mode)
+    memory = load_agent_memory(active_cwd, session_mode=session_mode)
 
     lines = [
         f"Agent feature mode: {feature_mode}",
@@ -495,19 +517,70 @@ def _build_agent_doctor_lines(cwd: Path | None = None) -> list[str]:
     return lines
 
 
-def _handle_agent_doctor() -> None:
-    render_agent_doctor_report(console=console, lines=_build_agent_doctor_lines())
+def _handle_agent_doctor(session_mode: str | None = None) -> None:
+    render_agent_doctor_report(console=console, lines=_build_agent_doctor_lines(session_mode=session_mode))
 
 
-def _build_status_agent_lines(cwd: Path | None = None) -> list[str]:
+def _set_agent_mode(state: SessionState, mode: str) -> None:
+    state.agent_mode = mode
+    console.print(f"Agent mode set to: {mode} (session)")
+
+
+def _prompt_for_agent_mode(session, current_mode: str, source: str) -> str:
+    lines = [
+        f"Current: {current_mode}",
+        f"Source: {source}",
+        "",
+        "Select mode:",
+        "1. off",
+        "2. passive",
+        "3. active",
+    ]
+    console.print(Panel.fit("\n".join(lines), title="Agent Mode", border_style="bright_blue"))
+    if session is None:
+        return input("Enter choice > ").strip()
+    return str(session.prompt("Enter choice > ")).strip()
+
+
+def _handle_agent_mode_command(raw_text: str, state: SessionState, session=None) -> bool:
+    match = _AGENT_MODE_PATTERN.match(raw_text)
+    if not match:
+        return False
+
+    mode_arg = match.group("mode")
+    if mode_arg is None:
+        current_mode = get_agent_mode(state.agent_mode)
+        source = get_agent_mode_source(state.agent_mode)
+        choice = _prompt_for_agent_mode(session, current_mode=current_mode, source=source)
+        selected = {"1": "off", "2": "passive", "3": "active"}.get(choice, normalize_agent_mode(choice))
+        if selected is None:
+            console.print("Invalid mode. Choose: off, passive, active")
+            return True
+        _set_agent_mode(state, selected)
+        return True
+
+    normalized = normalize_agent_mode(mode_arg)
+    if normalized is None:
+        console.print("Invalid mode. Choose: off, passive, active")
+        return True
+
+    _set_agent_mode(state, normalized)
+    return True
+
+
+def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None = None) -> list[str]:
     active_cwd = (cwd or Path.cwd()).resolve()
-    feature_mode = get_agent_mode()
-    agent_config = load_agent_project_config(active_cwd)
-    skill_registry = load_agent_skill_registry(active_cwd)
-    rule_registry = load_agent_rule_registry(active_cwd)
-    memory = load_agent_memory(active_cwd)
+    feature_mode = get_agent_mode(session_mode)
+    mode_source = get_agent_mode_source(session_mode)
+    agent_config = load_agent_project_config(active_cwd, session_mode=session_mode)
+    skill_registry = load_agent_skill_registry(active_cwd, session_mode=session_mode)
+    rule_registry = load_agent_rule_registry(active_cwd, session_mode=session_mode)
+    memory = load_agent_memory(active_cwd, session_mode=session_mode)
 
-    lines = [f"Agent feature mode: {feature_mode}"]
+    lines = [
+        f"Agent feature mode: {feature_mode}",
+        f"Agent mode source: {mode_source}",
+    ]
     if not agent_config.discovery.agent_found:
         lines.append("Agent: (none loaded)")
         return lines
@@ -572,11 +645,16 @@ def run_shell() -> None:
         text = line.strip()
         if not text:
             continue
+        if _handle_agent_mode_command(text, state, session=session):
+            continue
+        if text == "init":
+            init(force=False)
+            continue
         if text == "agent doctor":
-            _handle_agent_doctor()
+            _handle_agent_doctor(session_mode=state.agent_mode)
             continue
         if text == "agent":
-            _handle_agent_summary()
+            _handle_agent_summary(session_mode=state.agent_mode)
             continue
 
         decision = classify_input(text)
@@ -620,10 +698,10 @@ def run_shell() -> None:
             doctor(verbose=False)
             continue
         if text == "skills":
-            skills()
+            skills(agent_mode_override=state.agent_mode)
             continue
         if text == "rules":
-            rules()
+            rules(agent_mode_override=state.agent_mode)
             continue
         if route == ROUTE_UNKNOWN:
             state.last_route = ROUTE_UNKNOWN
@@ -783,9 +861,9 @@ def init(force: bool = typer.Option(False, "--force", help="Overwrite scaffold f
 
 
 @app.command()
-def skills() -> None:
+def skills(agent_mode_override: str | None = None) -> None:
     """List passive skills loaded from .snappy/skills/*.md."""
-    registry = load_agent_skill_registry(Path.cwd())
+    registry = load_agent_skill_registry(Path.cwd(), session_mode=agent_mode_override)
     if not registry.skills:
         console.print("No skills loaded.")
     else:
@@ -797,9 +875,9 @@ def skills() -> None:
 
 
 @app.command()
-def rules() -> None:
+def rules(agent_mode_override: str | None = None) -> None:
     """List passive rules loaded from .snappy/rules/*.md."""
-    registry = load_agent_rule_registry(Path.cwd())
+    registry = load_agent_rule_registry(Path.cwd(), session_mode=agent_mode_override)
     if not registry.rules:
         console.print("No rules loaded.")
     else:
@@ -1026,7 +1104,7 @@ def _handle_status(state: SessionState) -> None:
         f"Last failed goal: {last_failed_goal}",
         f"Error message: {error_message}",
     ]
-    lines.extend(_build_status_agent_lines())
+    lines.extend(_build_status_agent_lines(session_mode=state.agent_mode))
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
 

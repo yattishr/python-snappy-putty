@@ -8,10 +8,12 @@ from snappy_putty.agent_discovery import (
     AgentManifest,
     discover_agent_project,
     get_agent_mode,
+    get_agent_mode_source,
     load_agent_memory,
     load_agent_project_config,
     load_agent_rule_registry,
     load_agent_skill_registry,
+    resolve_agent_mode,
 )
 
 
@@ -290,6 +292,19 @@ def test_agent_mode_defaults_to_off(monkeypatch) -> None:
     monkeypatch.delenv("SNAPPY_AGENT_MODE", raising=False)
 
     assert get_agent_mode() == "off"
+    assert get_agent_mode_source() == "default"
+
+
+def test_agent_mode_respects_environment(monkeypatch) -> None:
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    assert resolve_agent_mode() == ("passive", "environment")
+
+
+def test_agent_mode_session_override_beats_environment(monkeypatch) -> None:
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+
+    assert resolve_agent_mode("off") == ("off", "session")
 
 
 def test_agent_mode_off_ignores_snappy_project(monkeypatch, tmp_path: Path) -> None:

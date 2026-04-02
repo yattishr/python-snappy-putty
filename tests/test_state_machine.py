@@ -104,6 +104,7 @@ def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch)
     output = buffer.getvalue()
     assert "Quick commands" in output
     assert "agent             Show the loaded agent summary." in output
+    assert "agent mode        Inspect or change agent runtime mode." in output
     assert "skills            List loaded .snappy skills." in output
     assert "rules             List loaded .snappy rules." in output
     assert "init              Scaffold a .snappy/ agent directory." in output
@@ -166,7 +167,21 @@ def test_status_displays_agent_section_with_no_agent(monkeypatch, tmp_path: Path
 
     output = buffer.getvalue()
     assert "Agent feature mode: passive" in output
+    assert "Agent mode source: environment" in output
     assert "Agent: (none loaded)" in output
+
+
+def test_status_reflects_runtime_session_agent_mode(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+    state = SessionState(agent_mode="passive")
+
+    cli._handle_status(state)
+
+    output = buffer.getvalue()
+    assert "Agent feature mode: passive" in output
+    assert "Agent mode source: session" in output
 
 
 def test_status_displays_agent_section_with_valid_agent_details(monkeypatch, tmp_path: Path) -> None:

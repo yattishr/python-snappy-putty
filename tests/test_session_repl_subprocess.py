@@ -312,9 +312,139 @@ def test_repl_help_includes_agent_related_commands(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert "- agent             Show the loaded agent summary." in proc.stdout
+    assert "- agent mode        Inspect or change agent runtime mode." in proc.stdout
     assert "- init" in proc.stdout
     assert "- skills" in proc.stdout
     assert "- rules" in proc.stdout
+
+
+def test_repl_init_creates_snappy_directory(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="init\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Initialized agent scaffold" in proc.stdout
+    assert (tmp_path / ".snappy").is_dir()
+    assert (tmp_path / ".snappy" / "snappy.yaml").is_file()
+
+
+def test_repl_init_twice_does_not_crash(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="init\ninit\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Initialized agent scaffold" in proc.stdout
+    assert "Refusing to overwrite existing .snappy/" in proc.stdout
+
+
+def test_repl_agent_mode_shows_default_and_menu(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode\n1\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Agent Mode" in proc.stdout
+    assert "Current: off" in proc.stdout
+    assert "Source: default" in proc.stdout
+    assert "Select mode:" in proc.stdout
+    assert "Agent mode set to: off (session)" in proc.stdout
+
+
+def test_repl_agent_mode_respects_environment(tmp_path: Path) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode\n1\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Current: passive" in proc.stdout
+    assert "Source: environment" in proc.stdout
+    assert "Agent mode set to: off (session)" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("agent mode off\nstatus\nexit\n", "Agent mode set to: off (session)"),
+        ("agent mode passive\nstatus\nexit\n", "Agent mode set to: passive (session)"),
+        ("agent mode active\nstatus\nexit\n", "Agent mode set to: active (session)"),
+        ("agent mode PASSIVE\nstatus\nexit\n", "Agent mode set to: passive (session)"),
+    ],
+)
+def test_repl_agent_mode_direct_setters(command: str, expected: str, tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input=command,
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert expected in proc.stdout
+
+
+def test_repl_agent_mode_invalid_value_is_handled(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode chaos\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Invalid mode. Choose: off, passive, active" in proc.stdout
+
+
+def test_repl_agent_mode_status_reflects_session_override(tmp_path: Path) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode passive\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Agent mode set to: passive (session)" in proc.stdout
+    assert "Agent feature mode: passive" in proc.stdout
+    assert "Agent mode source: session" in proc.stdout
 
 
 def test_repl_status_shows_agent_metadata_when_present(tmp_path: Path) -> None:

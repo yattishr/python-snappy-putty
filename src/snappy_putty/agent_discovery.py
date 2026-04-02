@@ -89,13 +89,35 @@ _KNOWN_FIELDS: dict[str, type | tuple[type, ...]] = {
 _ALLOWED_AGENT_MODES = {"off", "passive", "active"}
 
 
-def get_agent_mode() -> str:
-    value = os.getenv("SNAPPY_AGENT_MODE", "off").strip().lower()
-    return value if value in _ALLOWED_AGENT_MODES else "off"
+def normalize_agent_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in _ALLOWED_AGENT_MODES else None
 
 
-def discover_agent_project(cwd: Path | None = None) -> AgentProjectDiscovery:
-    if get_agent_mode() == "off":
+def resolve_agent_mode(session_mode: str | None = None) -> tuple[str, str]:
+    normalized_session = normalize_agent_mode(session_mode)
+    if normalized_session is not None:
+        return normalized_session, "session"
+
+    normalized_env = normalize_agent_mode(os.getenv("SNAPPY_AGENT_MODE"))
+    if normalized_env is not None:
+        return normalized_env, "environment"
+
+    return "off", "default"
+
+
+def get_agent_mode(session_mode: str | None = None) -> str:
+    return resolve_agent_mode(session_mode)[0]
+
+
+def get_agent_mode_source(session_mode: str | None = None) -> str:
+    return resolve_agent_mode(session_mode)[1]
+
+
+def discover_agent_project(cwd: Path | None = None, session_mode: str | None = None) -> AgentProjectDiscovery:
+    if get_agent_mode(session_mode) == "off":
         return AgentProjectDiscovery(agent_found=False, agent_root=None, manifest_path=None)
 
     root = (cwd or Path.cwd()).resolve()
@@ -112,8 +134,8 @@ def discover_agent_project(cwd: Path | None = None) -> AgentProjectDiscovery:
     )
 
 
-def load_agent_project_config(cwd: Path | None = None) -> AgentProjectConfig:
-    discovery = discover_agent_project(cwd)
+def load_agent_project_config(cwd: Path | None = None, session_mode: str | None = None) -> AgentProjectConfig:
+    discovery = discover_agent_project(cwd, session_mode=session_mode)
     if discovery.manifest_path is None:
         return AgentProjectConfig(discovery=discovery, manifest=None, warning=None)
 
@@ -218,11 +240,11 @@ def _validate_manifest(data: dict[str, object]) -> AgentManifest:
     return AgentManifest(**payload)
 
 
-def load_agent_skill_registry(cwd: Path | None = None) -> AgentSkillRegistry:
-    if get_agent_mode() == "off":
+def load_agent_skill_registry(cwd: Path | None = None, session_mode: str | None = None) -> AgentSkillRegistry:
+    if get_agent_mode(session_mode) == "off":
         return AgentSkillRegistry()
 
-    discovery = discover_agent_project(cwd)
+    discovery = discover_agent_project(cwd, session_mode=session_mode)
     if not discovery.agent_root:
         return AgentSkillRegistry()
 
@@ -305,11 +327,11 @@ def _parse_skill_file(path: Path) -> AgentSkill:
     )
 
 
-def load_agent_rule_registry(cwd: Path | None = None) -> AgentRuleRegistry:
-    if get_agent_mode() == "off":
+def load_agent_rule_registry(cwd: Path | None = None, session_mode: str | None = None) -> AgentRuleRegistry:
+    if get_agent_mode(session_mode) == "off":
         return AgentRuleRegistry()
 
-    discovery = discover_agent_project(cwd)
+    discovery = discover_agent_project(cwd, session_mode=session_mode)
     if not discovery.agent_root:
         return AgentRuleRegistry()
 
@@ -347,8 +369,8 @@ def _parse_rule_file(path: Path) -> AgentRule:
     return AgentRule(name=name, body=body)
 
 
-def load_agent_memory(cwd: Path | None = None) -> AgentMemory:
-    if get_agent_mode() == "off":
+def load_agent_memory(cwd: Path | None = None, session_mode: str | None = None) -> AgentMemory:
+    if get_agent_mode(session_mode) == "off":
         return AgentMemory(
             memory_found=False,
             memory_root=None,
@@ -357,7 +379,7 @@ def load_agent_memory(cwd: Path | None = None) -> AgentMemory:
             warning=None,
         )
 
-    discovery = discover_agent_project(cwd)
+    discovery = discover_agent_project(cwd, session_mode=session_mode)
     if not discovery.agent_root:
         return AgentMemory(
             memory_found=False,
