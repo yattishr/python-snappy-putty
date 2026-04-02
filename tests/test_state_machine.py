@@ -111,6 +111,14 @@ def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch)
     assert "exit / quit       Leave the interactive shell." in output
 
 
+def test_agent_mode_choice_question_defaults_to_current_selection() -> None:
+    question = cli._build_agent_mode_choice_question(current_mode="passive", source="session")
+
+    assert question["selected_index"] == 1
+    assert "Current: passive" in str(question["message"])
+    assert question["footer"] == "(Use ↑/↓ to navigate, ENTER to select)"
+
+
 def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState(

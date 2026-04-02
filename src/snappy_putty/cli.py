@@ -144,6 +144,23 @@ def _build_listing_choice_question() -> dict[str, object]:
     }
 
 
+def _build_agent_mode_choice_question(*, current_mode: str, source: str) -> dict[str, object]:
+    options = [
+        {"label": "off", "value": "off"},
+        {"label": "passive", "value": "passive"},
+        {"label": "active", "value": "active"},
+    ]
+    selected_index = next((index for index, option in enumerate(options) if option["value"] == current_mode), 0)
+    return {
+        "type": "choice",
+        "message": f"Current: {current_mode}\nSource: {source}\n\nSelect mode:",
+        "options": options,
+        "selected_index": selected_index,
+        "footer": "(Use ↑/↓ to navigate, ENTER to select)",
+        "fallback_prompt": "Enter choice > ",
+    }
+
+
 def _resolve_choice_menu_input(raw_value: str, question: dict[str, object]) -> str:
     value = raw_value.strip()
     options = question.get("options", [])
@@ -182,7 +199,8 @@ def _render_choice_prompt_text(question: dict[str, object]) -> str:
                 continue
             prefix = ">" if index == selected_index else " "
             lines.append(f"{prefix} {option.get('label', option.get('value', ''))}")
-    lines.extend(["", "(Use ↑/↓ to navigate, ENTER to select, or type a command/path)", "> "])
+    footer = str(question.get("footer") or "(Use ↑/↓ to navigate, ENTER to select, or type a command/path)")
+    lines.extend(["", footer, "> "])
     return "\n".join(lines)
 
 
@@ -232,7 +250,8 @@ def _prompt_choice_fallback(question: dict[str, object]) -> str:
             if not isinstance(option, dict):
                 continue
             console.print(f"{index}. {option.get('label', option.get('value', ''))}")
-    return _resolve_choice_menu_input(input("Enter 1, 2, 3, or a path/command: "), question)
+    prompt_text = str(question.get("fallback_prompt") or "Enter 1, 2, 3, or a path/command: ")
+    return _resolve_choice_menu_input(input(prompt_text), question)
 
 
 def _should_consume_pending_question(*, text: str, route: str, state: SessionState) -> bool:
@@ -527,19 +546,12 @@ def _set_agent_mode(state: SessionState, mode: str) -> None:
 
 
 def _prompt_for_agent_mode(session, current_mode: str, source: str) -> str:
-    lines = [
-        f"Current: {current_mode}",
-        f"Source: {source}",
-        "",
-        "Select mode:",
-        "1. off",
-        "2. passive",
-        "3. active",
-    ]
-    console.print(Panel.fit("\n".join(lines), title="Agent Mode", border_style="bright_blue"))
+    question = _build_agent_mode_choice_question(current_mode=current_mode, source=source)
     if session is None:
-        return input("Enter choice > ").strip()
-    return str(session.prompt("Enter choice > ")).strip()
+        console.print(Panel.fit("Agent Mode", title="Agent Mode", border_style="bright_blue"))
+        return _prompt_choice_fallback(question)
+    console.print(Panel.fit("Agent Mode", title="Agent Mode", border_style="bright_blue"))
+    return _prompt_choice_question(session, question)
 
 
 def _handle_agent_mode_command(raw_text: str, state: SessionState, session=None) -> bool:
