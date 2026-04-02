@@ -6,6 +6,7 @@ from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tests.agent_fixtures import load_agent_fixture
 from snappy_putty import cli
 from snappy_putty.session import LifecycleState, SessionState
 
@@ -95,6 +96,20 @@ def test_reset_to_idle_preserving_history_keeps_failure_metadata() -> None:
     assert state.error_message == "Unrecognized command"
 
 
+def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+
+    cli.print_repl_cheatsheet()
+
+    output = buffer.getvalue()
+    assert "Quick commands" in output
+    assert "agent             Show the loaded agent summary." in output
+    assert "skills            List loaded .snappy skills." in output
+    assert "rules             List loaded .snappy rules." in output
+    assert "init              Scaffold a .snappy/ agent directory." in output
+    assert "exit / quit       Leave the interactive shell." in output
+
+
 def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState(
@@ -116,7 +131,7 @@ def test_status_displays_agent_metadata_when_manifest_is_valid(monkeypatch, tmp_
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text(
-        "name: Snappy Dev Agent\nmode: supervised\n",
+        "name: Snappy Dev Agent\nversion: 2\nmode: supervised\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -125,16 +140,16 @@ def test_status_displays_agent_metadata_when_manifest_is_valid(monkeypatch, tmp_
     cli._handle_status(SessionState())
 
     output = buffer.getvalue()
-    assert "Agent: Snappy Dev Agent" in output
+    assert "Agent name: Snappy Dev Agent" in output
+    assert "Agent version: 2" in output
     assert "Agent mode: supervised" in output
 
 
 def test_status_displays_agent_warning_when_manifest_is_invalid(monkeypatch, tmp_path: Path) -> None:
     buffer = _capture_console(monkeypatch)
-    agent_root = tmp_path / ".snappy"
-    agent_root.mkdir()
-    (agent_root / "snappy.yaml").write_text("name: Broken: Value\n", encoding="utf-8")
+    load_agent_fixture("malformed_manifest", tmp_path)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
 
     cli._handle_status(SessionState())
 
@@ -142,21 +157,54 @@ def test_status_displays_agent_warning_when_manifest_is_invalid(monkeypatch, tmp
     assert "Agent warning: Invalid agent manifest:" in output
 
 
-def test_status_displays_loaded_rule_names(monkeypatch, tmp_path: Path) -> None:
+def test_status_displays_agent_section_with_no_agent(monkeypatch, tmp_path: Path) -> None:
     buffer = _capture_console(monkeypatch)
-    rules_dir = tmp_path / ".snappy" / "rules"
-    rules_dir.mkdir(parents=True)
-    (rules_dir / "safety.md").write_text(
-        "# Rule: Confirm Destructive Actions\nAlways ask first.\n",
-        encoding="utf-8",
-    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
 
     cli._handle_status(SessionState())
 
     output = buffer.getvalue()
-    assert "Loaded rules: Confirm Destructive Actions" in output
+    assert "Agent feature mode: passive" in output
+    assert "Agent: (none loaded)" in output
+
+
+def test_status_displays_agent_section_with_valid_agent_details(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    load_agent_fixture("valid_agent", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent feature mode: passive" in output
+    assert "Agent name: Fixture Agent" in output
+    assert "Agent version: 1" in output
+    assert "Agent mode: passive" in output
+    assert "Loaded skills: 1" in output
+    assert "Loaded rules: 1" in output
+    assert "Agent memory: present" in output
+    assert "Agent memory session keys: last_goal, notes" in output
+
+
+def test_status_displays_agent_section_with_partial_metadata(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    agent_root = tmp_path / ".snappy"
+    agent_root.mkdir()
+    (agent_root / "snappy.yaml").write_text("name: Partial Agent\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Agent name: Partial Agent" in output
+    assert "Agent version: (unknown)" in output
+    assert "Agent mode: (unknown)" in output
+    assert "Loaded skills: 0" in output
+    assert "Loaded rules: 0" in output
+    assert "Agent memory: absent" in output
 
 
 def test_status_displays_agent_memory_metadata(monkeypatch, tmp_path: Path) -> None:
@@ -176,9 +224,7 @@ def test_status_displays_agent_memory_metadata(monkeypatch, tmp_path: Path) -> N
 
 def test_status_displays_agent_memory_warning(monkeypatch, tmp_path: Path) -> None:
     buffer = _capture_console(monkeypatch)
-    memory_dir = tmp_path / ".snappy" / "memory"
-    memory_dir.mkdir(parents=True)
-    (memory_dir / "session.json").write_text('{"last_goal": invalid}\n', encoding="utf-8")
+    load_agent_fixture("malformed_memory", tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
 
@@ -201,9 +247,9 @@ def test_status_displays_agent_feature_mode_off(monkeypatch, tmp_path: Path) -> 
 
     output = buffer.getvalue()
     assert "Agent feature mode: off" in output
-    assert "Agent: Hidden Agent" not in output
-    assert "Loaded rules:" not in output
-    assert "Agent memory: absent" in output
+    assert "Agent: (none loaded)" in output
+    assert "Agent name: Hidden Agent" not in output
+    assert "Agent memory:" not in output
 
 
 def test_status_displays_agent_feature_mode_passive(monkeypatch, tmp_path: Path) -> None:
@@ -218,7 +264,112 @@ def test_status_displays_agent_feature_mode_passive(monkeypatch, tmp_path: Path)
 
     output = buffer.getvalue()
     assert "Agent feature mode: passive" in output
-    assert "Agent: Passive Agent" in output
+    assert "Agent name: Passive Agent" in output
+
+
+def test_agent_summary_displays_no_agent_loaded(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_summary_lines()
+
+    assert "Agent feature mode: passive" in lines
+    assert "Agent loaded: no" in lines
+    assert "No .snappy agent is currently loaded." in lines
+
+
+def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) -> None:
+    load_agent_fixture("valid_agent", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_summary_lines()
+
+    assert "Agent feature mode: passive" in lines
+    assert "Agent loaded: yes" in lines
+    assert "Manifest present: yes" in lines
+    assert "Agent name: Fixture Agent" in lines
+    assert "Version: 1" in lines
+    assert "Agent mode: passive" in lines
+    assert "Loaded skills: 1" in lines
+    assert "Loaded rules: 1" in lines
+    assert "Memory present: yes" in lines
+    assert "Session memory keys: last_goal, notes" in lines
+
+
+def test_agent_doctor_reports_no_agent_directory(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_doctor_lines()
+
+    assert "Agent feature mode: passive" in lines
+    assert ".snappy directory: absent" in lines
+    assert "Manifest file: absent" in lines
+    assert "Skills directory: absent" in lines
+    assert "Rules directory: absent" in lines
+    assert "Memory directory: absent" in lines
+    assert "Session file: absent" in lines
+
+
+def test_agent_doctor_reports_valid_full_agent_setup(monkeypatch, tmp_path: Path) -> None:
+    load_agent_fixture("valid_agent", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_doctor_lines()
+
+    assert ".snappy directory: present" in lines
+    assert "Manifest file: present" in lines
+    assert "Manifest parse: ok" in lines
+    assert "Skills directory: present" in lines
+    assert "Loaded skills: 1" in lines
+    assert "Rules directory: present" in lines
+    assert "Loaded rules: 1" in lines
+    assert "Memory directory: present" in lines
+    assert "Session file: present" in lines
+    assert "Session parse: ok" in lines
+
+
+def test_agent_doctor_reports_malformed_manifest(monkeypatch, tmp_path: Path) -> None:
+    load_agent_fixture("malformed_manifest", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_doctor_lines()
+
+    assert "Manifest file: present" in lines
+    assert "Manifest parse: failed" in lines
+    assert any(line.startswith("Manifest warning: Invalid agent manifest:") for line in lines)
+
+
+def test_agent_doctor_reports_malformed_memory_file(monkeypatch, tmp_path: Path) -> None:
+    load_agent_fixture("malformed_memory", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_doctor_lines()
+
+    assert "Memory directory: present" in lines
+    assert "Session file: present" in lines
+    assert "Session parse: failed" in lines
+    assert any(line.startswith("Session warning: Invalid agent memory session:") for line in lines)
+
+
+def test_agent_doctor_reports_malformed_skill_and_rule_files(monkeypatch, tmp_path: Path) -> None:
+    agent_root = load_agent_fixture("malformed_skill", tmp_path)
+    rules_dir = agent_root / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "broken.md").write_text("Rule without heading\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    lines = cli._build_agent_doctor_lines()
+
+    assert "Loaded skills: 0" in lines
+    assert "Loaded rules: 0" in lines
+    assert any("Warning: skipped .snappy/skills/broken.md" in line for line in lines)
+    assert any("Skipped invalid rule file broken.md" in line for line in lines)
 
 
 def test_confirmation_without_pending_plan_records_failed_goal() -> None:

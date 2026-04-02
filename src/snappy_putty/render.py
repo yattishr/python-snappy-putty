@@ -137,3 +137,7 @@ def render_doctor_report(console: Console, snapshot: ContextSnapshot, verbose: b
                 border_style="yellow",
             )
         )
+
+
+def render_agent_doctor_report(console: Console, lines: list[str]) -> None:
+    console.print(Panel.fit("\n".join(lines), title="Agent Doctor", border_style="bright_blue"))

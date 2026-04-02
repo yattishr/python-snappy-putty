@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tests.agent_fixtures import load_agent_fixture
 from snappy_putty.agent_discovery import (
     AgentManifest,
     discover_agent_project,
@@ -22,9 +23,9 @@ def test_discover_agent_project_without_snappy_dir(tmp_path: Path) -> None:
     assert result.manifest_path is None
 
 
-def test_discover_agent_project_with_snappy_dir_without_manifest(tmp_path: Path) -> None:
-    agent_root = tmp_path / ".snappy"
-    agent_root.mkdir()
+def test_discover_agent_project_with_snappy_dir_without_manifest(monkeypatch, tmp_path: Path) -> None:
+    agent_root = load_agent_fixture("missing_manifest", tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
 
     result = discover_agent_project(tmp_path)
 
@@ -33,11 +34,12 @@ def test_discover_agent_project_with_snappy_dir_without_manifest(tmp_path: Path)
     assert result.manifest_path is None
 
 
-def test_discover_agent_project_with_manifest(tmp_path: Path) -> None:
+def test_discover_agent_project_with_manifest(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     manifest_path = agent_root / "snappy.yaml"
     manifest_path.write_text("version: 1\n", encoding="utf-8")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
 
     result = discover_agent_project(tmp_path)
 
@@ -46,7 +48,7 @@ def test_discover_agent_project_with_manifest(tmp_path: Path) -> None:
     assert result.manifest_path == manifest_path.resolve()
 
 
-def test_load_agent_project_config_parses_valid_manifest(tmp_path: Path) -> None:
+def test_load_agent_project_config_parses_valid_manifest(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     manifest_path = agent_root / "snappy.yaml"
@@ -70,6 +72,7 @@ def test_load_agent_project_config_parses_valid_manifest(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     result = load_agent_project_config(tmp_path)
 
     assert result.warning is None
@@ -85,22 +88,24 @@ def test_load_agent_project_config_parses_valid_manifest(tmp_path: Path) -> None
     )
 
 
-def test_load_agent_project_config_allows_missing_optional_fields(tmp_path: Path) -> None:
+def test_load_agent_project_config_allows_missing_optional_fields(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Minimal Agent\n", encoding="utf-8")
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     result = load_agent_project_config(tmp_path)
 
     assert result.warning is None
     assert result.manifest == AgentManifest(name="Minimal Agent")
 
 
-def test_load_agent_project_config_reports_malformed_yaml(tmp_path: Path) -> None:
+def test_load_agent_project_config_reports_malformed_yaml(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Snappy: Dev Agent\n", encoding="utf-8")
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     result = load_agent_project_config(tmp_path)
 
     assert result.manifest is None
@@ -108,11 +113,12 @@ def test_load_agent_project_config_reports_malformed_yaml(tmp_path: Path) -> Non
     assert "Invalid agent manifest:" in result.warning
 
 
-def test_load_agent_project_config_reports_wrong_field_types(tmp_path: Path) -> None:
+def test_load_agent_project_config_reports_wrong_field_types(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("version: one\nskills: true\n", encoding="utf-8")
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     result = load_agent_project_config(tmp_path)
 
     assert result.manifest is None
@@ -120,7 +126,7 @@ def test_load_agent_project_config_reports_wrong_field_types(tmp_path: Path) -> 
     assert "Invalid agent manifest:" in result.warning
 
 
-def test_load_agent_skill_registry_parses_valid_skill_file(tmp_path: Path) -> None:
+def test_load_agent_skill_registry_parses_valid_skill_file(monkeypatch, tmp_path: Path) -> None:
     skills_dir = tmp_path / ".snappy" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "docker.md").write_text(
@@ -139,6 +145,7 @@ def test_load_agent_skill_registry_parses_valid_skill_file(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     registry = load_agent_skill_registry(tmp_path)
 
     assert registry.warnings == []
@@ -149,7 +156,7 @@ def test_load_agent_skill_registry_parses_valid_skill_file(tmp_path: Path) -> No
     ]
 
 
-def test_load_agent_skill_registry_skips_invalid_skill_files(tmp_path: Path) -> None:
+def test_load_agent_skill_registry_skips_invalid_skill_files(monkeypatch, tmp_path: Path) -> None:
     skills_dir = tmp_path / ".snappy" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "broken.md").write_text(
@@ -157,6 +164,7 @@ def test_load_agent_skill_registry_skips_invalid_skill_files(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     registry = load_agent_skill_registry(tmp_path)
 
     assert registry.skills == []
@@ -167,7 +175,7 @@ def test_load_agent_skill_registry_skips_invalid_skill_files(tmp_path: Path) -> 
     )
 
 
-def test_load_agent_skill_registry_reports_missing_or_malformed_risk_value(tmp_path: Path) -> None:
+def test_load_agent_skill_registry_reports_missing_or_malformed_risk_value(monkeypatch, tmp_path: Path) -> None:
     skills_dir = tmp_path / ".snappy" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "copy.md").write_text(
@@ -186,6 +194,7 @@ def test_load_agent_skill_registry_reports_missing_or_malformed_risk_value(tmp_p
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     registry = load_agent_skill_registry(tmp_path)
 
     assert registry.skills == []
@@ -194,7 +203,7 @@ def test_load_agent_skill_registry_reports_missing_or_malformed_risk_value(tmp_p
     ]
 
 
-def test_load_agent_rule_registry_parses_valid_rules(tmp_path: Path) -> None:
+def test_load_agent_rule_registry_parses_valid_rules(monkeypatch, tmp_path: Path) -> None:
     rules_dir = tmp_path / ".snappy" / "rules"
     rules_dir.mkdir(parents=True)
     (rules_dir / "safety.md").write_text(
@@ -202,6 +211,7 @@ def test_load_agent_rule_registry_parses_valid_rules(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.warnings == []
@@ -209,21 +219,23 @@ def test_load_agent_rule_registry_parses_valid_rules(tmp_path: Path) -> None:
     assert registry.rules[0].body == "Always ask for confirmation before destructive commands."
 
 
-def test_load_agent_rule_registry_allows_empty_rules_directory(tmp_path: Path) -> None:
+def test_load_agent_rule_registry_allows_empty_rules_directory(monkeypatch, tmp_path: Path) -> None:
     rules_dir = tmp_path / ".snappy" / "rules"
     rules_dir.mkdir(parents=True)
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.rules == []
     assert registry.warnings == []
 
 
-def test_load_agent_rule_registry_skips_malformed_markdown(tmp_path: Path) -> None:
+def test_load_agent_rule_registry_skips_malformed_markdown(monkeypatch, tmp_path: Path) -> None:
     rules_dir = tmp_path / ".snappy" / "rules"
     rules_dir.mkdir(parents=True)
     (rules_dir / "broken.md").write_text("Rule without heading\n", encoding="utf-8")
 
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.rules == []
@@ -231,7 +243,8 @@ def test_load_agent_rule_registry_skips_malformed_markdown(tmp_path: Path) -> No
     assert "Skipped invalid rule file broken.md" in registry.warnings[0]
 
 
-def test_load_agent_memory_without_memory_folder(tmp_path: Path) -> None:
+def test_load_agent_memory_without_memory_folder(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
     memory = load_agent_memory(tmp_path)
 
     assert memory.memory_found is False

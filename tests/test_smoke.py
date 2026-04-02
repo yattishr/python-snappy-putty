@@ -6,6 +6,7 @@ import sys
 from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from tests.agent_fixtures import load_agent_fixture
 import snappy_putty.agent as agent_module
 from snappy_putty.cli import app
 
@@ -24,6 +25,34 @@ def test_doctor_runs() -> None:
     assert result.exit_code == 0
     assert "Context snapshot report" in result.stdout
     assert "System Snapshot" in result.stdout
+
+
+def test_agent_command_runs(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        load_agent_fixture("valid_agent", Path.cwd())
+
+        result = runner.invoke(app, ["agent"])
+
+        assert result.exit_code == 0
+        assert "Agent Summary" in result.stdout
+        assert "Agent name: Fixture Agent" in result.stdout
+        assert "Version: 1" in result.stdout
+        assert "Session memory keys: last_goal" in result.stdout
+
+
+def test_agent_doctor_command_runs(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        load_agent_fixture("valid_agent", Path.cwd())
+
+        result = runner.invoke(app, ["agent-doctor"])
+
+        assert result.exit_code == 0
+        assert "Agent Doctor" in result.stdout
+        assert ".snappy directory: present" in result.stdout
+        assert "Manifest parse: ok" in result.stdout
+        assert "Session parse: ok" in result.stdout
 
 
 def test_init_scaffolds_agent_directory() -> None:
@@ -256,6 +285,50 @@ def test_shell_starts_and_exits_with_exit_input() -> None:
     assert proc.returncode == 0
     assert "Snappy PuTTy" in proc.stdout
     assert "give me a file listing for src" in proc.stdout
+
+
+def test_shell_agent_command_runs() -> None:
+    env = os.environ.copy()
+    src_path = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    env["SNAPPY_AGENT_MODE"] = "passive"
+    with runner.isolated_filesystem():
+        load_agent_fixture("valid_agent", Path.cwd())
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "snappy_putty.cli", "shell"],
+            input="agent\nexit\n",
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+    assert proc.returncode == 0
+    assert "Agent Summary" in proc.stdout
+    assert "Agent name: Fixture Agent" in proc.stdout
+
+
+def test_shell_agent_doctor_command_runs() -> None:
+    env = os.environ.copy()
+    src_path = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    env["SNAPPY_AGENT_MODE"] = "passive"
+    with runner.isolated_filesystem():
+        load_agent_fixture("valid_agent", Path.cwd())
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "snappy_putty.cli", "shell"],
+            input="agent doctor\nexit\n",
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+    assert proc.returncode == 0
+    assert "Agent Doctor" in proc.stdout
+    assert "Session parse: ok" in proc.stdout
 
 
 def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:

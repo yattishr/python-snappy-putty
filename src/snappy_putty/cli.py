@@ -19,6 +19,7 @@ from snappy_putty.git_read import execute_git_read, parse_git_read_intent
 from snappy_putty.render import (
     render_agent_output,
     render_agent_parse_error,
+    render_agent_doctor_report,
     render_directory_listing,
     render_doctor_report,
     render_fs_apply_result,
@@ -96,6 +97,7 @@ def looks_like_path(text: str) -> bool:
         value
         and (
             "/" in value
+            or "." in value
             or value.startswith(".")
             or value.endswith("/")
             or value.isalnum()
@@ -372,16 +374,17 @@ def print_repl_cheatsheet() -> None:
             "- Perform safe read-only inspection when needed.",
             "",
             "[bold]Quick commands[/bold]",
-            "- doctor",
-            "- init",
-            "- skills",
-            "- rules",
-            "- explain <command>",
-            "- after",
-            "- status",
-            "- cancel",
-            "- help",
-            "- exit / quit",
+            "- doctor            Show local planning diagnostics.",
+            "- agent             Show the loaded agent summary.",
+            "- init              Scaffold a .snappy/ agent directory.",
+            "- skills            List loaded .snappy skills.",
+            "- rules             List loaded .snappy rules.",
+            "- explain <command> Explain a command safely.",
+            "- after             Show the next pending step.",
+            "- status            Show session and agent status.",
+            "- cancel            Clear pending task state.",
+            "- help              Show this help panel.",
+            "- exit / quit       Leave the interactive shell.",
             "",
             "[bold]Try[/bold]",
             '- "give me a file listing"',
@@ -393,6 +396,141 @@ def print_repl_cheatsheet() -> None:
         ]
     )
     console.print(Panel(content, title="Welcome", border_style="bright_blue"))
+
+
+def _build_agent_summary_lines(cwd: Path | None = None) -> list[str]:
+    active_cwd = (cwd or Path.cwd()).resolve()
+    feature_mode = get_agent_mode()
+    agent_config = load_agent_project_config(active_cwd)
+    skill_registry = load_agent_skill_registry(active_cwd)
+    rule_registry = load_agent_rule_registry(active_cwd)
+    memory = load_agent_memory(active_cwd)
+
+    if not agent_config.discovery.agent_found:
+        return [
+            f"Agent feature mode: {feature_mode}",
+            "Agent loaded: no",
+            "No .snappy agent is currently loaded.",
+        ]
+
+    manifest = agent_config.manifest
+    session_keys = "(none)"
+    if memory.session_data is not None:
+        session_keys = ", ".join(sorted(memory.session_data.keys())) or "(empty)"
+
+    lines = [
+        f"Agent feature mode: {feature_mode}",
+        "Agent loaded: yes",
+        f"Manifest present: {'yes' if agent_config.discovery.manifest_path is not None else 'no'}",
+        f"Agent name: {manifest.name if manifest and manifest.name else '(unknown)'}",
+        f"Version: {manifest.version if manifest and manifest.version is not None else '(unknown)'}",
+        f"Agent mode: {manifest.mode if manifest and manifest.mode else '(unknown)'}",
+        f"Loaded skills: {len(skill_registry.skills)}",
+        f"Loaded rules: {len(rule_registry.rules)}",
+        f"Memory present: {'yes' if memory.memory_found else 'no'}",
+    ]
+    if memory.memory_found:
+        lines.append(f"Session memory keys: {session_keys}")
+    if agent_config.warning:
+        lines.append(f"Agent warning: {agent_config.warning}")
+    if skill_registry.warnings:
+        lines.append(f"Skill warnings: {len(skill_registry.warnings)}")
+    if rule_registry.warnings:
+        lines.append(f"Rule warnings: {len(rule_registry.warnings)}")
+    if memory.warning:
+        lines.append(f"Memory warning: {memory.warning}")
+    return lines
+
+
+def _handle_agent_summary() -> None:
+    console.print(Panel.fit("\n".join(_build_agent_summary_lines()), title="Agent Summary", border_style="bright_blue"))
+
+
+def _build_agent_doctor_lines(cwd: Path | None = None) -> list[str]:
+    active_cwd = (cwd or Path.cwd()).resolve()
+    feature_mode = get_agent_mode()
+    agent_root = active_cwd / ".snappy"
+    manifest_path = agent_root / "snappy.yaml"
+    skills_dir = agent_root / "skills"
+    rules_dir = agent_root / "rules"
+    memory_dir = agent_root / "memory"
+    session_path = memory_dir / "session.json"
+
+    agent_config = load_agent_project_config(active_cwd)
+    skill_registry = load_agent_skill_registry(active_cwd)
+    rule_registry = load_agent_rule_registry(active_cwd)
+    memory = load_agent_memory(active_cwd)
+
+    lines = [
+        f"Agent feature mode: {feature_mode}",
+        f".snappy directory: {'present' if agent_root.is_dir() else 'absent'}",
+        f"Manifest file: {'present' if manifest_path.is_file() else 'absent'}",
+    ]
+
+    if manifest_path.is_file():
+        lines.append(f"Manifest parse: {'ok' if agent_config.manifest is not None else 'failed'}")
+
+    lines.extend(
+        [
+            f"Skills directory: {'present' if skills_dir.is_dir() else 'absent'}",
+            f"Loaded skills: {len(skill_registry.skills)}",
+            f"Rules directory: {'present' if rules_dir.is_dir() else 'absent'}",
+            f"Loaded rules: {len(rule_registry.rules)}",
+            f"Memory directory: {'present' if memory_dir.is_dir() else 'absent'}",
+            f"Session file: {'present' if session_path.is_file() else 'absent'}",
+        ]
+    )
+
+    if session_path.is_file():
+        lines.append(f"Session parse: {'ok' if memory.session_data is not None and memory.warning is None else 'failed'}")
+
+    for warning in skill_registry.warnings:
+        lines.append(warning)
+    for warning in rule_registry.warnings:
+        lines.append(warning)
+    if agent_config.warning:
+        lines.append(f"Manifest warning: {agent_config.warning}")
+    if memory.warning:
+        lines.append(f"Session warning: {memory.warning}")
+    return lines
+
+
+def _handle_agent_doctor() -> None:
+    render_agent_doctor_report(console=console, lines=_build_agent_doctor_lines())
+
+
+def _build_status_agent_lines(cwd: Path | None = None) -> list[str]:
+    active_cwd = (cwd or Path.cwd()).resolve()
+    feature_mode = get_agent_mode()
+    agent_config = load_agent_project_config(active_cwd)
+    skill_registry = load_agent_skill_registry(active_cwd)
+    rule_registry = load_agent_rule_registry(active_cwd)
+    memory = load_agent_memory(active_cwd)
+
+    lines = [f"Agent feature mode: {feature_mode}"]
+    if not agent_config.discovery.agent_found:
+        lines.append("Agent: (none loaded)")
+        return lines
+
+    manifest = agent_config.manifest
+    lines.extend(
+        [
+            f"Agent name: {manifest.name if manifest and manifest.name else '(unknown)'}",
+            f"Agent version: {manifest.version if manifest and manifest.version is not None else '(unknown)'}",
+            f"Agent mode: {manifest.mode if manifest and manifest.mode else '(unknown)'}",
+            f"Loaded skills: {len(skill_registry.skills)}",
+            f"Loaded rules: {len(rule_registry.rules)}",
+            f"Agent memory: {'present' if memory.memory_found else 'absent'}",
+        ]
+    )
+    if memory.session_data is not None:
+        session_keys = ", ".join(sorted(memory.session_data.keys())) or "(empty)"
+        lines.append(f"Agent memory session keys: {session_keys}")
+    if agent_config.warning:
+        lines.append(f"Agent warning: {agent_config.warning}")
+    if memory.warning:
+        lines.append(f"Agent memory warning: {memory.warning}")
+    return lines
 
 
 def run_shell() -> None:
@@ -433,6 +571,12 @@ def run_shell() -> None:
 
         text = line.strip()
         if not text:
+            continue
+        if text == "agent doctor":
+            _handle_agent_doctor()
+            continue
+        if text == "agent":
+            _handle_agent_summary()
             continue
 
         decision = classify_input(text)
@@ -617,6 +761,18 @@ def doctor(verbose: Optional[bool] = typer.Option(False, "--verbose", help="Show
     """Show local context snapshot for planning."""
     snapshot = collect_context()
     render_doctor_report(console=console, snapshot=snapshot, verbose=verbose)
+
+
+@app.command()
+def agent() -> None:
+    """Show a summary of the currently loaded .snappy agent."""
+    _handle_agent_summary()
+
+
+@app.command("agent-doctor")
+def agent_doctor() -> None:
+    """Inspect the .snappy runtime surface and loaded agent artifacts."""
+    _handle_agent_doctor()
 
 
 @app.command()
@@ -869,27 +1025,8 @@ def _handle_status(state: SessionState) -> None:
         f"Last cancelled goal: {last_cancelled_goal}",
         f"Last failed goal: {last_failed_goal}",
         f"Error message: {error_message}",
-        f"Agent feature mode: {get_agent_mode()}",
     ]
-    agent_config = load_agent_project_config(Path.cwd())
-    if agent_config.manifest is not None:
-        if agent_config.manifest.name:
-            lines.append(f"Agent: {agent_config.manifest.name}")
-        if agent_config.manifest.mode:
-            lines.append(f"Agent mode: {agent_config.manifest.mode}")
-    if agent_config.warning:
-        lines.append(f"Agent warning: {agent_config.warning}")
-    rule_registry = load_agent_rule_registry(Path.cwd())
-    if rule_registry.rules:
-        rule_names = ", ".join(rule.name for rule in rule_registry.rules)
-        lines.append(f"Loaded rules: {rule_names}")
-    memory = load_agent_memory(Path.cwd())
-    lines.append(f"Agent memory: {'present' if memory.memory_found else 'absent'}")
-    if memory.session_data is not None:
-        session_keys = ", ".join(sorted(memory.session_data.keys())) or "(empty)"
-        lines.append(f"Agent memory session keys: {session_keys}")
-    if memory.warning:
-        lines.append(f"Agent memory warning: {memory.warning}")
+    lines.extend(_build_status_agent_lines())
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
 

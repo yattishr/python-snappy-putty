@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tests.agent_fixtures import load_agent_fixture
 from snappy_putty.session import SessionState
 
 
@@ -298,7 +299,7 @@ def test_repl_rules_command_shows_rule_registry(tmp_path: Path) -> None:
     assert "Confirm Destructive Actions" in proc.stdout
 
 
-def test_repl_help_includes_init_skills_and_rules(tmp_path: Path) -> None:
+def test_repl_help_includes_agent_related_commands(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
         input="help\nexit\n",
@@ -310,9 +311,35 @@ def test_repl_help_includes_init_skills_and_rules(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
+    assert "- agent             Show the loaded agent summary." in proc.stdout
     assert "- init" in proc.stdout
     assert "- skills" in proc.stdout
     assert "- rules" in proc.stdout
+
+
+def test_repl_status_shows_agent_metadata_when_present(tmp_path: Path) -> None:
+    load_agent_fixture("valid_agent", tmp_path)
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="status\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Session Status" in proc.stdout
+    assert "Agent feature mode: passive" in proc.stdout
+    assert "Agent name: Fixture Agent" in proc.stdout
+    assert "Agent version: 1" in proc.stdout
+    assert "Loaded skills: 1" in proc.stdout
+    assert "Loaded rules: 1" in proc.stdout
+    assert "Agent memory session keys: last_goal, notes" in proc.stdout
 
 
 def test_guided_listing_override_runs_new_command_without_state_contamination(tmp_path: Path) -> None:
