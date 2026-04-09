@@ -129,12 +129,12 @@ def test_repl_clarification_blocks_new_safe_inspect_goal(tmp_path: Path) -> None
     assert "Last cancelled goal: (none)" in proc.stdout
 
 
-def test_repl_clarification_blocks_git_read_goal(tmp_path: Path) -> None:
+def test_repl_clarification_blocks_new_ask_goal(tmp_path: Path) -> None:
     source = tmp_path / "README.md"
     source.write_text("demo", encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
-        input="copy README.md\ngit status\nstatus\nexit\n",
+        input="copy README.md\nhelp me debug this\nstatus\nexit\n",
         text=True,
         capture_output=True,
         cwd=tmp_path,
@@ -145,8 +145,6 @@ def test_repl_clarification_blocks_git_read_goal(tmp_path: Path) -> None:
     assert "You have a pending question:" in proc.stdout
     assert "destination path>" in proc.stdout
     assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
-    assert "Git Status" not in proc.stdout
-    assert "Git Read Failed" not in proc.stdout
     assert "Current state: CLARIFICATION" in proc.stdout
     assert "Active goal: copy README.md" in proc.stdout
     assert "Pending question: destination path>" in proc.stdout
@@ -352,6 +350,37 @@ def test_repl_rules_command_shows_rule_registry(tmp_path: Path) -> None:
     assert "Confirm Destructive Actions" in proc.stdout
 
 
+def test_repl_protect_project_root_blocks_workspace_escape_with_rule_message(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "protect_project_root.md").write_text(
+        "# Rule: protect_project_root\nProtect the project root from dangerous mutations.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md to /\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Operation blocked by rule: protect_project_root" in proc.stdout
+    assert "The requested filesystem mutation targets a protected path." in proc.stdout
+    assert "No filesystem changes planned." not in proc.stdout
+    assert "Path escapes workspace root" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last failed goal: copy README.md to /" in proc.stdout
+
+
 def test_repl_help_includes_agent_related_commands(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -479,6 +508,30 @@ def test_repl_agent_mode_invalid_value_is_handled(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert "Invalid mode. Choose: off, passive, active" in proc.stdout
+
+
+def test_repl_agent_mode_active_is_blocked_by_loaded_rule(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "no_active_mode.md").write_text(
+        "# Rule: no_active_mode\nActive mode is disabled in this repo.\n",
+        encoding="utf-8",
+    )
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode active\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Active mode is disabled by the loaded agent rules." in proc.stdout
+    assert "Agent feature mode: passive" in proc.stdout
 
 
 def test_repl_agent_mode_status_reflects_session_override(tmp_path: Path) -> None:

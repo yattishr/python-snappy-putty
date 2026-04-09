@@ -219,6 +219,46 @@ def test_load_agent_rule_registry_parses_valid_rules(monkeypatch, tmp_path: Path
     assert registry.warnings == []
     assert [rule.name for rule in registry.rules] == ["Confirm Destructive Actions"]
     assert registry.rules[0].body == "Always ask for confirmation before destructive commands."
+    assert registry.rules[0].identifier == "confirm_destructive_actions"
+    assert registry.rules[0].supported_for_enforcement is False
+
+
+def test_load_agent_rule_registry_marks_supported_rule_enforceable(monkeypatch, tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "require_confirm.md").write_text(
+        "# Rule: require_confirm\nAll filesystem mutations require confirmation before execution.\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    registry = load_agent_rule_registry(tmp_path)
+
+    assert registry.warnings == []
+    assert len(registry.rules) == 1
+    assert registry.rules[0].identifier == "require_confirm"
+    assert registry.rules[0].supported_for_enforcement is True
+    assert registry.is_active("require_confirm") is True
+    assert [rule.identifier for rule in registry.enforceable_rules] == ["require_confirm"]
+
+
+def test_load_agent_rule_registry_keeps_unsupported_rule_informational(monkeypatch, tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "team_policy.md").write_text(
+        "# Rule: Team Policy\nHuman-readable guidance only.\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    registry = load_agent_rule_registry(tmp_path)
+
+    assert registry.warnings == []
+    assert len(registry.rules) == 1
+    assert registry.rules[0].identifier == "team_policy"
+    assert registry.rules[0].supported_for_enforcement is False
+    assert registry.is_active("team_policy") is False
+    assert [rule.identifier for rule in registry.informational_rules] == ["team_policy"]
 
 
 def test_load_agent_rule_registry_allows_empty_rules_directory(monkeypatch, tmp_path: Path) -> None:

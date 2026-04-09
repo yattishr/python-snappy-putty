@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tests.agent_fixtures import load_agent_fixture
 from snappy_putty import cli
+from snappy_putty.fs_models import FsPlan, PlannedOp
 from snappy_putty.session import LifecycleState, SessionState
 
 
@@ -207,6 +208,8 @@ def test_status_displays_agent_section_with_valid_agent_details(monkeypatch, tmp
     assert "Agent mode: passive" in output
     assert "Loaded skills: 1" in output
     assert "Loaded rules: 1" in output
+    assert "Enforceable rules: 0" in output
+    assert "Informational rules: 1" in output
     assert "Agent memory: present" in output
     assert "Agent memory session keys: last_goal, notes" in output
 
@@ -316,6 +319,8 @@ def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) 
     assert "Agent mode: passive" in lines
     assert "Loaded skills: 1" in lines
     assert "Loaded rules: 1" in lines
+    assert "Enforceable rules: 0" in lines
+    assert "Informational rules: 1" in lines
     assert "Memory present: yes" in lines
     assert "Session memory keys: last_goal, notes" in lines
 
@@ -349,9 +354,72 @@ def test_agent_doctor_reports_valid_full_agent_setup(monkeypatch, tmp_path: Path
     assert "Loaded skills: 1" in lines
     assert "Rules directory: present" in lines
     assert "Loaded rules: 1" in lines
+    assert "Enforceable rules: 0" in lines
+    assert "Informational rules: 1" in lines
     assert "Memory directory: present" in lines
     assert "Session file: present" in lines
     assert "Session parse: ok" in lines
+
+
+def test_agent_mode_change_is_blocked_by_no_active_mode_rule(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "no_active_mode.md").write_text(
+        "# Rule: no_active_mode\nActive mode is disabled in this repo.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    state = SessionState(agent_mode="passive")
+
+    handled = cli._handle_agent_mode_command("agent mode active", state)
+
+    assert handled is True
+    assert state.agent_mode == "passive"
+    assert "Active mode is disabled by the loaded agent rules." in buffer.getvalue()
+
+
+def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_failed(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "protect_project_root.md").write_text(
+        "# Rule: protect_project_root\nProtect the project root from dangerous mutations.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    state = SessionState(
+        agent_mode="passive",
+        current_state=LifecycleState.CONFIRMATION,
+        active_goal="make a folder called .",
+        pending_plan=FsPlan(
+            goal="make a folder called .",
+            cwd=str(tmp_path),
+            ops=[PlannedOp(op_id="op1", action="mkdir", src=None, dst=".", notes=[], risk="low")],
+            warnings=[],
+            requires_confirmation=True,
+        ),
+        awaiting_confirmation=True,
+        pending_context={
+            "type": "fs_confirmation",
+            "stage": "apply",
+            "workspace_root": str(tmp_path),
+            "allow_overwrite": False,
+            "allow_excess_ops": False,
+            "excess_ops": False,
+        },
+    )
+
+    cli._consume_confirmation_response("YES", state, tmp_path)
+
+    output = buffer.getvalue()
+    assert "Operation blocked by rule: protect_project_root" in output
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_failed_goal == "make a folder called ."
+    assert state.last_completed_goal is None
 
 
 def test_agent_doctor_reports_malformed_manifest(monkeypatch, tmp_path: Path) -> None:

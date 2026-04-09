@@ -35,6 +35,7 @@ from snappy_putty.render import (
     render_fs_plan,
     render_git_read,
 )
+from snappy_putty.rule_hooks import before_agent_mode_change, before_filesystem_mutation_plan_or_execute
 from snappy_putty.router import (
     ROUTE_ASK,
     ROUTE_BUILTIN_AFTER,
@@ -129,6 +130,12 @@ def _clarification_input_is_locked(*, text: str, route: str, state: SessionState
     if state.current_state != LifecycleState.CLARIFICATION:
         return False
     if not state.pending_question:
+        return False
+    if state.pending_context.get("type") in {"fs_destination", "guided_listing_choice", "guided_listing_custom_path"}:
+        if is_valid_clarification_response(text, state):
+            return False
+        return route not in {ROUTE_GIT_READ}
+    if _is_choice_question(state.pending_question):
         return False
     if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
         return False
@@ -294,6 +301,16 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
 
     if context_type == "ask_followup":
         return route == ROUTE_ASK or is_valid_clarification_response(text, state)
+
+    if context_type == "guided_listing_choice":
+        if isinstance(state.pending_question, dict):
+            return _is_choice_input(text, state.pending_question)
+        return True
+
+    if context_type == "guided_listing_custom_path":
+        if isinstance(state.pending_question, dict) and state.pending_question.get("type") == "path":
+            return looks_like_path(text)
+        return True
 
     return True
 
@@ -490,6 +507,8 @@ def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None
         f"Agent mode: {manifest.mode if manifest and manifest.mode else '(unknown)'}",
         f"Loaded skills: {len(skill_registry.skills)}",
         f"Loaded rules: {len(rule_registry.rules)}",
+        f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
+        f"Informational rules: {len(rule_registry.informational_rules)}",
         f"Memory present: {'yes' if memory.memory_found else 'no'}",
     ]
     if memory.memory_found:
@@ -541,6 +560,8 @@ def _build_agent_doctor_lines(cwd: Path | None = None, session_mode: str | None 
             f"Loaded skills: {len(skill_registry.skills)}",
             f"Rules directory: {'present' if rules_dir.is_dir() else 'absent'}",
             f"Loaded rules: {len(rule_registry.rules)}",
+            f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
+            f"Informational rules: {len(rule_registry.informational_rules)}",
             f"Memory directory: {'present' if memory_dir.is_dir() else 'absent'}",
             f"Session file: {'present' if session_path.is_file() else 'absent'}",
         ]
@@ -592,12 +613,23 @@ def _handle_agent_mode_command(raw_text: str, state: SessionState, session=None)
         if selected is None:
             console.print("Invalid mode. Choose: off, passive, active")
             return True
+        registry = load_agent_rule_registry(Path.cwd(), session_mode=state.agent_mode)
+        blocked_message = before_agent_mode_change(target_mode=selected, rule_registry=registry)
+        if blocked_message:
+            console.print(blocked_message)
+            return True
         _set_agent_mode(state, selected)
         return True
 
     normalized = normalize_agent_mode(mode_arg)
     if normalized is None:
         console.print("Invalid mode. Choose: off, passive, active")
+        return True
+
+    registry = load_agent_rule_registry(Path.cwd(), session_mode=state.agent_mode)
+    blocked_message = before_agent_mode_change(target_mode=normalized, rule_registry=registry)
+    if blocked_message:
+        console.print(blocked_message)
         return True
 
     _set_agent_mode(state, normalized)
@@ -629,6 +661,8 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
             f"Agent mode: {manifest.mode if manifest and manifest.mode else '(unknown)'}",
             f"Loaded skills: {len(skill_registry.skills)}",
             f"Loaded rules: {len(rule_registry.rules)}",
+            f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
+            f"Informational rules: {len(rule_registry.informational_rules)}",
             f"Agent memory: {'present' if memory.memory_found else 'absent'}",
         ]
     )
@@ -915,7 +949,8 @@ def rules(agent_mode_override: str | None = None) -> None:
     else:
         console.print("Loaded rules:")
         for rule in registry.rules:
-            console.print(f"- {rule.name}", markup=False)
+            classification = "enforceable" if rule.supported_for_enforcement else "informational"
+            console.print(f"- {rule.name} [{rule.identifier}] ({classification})", markup=False)
     for warning in registry.warnings:
         console.print(warning)
 
@@ -1011,6 +1046,19 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             excess_ops=excess_ops,
         )
         console.print("Type YES to apply, or NO to cancel.")
+        return
+
+    registry = load_agent_rule_registry(root, session_mode=state.agent_mode)
+    rule_decision = before_filesystem_mutation_plan_or_execute(
+        plan=state.pending_plan,
+        cwd=Path.cwd(),
+        workspace_root=root,
+        rule_registry=registry,
+    )
+    if rule_decision.blocked:
+        message = rule_decision.message or "Operation blocked by loaded agent rules."
+        console.print(message)
+        _fail_active_goal(state, message=message)
         return
 
     _set_state(state, LifecycleState.EXECUTING)
@@ -1184,10 +1232,25 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             return True
         return False
 
+    registry = load_agent_rule_registry(root, session_mode=state.agent_mode)
+    rule_decision = before_filesystem_mutation_plan_or_execute(
+        plan=plan,
+        cwd=Path.cwd(),
+        workspace_root=root,
+        rule_registry=registry,
+    )
+    if rule_decision.blocked:
+        message = rule_decision.message or "Operation blocked by loaded agent rules."
+        console.print(message)
+        _fail_active_goal(state, message=message)
+        return True
+
     render_fs_plan(console=console, plan=plan)
     state.pending_plan = plan
     state.pending_question = None
-    if not plan.requires_confirmation:
+
+    requires_confirmation = plan.requires_confirmation or rule_decision.requires_confirmation
+    if not requires_confirmation:
         state.awaiting_confirmation = False
         state.pending_context = {}
         state.last_result = "Planned filesystem change(s) with no apply confirmation needed."
@@ -1293,8 +1356,21 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
             return True
         return False
 
+    registry = load_agent_rule_registry(root)
+    rule_decision = before_filesystem_mutation_plan_or_execute(
+        plan=plan,
+        cwd=Path.cwd(),
+        workspace_root=root,
+        rule_registry=registry,
+    )
+    if rule_decision.blocked:
+        console.print(rule_decision.message or "Operation blocked by loaded agent rules.")
+        return True
+
     render_fs_plan(console=console, plan=plan)
-    if not plan.requires_confirmation:
+
+    requires_confirmation = plan.requires_confirmation or rule_decision.requires_confirmation
+    if not requires_confirmation:
         return True
 
     if prompt_reader is None:

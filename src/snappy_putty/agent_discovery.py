@@ -50,13 +50,26 @@ class AgentSkillRegistry:
 @dataclass(frozen=True)
 class AgentRule:
     name: str
+    identifier: str
     body: str
+    supported_for_enforcement: bool = False
 
 
 @dataclass(frozen=True)
 class AgentRuleRegistry:
     rules: list[AgentRule] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    def is_active(self, identifier: str) -> bool:
+        return any(rule.identifier == identifier and rule.supported_for_enforcement for rule in self.rules)
+
+    @property
+    def enforceable_rules(self) -> list[AgentRule]:
+        return [rule for rule in self.rules if rule.supported_for_enforcement]
+
+    @property
+    def informational_rules(self) -> list[AgentRule]:
+        return [rule for rule in self.rules if not rule.supported_for_enforcement]
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,7 @@ _KNOWN_FIELDS: dict[str, type | tuple[type, ...]] = {
 }
 
 _ALLOWED_AGENT_MODES = {"off", "passive", "active"}
+_SUPPORTED_RULE_IDENTIFIERS = frozenset({"require_confirm", "protect_project_root", "no_active_mode"})
 
 
 def normalize_agent_mode(value: str | None) -> str | None:
@@ -366,7 +380,24 @@ def _parse_rule_file(path: Path) -> AgentRule:
     if not body:
         raise ValueError("rule body cannot be empty")
 
-    return AgentRule(name=name, body=body)
+    identifier = _normalize_rule_identifier(name)
+    return AgentRule(
+        name=name,
+        identifier=identifier,
+        body=body,
+        supported_for_enforcement=identifier in _SUPPORTED_RULE_IDENTIFIERS,
+    )
+
+
+def _normalize_rule_identifier(name: str) -> str:
+    normalized = name.strip().lower()
+    normalized = normalized.replace("-", "_")
+    normalized = normalized.replace(" ", "_")
+    normalized = "".join(char for char in normalized if char.isalnum() or char == "_")
+    normalized = normalized.strip("_")
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized
 
 
 def load_agent_memory(cwd: Path | None = None, session_mode: str | None = None) -> AgentMemory:
