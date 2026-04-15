@@ -14,6 +14,14 @@ from snappy_putty.cli import app
 runner = CliRunner()
 
 
+def _shell_env() -> dict[str, str]:
+    env = os.environ.copy()
+    src_path = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    env["SNAPPY_PUTTY_NO_SPINNER"] = "1"
+    return env
+
+
 def test_cli_help_runs() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -271,9 +279,7 @@ def test_google_cloud_deploy_cli_question() -> None:
 
 
 def test_shell_starts_and_exits_with_exit_input() -> None:
-    env = os.environ.copy()
-    src_path = str(Path(__file__).resolve().parents[1] / "src")
-    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    env = _shell_env()
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
         input="exit\n",
@@ -288,9 +294,7 @@ def test_shell_starts_and_exits_with_exit_input() -> None:
 
 
 def test_shell_agent_command_runs() -> None:
-    env = os.environ.copy()
-    src_path = str(Path(__file__).resolve().parents[1] / "src")
-    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    env = _shell_env()
     env["SNAPPY_AGENT_MODE"] = "passive"
     with runner.isolated_filesystem():
         load_agent_fixture("valid_agent", Path.cwd())
@@ -310,9 +314,7 @@ def test_shell_agent_command_runs() -> None:
 
 
 def test_shell_agent_doctor_command_runs() -> None:
-    env = os.environ.copy()
-    src_path = str(Path(__file__).resolve().parents[1] / "src")
-    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    env = _shell_env()
     env["SNAPPY_AGENT_MODE"] = "passive"
     with runner.isolated_filesystem():
         load_agent_fixture("valid_agent", Path.cwd())
@@ -359,3 +361,71 @@ def test_ask_unknown_command_stays_local_and_does_not_call_agent(monkeypatch) ->
     result = runner.invoke(app, ["ask", "do something random and undefined"])
     assert result.exit_code == 0
     assert "I don't recognize that command. Try 'help' to see what I can do." in result.stdout
+
+
+def test_shell_workflow_ux_smoke_clarification_confirmation_and_after(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\nhelp\ncancel\ncopy README.md README-copy.md\nmaybe\nafter\nYES\nafter\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_shell_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Your pending question is still active." in proc.stdout
+    assert "Please answer YES or NO." in proc.stdout
+    assert "Awaiting confirmation: Type YES to apply, or NO to cancel." in proc.stdout
+    assert "No pending next step." in proc.stdout
+
+
+def test_shell_workflow_ux_smoke_same_file_no_op(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README.md\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_shell_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    output = " ".join(proc.stdout.split())
+    assert "No-Op Request" in output
+    assert "same source and destination." in output
+    assert "Source and destination resolve to the same file." in output
+    assert "Current state: IDLE" in output
+
+
+def test_shell_workflow_ux_smoke_blocked_rule_is_prominent(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "protect_project_root.md").write_text(
+        "# Rule: protect_project_root\nProtect the project root from dangerous mutations.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    env = _shell_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md to /\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Policy Block" in proc.stdout
+    assert "Operation blocked by rule: protect_project_root" in proc.stdout
+    assert "Next Step" in proc.stdout

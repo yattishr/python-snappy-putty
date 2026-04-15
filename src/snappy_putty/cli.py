@@ -30,9 +30,11 @@ from snappy_putty.render import (
     render_agent_parse_error,
     render_agent_doctor_report,
     render_directory_listing,
+    render_fs_cannot_proceed,
     render_doctor_report,
     render_fs_apply_result,
     render_fs_plan,
+    render_fs_rule_block,
     render_git_read,
 )
 from snappy_putty.rule_hooks import before_agent_mode_change, before_filesystem_mutation_plan_or_execute
@@ -143,16 +145,75 @@ def _clarification_input_is_locked(*, text: str, route: str, state: SessionState
 
 
 def _render_clarification_lock_message(state: SessionState) -> None:
-    console.print(
-        "\n".join(
+    _render_clarification_followup(state, blocked=True)
+
+
+def _render_clarification_followup(state: SessionState, *, blocked: bool) -> None:
+    lines: list[str] = []
+    if blocked:
+        lines.extend(
             [
-                "You have a pending question:",
-                "",
-                _pending_question_message(state.pending_question),
-                "",
+                "You have a pending question.",
                 "Answer it, or type 'cancel' to abandon the current goal.",
             ]
         )
+    else:
+        lines.extend(
+            [
+                "Your pending question is still active.",
+                "Answer it, or type 'cancel' to abandon the current goal.",
+            ]
+        )
+    console.print(
+        "\n".join(lines)
+    )
+
+
+def _confirmation_prompt_message(state: SessionState) -> str:
+    context = state.pending_context if isinstance(state.pending_context, dict) else {}
+    stage = str(context.get("stage", "apply"))
+    if stage == "overwrite":
+        return "Destination exists. Type YES to overwrite, or NO to cancel."
+    if stage == "limit":
+        return f"Plan exceeds {MAX_OPS} operations. Type YES to continue, or NO to cancel."
+    return "Type YES to apply, or NO to cancel."
+
+
+def _render_confirmation_prompt(state: SessionState, *, invalid: bool = False) -> None:
+    if invalid:
+        console.print("Please answer YES or NO.")
+    console.print(_confirmation_prompt_message(state))
+
+
+def _empty_fs_plan_feedback(plan: FsPlan) -> tuple[str, str, list[str], str]:
+    warnings = list(plan.warnings)
+    lowered = [item.lower() for item in warnings]
+    if any("workspace root" in item or "escapes workspace root" in item for item in lowered):
+        return (
+            "Blocked Request",
+            "No executable filesystem changes were planned because the target path is outside the workspace root.",
+            warnings,
+            "Choose a destination inside the workspace and try again.",
+        )
+    if any("same file" in item or "same path" in item or "same source" in item for item in lowered):
+        return (
+            "No-Op Request",
+            "No executable filesystem changes were planned because the request resolves to the same source and destination.",
+            warnings,
+            "Choose a different destination and try again.",
+        )
+    if warnings:
+        return (
+            "Invalid Request",
+            "No executable filesystem changes were planned because the request could not be normalized into a valid filesystem change.",
+            warnings,
+            "Adjust the request and try again.",
+        )
+    return (
+        "No-Op Request",
+        "No executable filesystem changes were planned.",
+        [],
+        "Adjust the request and try again.",
     )
 
 
@@ -442,6 +503,7 @@ def print_repl_cheatsheet() -> None:
             "[bold]What I do[/bold]",
             "- Plan and explain terminal workflows.",
             "- Perform safe read-only inspection when needed.",
+            "- Ask follow-up questions when a request needs clarification.",
             "",
             "[bold]Quick commands[/bold]",
             "- doctor            Show local planning diagnostics.",
@@ -451,15 +513,22 @@ def print_repl_cheatsheet() -> None:
             "- skills            List loaded .snappy skills.",
             "- rules             List loaded .snappy rules.",
             "- explain <command> Explain a command safely.",
-            "- after             Show the next pending step.",
-            "- status            Show session and agent status.",
-            "- cancel            Clear pending task state.",
+            "- after             Show the next expected input or step.",
+            "- status            Show diagnostic session and agent status.",
+            "- cancel            Clear pending workflow state.",
             "- help              Show this help panel.",
             "- exit / quit       Leave the interactive shell.",
+            "",
+            "[bold]Workflow tips[/bold]",
+            "- If Snappy asks a question, answer it directly or type 'cancel'.",
+            "- Use 'after' to see the next expected input.",
+            "- Use 'status' when you want full diagnostic state.",
             "",
             "[bold]Try[/bold]",
             '- "give me a file listing"',
             '- "give me a file listing for src"',
+            '- "copy README.md"',
+            '- "destination path> tests/"',
             '- "deploy this to google cloud"',
             "",
             f"[bold]CWD[/bold]: {snapshot.cwd}",
@@ -739,6 +808,12 @@ def run_shell() -> None:
         if state.awaiting_confirmation and text.upper() in {"YES", "NO"}:
             _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)
             continue
+        if state.awaiting_confirmation:
+            if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
+                pass
+            else:
+                _render_confirmation_prompt(state, invalid=True)
+                continue
 
         if _should_consume_pending_question(text=text, route=route, state=state):
             _consume_pending_question_answer(answer=text, state=state)
@@ -759,6 +834,8 @@ def run_shell() -> None:
             continue
         if route == ROUTE_BUILTIN_HELP:
             print_repl_cheatsheet()
+            if state.current_state == LifecycleState.CLARIFICATION and state.pending_question and not _is_choice_question(state.pending_question):
+                _render_clarification_followup(state, blocked=False)
             continue
         if route == ROUTE_BUILTIN_DOCTOR:
             doctor(verbose=False)
@@ -1020,7 +1097,7 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
                 allow_excess_ops=allow_excess_ops,
                 excess_ops=excess_ops,
             )
-            console.print(f"Plan exceeds {MAX_OPS} operations. Type YES to continue, or NO to cancel.")
+            _render_confirmation_prompt(state)
             return
         _set_fs_confirmation_state(
             state,
@@ -1031,7 +1108,7 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             allow_excess_ops=allow_excess_ops,
             excess_ops=excess_ops,
         )
-        console.print("Type YES to apply, or NO to cancel.")
+        _render_confirmation_prompt(state)
         return
 
     if stage == "limit":
@@ -1045,7 +1122,7 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             allow_excess_ops=allow_excess_ops,
             excess_ops=excess_ops,
         )
-        console.print("Type YES to apply, or NO to cancel.")
+        _render_confirmation_prompt(state)
         return
 
     registry = load_agent_rule_registry(root, session_mode=state.agent_mode)
@@ -1140,7 +1217,7 @@ def _handle_after(state: SessionState) -> None:
         console.print(f"Pending question: {_pending_question_message(state.pending_question)}")
         return
     if state.awaiting_confirmation:
-        console.print("Pending confirmation: type YES to continue or NO to cancel.")
+        console.print(f"Awaiting confirmation: {_confirmation_prompt_message(state)}")
         return
     if isinstance(state.pending_plan, list) and state.pending_plan:
         next_step = state.pending_plan[0]
@@ -1153,7 +1230,7 @@ def _handle_after(state: SessionState) -> None:
         first_op = state.pending_plan.ops[0]
         console.print(f"Next planned filesystem step: {first_op.action} {first_op.dst or ''}".strip())
         return
-    console.print("No active task.")
+    console.print("No pending next step.")
 
 
 def _handle_status(state: SessionState) -> None:
@@ -1241,11 +1318,33 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
     )
     if rule_decision.blocked:
         message = rule_decision.message or "Operation blocked by loaded agent rules."
-        console.print(message)
+        render_fs_rule_block(
+            console=console,
+            goal=plan.goal or intent,
+            message=message,
+            next_step_hint="Adjust the target path or request, then try again.",
+        )
         _fail_active_goal(state, message=message)
         return True
 
-    render_fs_plan(console=console, plan=plan)
+    if not plan.ops:
+        title, summary, details, next_step_hint = _empty_fs_plan_feedback(plan)
+        render_fs_cannot_proceed(
+            console=console,
+            goal=plan.goal or intent,
+            title=title,
+            summary=summary,
+            details=details,
+            next_step_hint=next_step_hint,
+        )
+        _fail_active_goal(state, message=summary)
+        return True
+
+    policy_notes: list[str] = []
+    if rule_decision.requires_confirmation:
+        policy_notes.append("Loaded rules require confirmation before filesystem changes are applied.")
+
+    render_fs_plan(console=console, plan=plan, policy_notes=policy_notes)
     state.pending_plan = plan
     state.pending_question = None
 
@@ -1275,7 +1374,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             allow_excess_ops=False,
             excess_ops=excess_ops,
         )
-        console.print("Destination exists. Type YES to overwrite, or NO to cancel.")
+        _render_confirmation_prompt(state)
         state.last_result = "Awaiting overwrite confirmation."
         return True
 
@@ -1289,7 +1388,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             allow_excess_ops=False,
             excess_ops=excess_ops,
         )
-        console.print(f"Plan exceeds {MAX_OPS} operations. Type YES to continue, or NO to cancel.")
+        _render_confirmation_prompt(state)
         state.last_result = "Awaiting large-plan confirmation."
         return True
 
@@ -1302,7 +1401,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
         allow_excess_ops=False,
         excess_ops=False,
     )
-    console.print("Type YES to apply, or NO to cancel.")
+    _render_confirmation_prompt(state)
     state.last_result = "Awaiting apply confirmation."
     return True
 
@@ -1364,10 +1463,31 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
         rule_registry=registry,
     )
     if rule_decision.blocked:
-        console.print(rule_decision.message or "Operation blocked by loaded agent rules.")
+        render_fs_rule_block(
+            console=console,
+            goal=plan.goal or intent,
+            message=rule_decision.message or "Operation blocked by loaded agent rules.",
+            next_step_hint="Adjust the target path or request, then try again.",
+        )
         return True
 
-    render_fs_plan(console=console, plan=plan)
+    if not plan.ops:
+        title, summary, details, next_step_hint = _empty_fs_plan_feedback(plan)
+        render_fs_cannot_proceed(
+            console=console,
+            goal=plan.goal or intent,
+            title=title,
+            summary=summary,
+            details=details,
+            next_step_hint=next_step_hint,
+        )
+        return True
+
+    policy_notes: list[str] = []
+    if rule_decision.requires_confirmation:
+        policy_notes.append("Loaded rules require confirmation before filesystem changes are applied.")
+
+    render_fs_plan(console=console, plan=plan, policy_notes=policy_notes)
 
     requires_confirmation = plan.requires_confirmation or rule_decision.requires_confirmation
     if not requires_confirmation:

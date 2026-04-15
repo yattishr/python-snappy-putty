@@ -104,12 +104,20 @@ def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch)
 
     output = buffer.getvalue()
     assert "Quick commands" in output
+    assert "Ask follow-up questions when a request needs clarification." in output
     assert "agent             Show the loaded agent summary." in output
     assert "agent mode        Inspect or change agent runtime mode." in output
+    assert "after             Show the next expected input or step." in output
+    assert "status            Show diagnostic session and agent status." in output
+    assert "cancel            Clear pending workflow state." in output
     assert "skills            List loaded .snappy skills." in output
     assert "rules             List loaded .snappy rules." in output
     assert "init              Scaffold a .snappy/ agent directory." in output
     assert "exit / quit       Leave the interactive shell." in output
+    assert "Workflow tips" in output
+    assert "Use 'after' to see the next expected input." in output
+    assert '"copy README.md"' in output
+    assert '"destination path> tests/"' in output
 
 
 def test_agent_mode_choice_question_defaults_to_current_selection() -> None:
@@ -475,6 +483,76 @@ def test_confirmation_without_pending_plan_records_failed_goal() -> None:
     assert state.last_result == "Confirmation received, but no actionable pending state remained."
 
 
+def test_confirmation_prompt_message_varies_by_stage() -> None:
+    apply_state = SessionState(pending_context={"type": "fs_confirmation", "stage": "apply"})
+    overwrite_state = SessionState(pending_context={"type": "fs_confirmation", "stage": "overwrite"})
+    limit_state = SessionState(pending_context={"type": "fs_confirmation", "stage": "limit"})
+
+    assert cli._confirmation_prompt_message(apply_state) == "Type YES to apply, or NO to cancel."
+    assert cli._confirmation_prompt_message(overwrite_state) == "Destination exists. Type YES to overwrite, or NO to cancel."
+    assert cli._confirmation_prompt_message(limit_state) == f"Plan exceeds {cli.MAX_OPS} operations. Type YES to continue, or NO to cancel."
+
+
+def test_empty_fs_plan_feedback_distinguishes_workspace_block_from_invalid_request() -> None:
+    workspace_block = FsPlan(
+        goal="copy README.md to /",
+        cwd="/tmp/demo",
+        ops=[],
+        warnings=["Path escapes workspace root: /tmp/demo"],
+        requires_confirmation=False,
+    )
+    invalid_request = FsPlan(
+        goal="copy missing.txt to beta.txt",
+        cwd="/tmp/demo",
+        ops=[],
+        warnings=["Source does not exist: missing.txt"],
+        requires_confirmation=False,
+    )
+    same_file = FsPlan(
+        goal="copy README.md README.md",
+        cwd="/tmp/demo",
+        ops=[],
+        warnings=["Source and destination resolve to the same file."],
+        requires_confirmation=False,
+    )
+
+    assert cli._empty_fs_plan_feedback(workspace_block)[0:2] == (
+        "Blocked Request",
+        "No executable filesystem changes were planned because the target path is outside the workspace root.",
+    )
+    assert cli._empty_fs_plan_feedback(invalid_request)[0:2] == (
+        "Invalid Request",
+        "No executable filesystem changes were planned because the request could not be normalized into a valid filesystem change.",
+    )
+    assert cli._empty_fs_plan_feedback(same_file)[0:2] == (
+        "No-Op Request",
+        "No executable filesystem changes were planned because the request resolves to the same source and destination.",
+    )
+
+
+def test_after_uses_stage_specific_confirmation_prompt(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(
+        current_state=LifecycleState.CONFIRMATION,
+        awaiting_confirmation=True,
+        pending_context={"type": "fs_confirmation", "stage": "overwrite"},
+    )
+
+    cli._handle_after(state)
+
+    output = " ".join(buffer.getvalue().split())
+    assert "Awaiting confirmation: Destination exists." in output
+    assert "Type YES to overwrite, or NO to cancel." in output
+
+
+def test_after_in_idle_reports_no_pending_next_step(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+
+    cli._handle_after(SessionState())
+
+    assert "No pending next step." in buffer.getvalue()
+
+
 def test_clarification_response_validation_distinguishes_answers_from_new_commands() -> None:
     state = SessionState(
         current_state=LifecycleState.CLARIFICATION,
@@ -549,8 +627,7 @@ def test_clarification_lock_rejects_new_command_without_mutating_state(monkeypat
     assert state.last_failed_goal == "failed"
     assert state.last_cancelled_goal == "cancelled"
     assert cli._should_consume_pending_question(text=text, route=decision.route, state=state) is False
-    assert "You have a pending question:" in buffer.getvalue()
-    assert "Which remote do you mean?" in buffer.getvalue()
+    assert "You have a pending question." in buffer.getvalue()
     assert "Answer it, or type 'cancel' to abandon the current goal." in buffer.getvalue()
 
 

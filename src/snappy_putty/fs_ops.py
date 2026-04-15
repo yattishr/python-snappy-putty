@@ -132,6 +132,8 @@ def _validate_destination(
         if src_path is None:
             raise ValueError("A source file is required when destination is a directory.")
         resolved_target = resolved_dst.path / src_path.name
+    if src_path is not None and resolved_target == src_path:
+        raise ValueError("Source and destination resolve to the same file.")
     destination_exists = resolved_target.exists()
     if destination_exists and not allow_existing:
         raise ValueError(f"Destination already exists: {_as_display_path(resolved_target, cwd)}")

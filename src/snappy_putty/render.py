@@ -39,7 +39,14 @@ def render_dir_listing(console: Console, listing_text: str) -> None:
     render_directory_listing(console=console, content=listing_text)
 
 
-def render_fs_plan(console: Console, plan: FsPlan) -> None:
+def render_fs_plan(console: Console, plan: FsPlan, policy_notes: list[str] | None = None) -> None:
+    console.print(Panel.fit(plan.goal, title="Goal", border_style="blue"))
+
+    notes = list(policy_notes or [])
+    if notes:
+        policy_text = "\n".join(f"- {item}" for item in notes)
+        console.print(Panel(Markdown(policy_text), title="Policy", border_style="red"))
+
     ops_table = Table(title="Planned Changes")
     ops_table.add_column("Op", style="cyan")
     ops_table.add_column("Action", style="green")
@@ -56,6 +63,32 @@ def render_fs_plan(console: Console, plan: FsPlan) -> None:
 
     warning_text = "\n".join(f"- {item}" for item in plan.warnings) or "- none"
     console.print(Panel(Markdown(warning_text), title="Plan Warnings", border_style="yellow"))
+
+
+def render_fs_rule_block(console: Console, *, goal: str, message: str, next_step_hint: str | None = None) -> None:
+    console.print(Panel.fit(goal, title="Goal", border_style="blue"))
+    console.print(Panel(message, title="Policy Block", border_style="red"))
+    if next_step_hint:
+        console.print(Panel.fit(next_step_hint, title="Next Step", border_style="yellow"))
+
+
+def render_fs_cannot_proceed(
+    console: Console,
+    *,
+    goal: str,
+    title: str,
+    summary: str,
+    details: list[str] | None = None,
+    next_step_hint: str | None = None,
+) -> None:
+    console.print(Panel.fit(goal, title="Goal", border_style="blue"))
+    console.print(Panel.fit(summary, title=title, border_style="yellow"))
+    detail_lines = list(details or [])
+    if detail_lines:
+        detail_text = "\n".join(f"- {item}" for item in detail_lines)
+        console.print(Panel(Markdown(detail_text), title="Details", border_style="yellow"))
+    if next_step_hint:
+        console.print(Panel.fit(next_step_hint, title="Next Step", border_style="yellow"))
 
 
 def render_fs_apply_result(console: Console, result: FsApplyResult) -> None:

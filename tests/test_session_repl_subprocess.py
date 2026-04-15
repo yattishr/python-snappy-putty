@@ -48,8 +48,69 @@ def test_repl_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
         timeout=20,
     )
     assert proc.returncode == 0
+    assert proc.stdout.index("Goal") < proc.stdout.index("Planned Changes")
+    assert proc.stdout.index("Planned Changes") < proc.stdout.index("Plan Warnings")
+    assert proc.stdout.index("Plan Warnings") < proc.stdout.index("Type YES to apply, or NO to cancel.")
     assert "Type YES to apply, or NO to cancel." in proc.stdout
     assert (tmp_path / "README-copy.md").exists()
+
+
+def test_repl_overwrite_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    destination = tmp_path / "README-copy.md"
+    source.write_text("demo", encoding="utf-8")
+    destination.write_text("existing", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nYES\nYES\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Destination exists. Type YES to overwrite, or NO to cancel." in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert destination.read_text(encoding="utf-8") == "demo"
+
+
+def test_repl_invalid_confirmation_input_reprompts_cleanly(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nmaybe\nYES\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Please answer YES or NO." in proc.stdout
+    assert proc.stdout.count("Type YES to apply, or NO to cancel.") == 2
+    assert (tmp_path / "README-copy.md").exists()
+
+
+def test_repl_confirmation_flow_cancels_on_no(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nNO\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Cancelled. No pending action was applied." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Last cancelled goal: copy README.md README-copy.md" in proc.stdout
+    assert not (tmp_path / "README-copy.md").exists()
 
 
 def test_repl_after_status_cancel(tmp_path: Path) -> None:
@@ -68,12 +129,12 @@ def test_repl_after_status_cancel(tmp_path: Path) -> None:
     assert "Session Status" in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
     assert "Awaiting confirmation: yes" in proc.stdout
-    assert "Pending confirmation: type YES to continue or NO to cancel." in proc.stdout
+    assert "Awaiting confirmation: Type YES to apply, or NO to cancel." in proc.stdout
     assert "Cleared pending question/plan state." in proc.stdout
     assert "Current state: IDLE" in proc.stdout
     assert "Active goal: (none)" in proc.stdout
     assert "Last cancelled goal: copy README.md README-copy.md" in proc.stdout
-    assert "No active task." in proc.stdout
+    assert "No pending next step." in proc.stdout
     assert not (tmp_path / "README-copy.md").exists()
 
 
@@ -116,7 +177,7 @@ def test_repl_clarification_blocks_new_safe_inspect_goal(tmp_path: Path) -> None
         timeout=20,
     )
     assert proc.returncode == 0
-    assert "You have a pending question:" in proc.stdout
+    assert "You have a pending question." in proc.stdout
     assert "destination path>" in proc.stdout
     assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
     assert "Directory Listing" not in proc.stdout
@@ -127,6 +188,7 @@ def test_repl_clarification_blocks_new_safe_inspect_goal(tmp_path: Path) -> None
     assert "Last completed goal: (none)" in proc.stdout
     assert "Last failed goal: (none)" in proc.stdout
     assert "Last cancelled goal: (none)" in proc.stdout
+    assert proc.stdout.count("destination path>") <= 4
 
 
 def test_repl_clarification_blocks_new_ask_goal(tmp_path: Path) -> None:
@@ -142,7 +204,7 @@ def test_repl_clarification_blocks_new_ask_goal(tmp_path: Path) -> None:
         timeout=20,
     )
     assert proc.returncode == 0
-    assert "You have a pending question:" in proc.stdout
+    assert "You have a pending question." in proc.stdout
     assert "destination path>" in proc.stdout
     assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
     assert "Current state: CLARIFICATION" in proc.stdout
@@ -152,6 +214,46 @@ def test_repl_clarification_blocks_new_ask_goal(tmp_path: Path) -> None:
     assert "Last completed goal: (none)" in proc.stdout
     assert "Last failed goal: (none)" in proc.stdout
     assert "Last cancelled goal: (none)" in proc.stdout
+    assert proc.stdout.count("destination path>") <= 4
+
+
+def test_repl_help_during_clarification_preserves_prompt_continuity(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\nhelp\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Welcome" in proc.stdout
+    assert "Your pending question is still active." in proc.stdout
+    assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
+    assert proc.stdout.count("destination path>") <= 4
+
+
+def test_repl_status_during_clarification_preserves_prompt_continuity(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Session Status" in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Your pending question is still active." not in proc.stdout
+    assert proc.stdout.count("destination path>") <= 4
 
 
 def test_repl_successful_fs_apply_moves_goal_to_last_completed(tmp_path: Path) -> None:
@@ -372,13 +474,66 @@ def test_repl_protect_project_root_blocks_workspace_escape_with_rule_message(tmp
     )
 
     assert proc.returncode == 0
+    assert proc.stdout.index("Goal") < proc.stdout.index("Policy Block")
+    assert proc.stdout.index("Policy Block") < proc.stdout.index("Next Step")
     assert "Operation blocked by rule: protect_project_root" in proc.stdout
     assert "The requested filesystem mutation targets a protected path." in proc.stdout
+    assert "Adjust the target path or request, then try again." in proc.stdout
     assert "No filesystem changes planned." not in proc.stdout
     assert "Path escapes workspace root" not in proc.stdout
     assert "Current state: IDLE" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
     assert "Last failed goal: copy README.md to /" in proc.stdout
+
+
+def test_repl_workspace_escape_without_rule_is_reported_as_blocked_request(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md to /\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    output = " ".join(proc.stdout.split())
+    assert "Blocked Request" in output
+    assert "No executable filesystem changes were planned" in output
+    assert "outside the workspace root." in output
+    assert "Path escapes workspace root:" in output
+    assert "Choose a destination inside the workspace and try again." in output
+    assert "Type YES to apply, or NO to cancel." not in output
+    assert "Current state: IDLE" in output
+    assert "Pending plan: (none)" in output
+    assert "Last failed goal: copy README.md to /" in output
+
+
+def test_repl_zero_op_invalid_request_does_not_leave_pending_plan(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy missing.txt to beta.txt\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    output = " ".join(proc.stdout.split())
+    assert "Invalid Request" in output
+    assert "No executable filesystem changes were planned" in output
+    assert "could not be normalized into a valid filesystem change." in output
+    assert "Source does not exist: missing.txt" in output
+    assert "Adjust the request and try again." in output
+    assert "Type YES to apply, or NO to cancel." not in output
+    assert "Current state: IDLE" in output
+    assert "Pending plan: (none)" in output
+    assert "Last failed goal: copy missing.txt to beta.txt" in output
 
 
 def test_repl_help_includes_agent_related_commands(tmp_path: Path) -> None:
@@ -576,6 +731,40 @@ def test_repl_status_shows_agent_metadata_when_present(tmp_path: Path) -> None:
     assert "Loaded skills: 1" in proc.stdout
     assert "Loaded rules: 1" in proc.stdout
     assert "Agent memory session keys: last_goal, notes" in proc.stdout
+
+
+def test_repl_after_during_clarification_is_actionable(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\nafter\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Session Status" not in proc.stdout
+
+
+def test_repl_after_in_idle_is_clean(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="after\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "No pending next step." in proc.stdout
+    assert "Session Status" not in proc.stdout
 
 
 def test_guided_listing_override_runs_new_command_without_state_contamination(tmp_path: Path) -> None:
