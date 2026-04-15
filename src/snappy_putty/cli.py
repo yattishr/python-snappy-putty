@@ -538,12 +538,15 @@ def print_repl_cheatsheet() -> None:
     console.print(Panel(content, title="Welcome", border_style="bright_blue"))
 
 
-def _build_agent_mode_lines(session_mode: str | None = None) -> list[str]:
+def _build_agent_mode_lines(
+    session_mode: str | None = None,
+    source: str | None = None,
+) -> list[str]:
     current_mode = get_agent_mode(session_mode)
-    source = get_agent_mode_source(session_mode)
+    resolved_source = source if source is not None else get_agent_mode_source(session_mode)
     return [
         f"Current: {current_mode}",
-        f"Source: {source}",
+        f"Source: {resolved_source}",
     ]
 
 
@@ -659,12 +662,16 @@ def _set_agent_mode(state: SessionState, mode: str) -> None:
     console.print(f"Agent mode set to: {mode} (session)")
 
 
+def _show_agent_mode(current_mode: str, source: str) -> None:
+    console.print(Panel.fit("\n".join(_build_agent_mode_lines(current_mode, source)), title="Agent Mode", border_style="bright_blue"))
+
+
 def _prompt_for_agent_mode(session, current_mode: str, source: str) -> str:
     question = _build_agent_mode_choice_question(current_mode=current_mode, source=source)
     if session is None:
-        console.print(Panel.fit("Agent Mode", title="Agent Mode", border_style="bright_blue"))
+        _show_agent_mode(current_mode, source)
         return _prompt_choice_fallback(question)
-    console.print(Panel.fit("Agent Mode", title="Agent Mode", border_style="bright_blue"))
+    _show_agent_mode(current_mode, source)
     return _prompt_choice_question(session, question)
 
 
@@ -675,6 +682,12 @@ def _handle_agent_mode_command(raw_text: str, state: SessionState, session=None)
 
     mode_arg = match.group("mode")
     if mode_arg is None:
+        current_mode = get_agent_mode(state.agent_mode)
+        source = get_agent_mode_source(state.agent_mode)
+        _show_agent_mode(current_mode, source)
+        return True
+
+    if mode_arg.lower() == "select":
         current_mode = get_agent_mode(state.agent_mode)
         source = get_agent_mode_source(state.agent_mode)
         choice = _prompt_for_agent_mode(session, current_mode=current_mode, source=source)

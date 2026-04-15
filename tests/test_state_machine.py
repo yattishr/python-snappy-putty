@@ -128,6 +128,34 @@ def test_agent_mode_choice_question_defaults_to_current_selection() -> None:
     assert question["footer"] == "(Use ↑/↓ to navigate, ENTER to select)"
 
 
+def test_agent_mode_without_argument_is_display_only(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(agent_mode="passive")
+
+    handled = cli._handle_agent_mode_command("agent mode", state)
+
+    assert handled is True
+    assert state.agent_mode == "passive"
+    output = buffer.getvalue()
+    assert "Agent Mode" in output
+    assert "Current: passive" in output
+    assert "Source: session" in output
+    assert "Select mode:" not in output
+
+
+def test_agent_mode_select_opens_menu_and_applies_choice(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState()
+    monkeypatch.setattr(cli, "_prompt_for_agent_mode", lambda session, current_mode, source: "passive")
+
+    handled = cli._handle_agent_mode_command("agent mode select", state)
+
+    assert handled is True
+    assert state.agent_mode == "passive"
+    output = buffer.getvalue()
+    assert "Agent mode set to: passive (session)" in output
+
+
 def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState(

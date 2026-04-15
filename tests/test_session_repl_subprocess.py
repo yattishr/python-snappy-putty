@@ -588,10 +588,50 @@ def test_repl_init_twice_does_not_crash(tmp_path: Path) -> None:
     assert "Refusing to overwrite existing .snappy/" in proc.stdout
 
 
-def test_repl_agent_mode_shows_default_and_menu(tmp_path: Path) -> None:
+def test_repl_agent_mode_shows_default_non_interactively(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
-        input="agent mode\n1\nexit\n",
+        input="agent mode\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Agent Mode" in proc.stdout
+    assert "Current: off" in proc.stdout
+    assert "Source: default" in proc.stdout
+    assert "Select mode:" not in proc.stdout
+    assert "Enter choice >" not in proc.stdout
+    assert "Agent mode set to:" not in proc.stdout
+
+
+def test_repl_agent_mode_respects_environment(tmp_path: Path) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Current: passive" in proc.stdout
+    assert "Source: environment" in proc.stdout
+    assert "Select mode:" not in proc.stdout
+    assert "Agent mode set to:" not in proc.stdout
+
+
+def test_repl_agent_mode_select_opens_menu(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode select\n1\nexit\n",
         text=True,
         capture_output=True,
         cwd=tmp_path,
@@ -604,25 +644,6 @@ def test_repl_agent_mode_shows_default_and_menu(tmp_path: Path) -> None:
     assert "Current: off" in proc.stdout
     assert "Source: default" in proc.stdout
     assert "Select mode:" in proc.stdout
-    assert "Agent mode set to: off (session)" in proc.stdout
-
-
-def test_repl_agent_mode_respects_environment(tmp_path: Path) -> None:
-    env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
-    proc = subprocess.run(
-        [sys.executable, "-m", "snappy_putty.cli", "shell"],
-        input="agent mode\n1\nexit\n",
-        text=True,
-        capture_output=True,
-        cwd=tmp_path,
-        env=env,
-        timeout=20,
-    )
-
-    assert proc.returncode == 0
-    assert "Current: passive" in proc.stdout
-    assert "Source: environment" in proc.stdout
     assert "Agent mode set to: off (session)" in proc.stdout
 
 
@@ -687,6 +708,34 @@ def test_repl_agent_mode_active_is_blocked_by_loaded_rule(tmp_path: Path) -> Non
     assert proc.returncode == 0
     assert "Active mode is disabled by the loaded agent rules." in proc.stdout
     assert "Agent feature mode: passive" in proc.stdout
+
+
+def test_repl_agent_mode_block_does_not_fall_through_to_selector(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "no_active_mode.md").write_text(
+        "# Rule: no_active_mode\nActive mode is disabled in this repo.\n",
+        encoding="utf-8",
+    )
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="agent mode active\nagent mode\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Active mode is disabled by the loaded agent rules." in proc.stdout
+    assert "Current: passive" in proc.stdout
+    assert "Source: environment" in proc.stdout
+    assert "Select mode:" not in proc.stdout
+    assert "Enter choice >" not in proc.stdout
+    assert "Invalid mode. Choose: off, passive, active" not in proc.stdout
 
 
 def test_repl_agent_mode_status_reflects_session_override(tmp_path: Path) -> None:
