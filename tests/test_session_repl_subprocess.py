@@ -449,7 +449,7 @@ def test_repl_rules_command_shows_rule_registry(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert "Loaded rules:" in proc.stdout
-    assert "Confirm Destructive Actions" in proc.stdout
+    assert "Confirm Destructive Actions [confirm_destructive_actions] (informational)" in proc.stdout
 
 
 def test_repl_protect_project_root_blocks_workspace_escape_with_rule_message(tmp_path: Path) -> None:
@@ -484,6 +484,101 @@ def test_repl_protect_project_root_blocks_workspace_escape_with_rule_message(tmp
     assert "Current state: IDLE" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
     assert "Last failed goal: copy README.md to /" in proc.stdout
+
+
+def test_repl_block_rule_outranks_confirm_rule_when_both_are_loaded(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "protect_project_root.md").write_text(
+        "# Rule: protect_project_root\nProtect the project root from dangerous mutations.\n",
+        encoding="utf-8",
+    )
+    (rules_dir / "require_confirm.md").write_text(
+        "# Rule: require_confirm\nAll filesystem mutations require confirmation before execution.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md to /\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Policy Block" in proc.stdout
+    assert "Operation blocked by rule: protect_project_root" in proc.stdout
+    assert "confirmation rule(s) also matched: require_confirm" in proc.stdout
+    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+
+
+def test_repl_confirm_rule_and_info_rule_require_confirmation_without_block(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "require_confirm.md").write_text(
+        "# Rule: require_confirm\nAll filesystem mutations require confirmation before execution.\n",
+        encoding="utf-8",
+    )
+    (rules_dir / "custom_note.md").write_text(
+        "# Rule: custom_note\nHuman-readable guidance only.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md to tests/\nNO\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Policy" in proc.stdout
+    assert "Loaded rules require confirmation before filesystem changes are applied." in proc.stdout
+    assert "Policy Block" not in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+
+
+def test_repl_info_rule_only_does_not_change_safe_copy_behavior(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "custom_note.md").write_text(
+        "# Rule: custom_note\nHuman-readable guidance only.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Planned Changes" in proc.stdout
+    assert "Policy Block" not in proc.stdout
+    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
 
 
 def test_repl_workspace_escape_without_rule_is_reported_as_blocked_request(tmp_path: Path) -> None:
@@ -779,6 +874,7 @@ def test_repl_status_shows_agent_metadata_when_present(tmp_path: Path) -> None:
     assert "Agent version: 1" in proc.stdout
     assert "Loaded skills: 1" in proc.stdout
     assert "Loaded rules: 1" in proc.stdout
+    assert "Policy tiers: block=0, confirm=0, warn=0, info=1" in proc.stdout
     assert "Agent memory session keys: last_goal, notes" in proc.stdout
 
 

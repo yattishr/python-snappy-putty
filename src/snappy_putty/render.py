@@ -9,6 +9,7 @@ from rich.table import Table
 from snappy_putty.context import ContextSnapshot
 from snappy_putty.fs_models import FsApplyResult, FsPlan
 from snappy_putty.models import AgentOutput
+from snappy_putty.rule_hooks import PolicyDecision
 
 
 def render_agent_parse_error(
@@ -37,6 +38,25 @@ def render_git_read(console: Console, *, title: str, content: str, ok: bool = Tr
 
 def render_dir_listing(console: Console, listing_text: str) -> None:
     render_directory_listing(console=console, content=listing_text)
+
+
+def policy_notes_from_decision(policy_decision: PolicyDecision) -> list[str]:
+    if policy_decision.outcome != "confirm" or not policy_decision.confirm_rules:
+        return []
+    return ["Loaded rules require confirmation before filesystem changes are applied."]
+
+
+def block_message_from_decision(message: str, policy_decision: PolicyDecision) -> str:
+    extra_lines: list[str] = []
+    if policy_decision.confirm_rules:
+        joined_rules = ", ".join(policy_decision.confirm_rules)
+        extra_lines.append(f"Additional policy context: confirmation rule(s) also matched: {joined_rules}")
+    if policy_decision.warn_rules:
+        joined_rules = ", ".join(policy_decision.warn_rules)
+        extra_lines.append(f"Additional policy context: warning rule(s) also matched: {joined_rules}")
+    if not extra_lines:
+        return message
+    return f"{message}\n\n" + "\n".join(extra_lines)
 
 
 def render_fs_plan(console: Console, plan: FsPlan, policy_notes: list[str] | None = None) -> None:

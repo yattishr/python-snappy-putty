@@ -26,6 +26,8 @@ from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_i
 from snappy_putty.fs_models import FsPlan
 from snappy_putty.git_read import execute_git_read, parse_git_read_intent
 from snappy_putty.render import (
+    block_message_from_decision,
+    policy_notes_from_decision,
     render_agent_output,
     render_agent_parse_error,
     render_agent_doctor_report,
@@ -570,6 +572,11 @@ def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None
     if memory.session_data is not None:
         session_keys = ", ".join(sorted(memory.session_data.keys())) or "(empty)"
 
+    block_rule_names = ", ".join(rule.identifier for rule in rule_registry.block_rules) or "(none)"
+    confirm_rule_names = ", ".join(rule.identifier for rule in rule_registry.confirm_rules) or "(none)"
+    warn_rule_names = ", ".join(rule.identifier for rule in rule_registry.warn_rules) or "(none)"
+    info_rule_names = ", ".join(rule.identifier for rule in rule_registry.info_rules) or "(none)"
+
     lines = [
         f"Agent feature mode: {feature_mode}",
         "Agent loaded: yes",
@@ -581,6 +588,10 @@ def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None
         f"Loaded rules: {len(rule_registry.rules)}",
         f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
         f"Informational rules: {len(rule_registry.informational_rules)}",
+        f"Block rules: {block_rule_names}",
+        f"Confirm rules: {confirm_rule_names}",
+        f"Warn rules: {warn_rule_names}",
+        f"Info rules: {info_rule_names}",
         f"Memory present: {'yes' if memory.memory_found else 'no'}",
     ]
     if memory.memory_found:
@@ -634,6 +645,7 @@ def _build_agent_doctor_lines(cwd: Path | None = None, session_mode: str | None 
             f"Loaded rules: {len(rule_registry.rules)}",
             f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
             f"Informational rules: {len(rule_registry.informational_rules)}",
+            f"Policy tiers: block={len(rule_registry.block_rules)}, confirm={len(rule_registry.confirm_rules)}, warn={len(rule_registry.warn_rules)}, info={len(rule_registry.info_rules)}",
             f"Memory directory: {'present' if memory_dir.is_dir() else 'absent'}",
             f"Session file: {'present' if session_path.is_file() else 'absent'}",
         ]
@@ -745,6 +757,7 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
             f"Loaded rules: {len(rule_registry.rules)}",
             f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
             f"Informational rules: {len(rule_registry.informational_rules)}",
+            f"Policy tiers: block={len(rule_registry.block_rules)}, confirm={len(rule_registry.confirm_rules)}, warn={len(rule_registry.warn_rules)}, info={len(rule_registry.info_rules)}",
             f"Agent memory: {'present' if memory.memory_found else 'absent'}",
         ]
     )
@@ -1039,7 +1052,7 @@ def rules(agent_mode_override: str | None = None) -> None:
     else:
         console.print("Loaded rules:")
         for rule in registry.rules:
-            classification = "enforceable" if rule.supported_for_enforcement else "informational"
+            classification = f"enforceable:{rule.tier}" if rule.supported_for_enforcement else "informational"
             console.print(f"- {rule.name} [{rule.identifier}] ({classification})", markup=False)
     for warning in registry.warnings:
         console.print(warning)
@@ -1331,6 +1344,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
     )
     if rule_decision.blocked:
         message = rule_decision.message or "Operation blocked by loaded agent rules."
+        message = block_message_from_decision(message, rule_decision.policy_decision)
         render_fs_rule_block(
             console=console,
             goal=plan.goal or intent,
@@ -1353,10 +1367,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
         _fail_active_goal(state, message=summary)
         return True
 
-    policy_notes: list[str] = []
-    if rule_decision.requires_confirmation:
-        policy_notes.append("Loaded rules require confirmation before filesystem changes are applied.")
-
+    policy_notes = policy_notes_from_decision(rule_decision.policy_decision)
     render_fs_plan(console=console, plan=plan, policy_notes=policy_notes)
     state.pending_plan = plan
     state.pending_question = None
@@ -1476,10 +1487,12 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
         rule_registry=registry,
     )
     if rule_decision.blocked:
+        message = rule_decision.message or "Operation blocked by loaded agent rules."
+        message = block_message_from_decision(message, rule_decision.policy_decision)
         render_fs_rule_block(
             console=console,
             goal=plan.goal or intent,
-            message=rule_decision.message or "Operation blocked by loaded agent rules.",
+            message=message,
             next_step_hint="Adjust the target path or request, then try again.",
         )
         return True
@@ -1496,10 +1509,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
         )
         return True
 
-    policy_notes: list[str] = []
-    if rule_decision.requires_confirmation:
-        policy_notes.append("Loaded rules require confirmation before filesystem changes are applied.")
-
+    policy_notes = policy_notes_from_decision(rule_decision.policy_decision)
     render_fs_plan(console=console, plan=plan, policy_notes=policy_notes)
 
     requires_confirmation = plan.requires_confirmation or rule_decision.requires_confirmation

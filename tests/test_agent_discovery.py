@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tests.agent_fixtures import load_agent_fixture
 from snappy_putty.agent_discovery import (
     AgentManifest,
+    classify_rule_tier,
     discover_agent_project,
     get_agent_mode,
     get_agent_mode_source,
@@ -238,6 +239,7 @@ def test_load_agent_rule_registry_marks_supported_rule_enforceable(monkeypatch, 
     assert len(registry.rules) == 1
     assert registry.rules[0].identifier == "require_confirm"
     assert registry.rules[0].supported_for_enforcement is True
+    assert registry.rules[0].tier == "confirm"
     assert registry.is_active("require_confirm") is True
     assert [rule.identifier for rule in registry.enforceable_rules] == ["require_confirm"]
 
@@ -257,8 +259,21 @@ def test_load_agent_rule_registry_keeps_unsupported_rule_informational(monkeypat
     assert len(registry.rules) == 1
     assert registry.rules[0].identifier == "team_policy"
     assert registry.rules[0].supported_for_enforcement is False
+    assert registry.rules[0].tier == "info"
     assert registry.is_active("team_policy") is False
     assert [rule.identifier for rule in registry.informational_rules] == ["team_policy"]
+
+
+def test_classify_rule_tier_marks_block_rule_correctly() -> None:
+    assert classify_rule_tier("protect_project_root", supported_for_enforcement=True) == "block"
+
+
+def test_classify_rule_tier_marks_confirm_rule_correctly() -> None:
+    assert classify_rule_tier("require_confirm", supported_for_enforcement=True) == "confirm"
+
+
+def test_classify_rule_tier_marks_info_rule_correctly() -> None:
+    assert classify_rule_tier("custom_note", supported_for_enforcement=False) == "info"
 
 
 def test_load_agent_rule_registry_allows_empty_rules_directory(monkeypatch, tmp_path: Path) -> None:

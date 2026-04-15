@@ -329,6 +329,24 @@ def test_status_displays_agent_feature_mode_passive(monkeypatch, tmp_path: Path)
     assert "Agent name: Passive Agent" in output
 
 
+def test_status_displays_policy_tier_summary(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "require_confirm.md").write_text(
+        "# Rule: require_confirm\nAll filesystem mutations require confirmation before execution.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+
+    cli._handle_status(SessionState())
+
+    output = buffer.getvalue()
+    assert "Loaded rules: 1" in output
+    assert "Policy tiers: block=0, confirm=1, warn=0, info=0" in output
+
+
 def test_agent_summary_displays_no_agent_loaded(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
@@ -357,6 +375,10 @@ def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) 
     assert "Loaded rules: 1" in lines
     assert "Enforceable rules: 0" in lines
     assert "Informational rules: 1" in lines
+    assert "Block rules: (none)" in lines
+    assert "Confirm rules: (none)" in lines
+    assert "Warn rules: (none)" in lines
+    assert "Info rules: safety" in lines
     assert "Memory present: yes" in lines
     assert "Session memory keys: last_goal, notes" in lines
 
@@ -392,6 +414,7 @@ def test_agent_doctor_reports_valid_full_agent_setup(monkeypatch, tmp_path: Path
     assert "Loaded rules: 1" in lines
     assert "Enforceable rules: 0" in lines
     assert "Informational rules: 1" in lines
+    assert "Policy tiers: block=0, confirm=0, warn=0, info=1" in lines
     assert "Memory directory: present" in lines
     assert "Session file: present" in lines
     assert "Session parse: ok" in lines
@@ -403,6 +426,29 @@ def test_agent_mode_change_is_blocked_by_no_active_mode_rule(monkeypatch, tmp_pa
     rules_dir.mkdir(parents=True)
     (rules_dir / "no_active_mode.md").write_text(
         "# Rule: no_active_mode\nActive mode is disabled in this repo.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    state = SessionState(agent_mode="passive")
+
+    handled = cli._handle_agent_mode_command("agent mode active", state)
+
+    assert handled is True
+    assert state.agent_mode == "passive"
+    assert "Active mode is disabled by the loaded agent rules." in buffer.getvalue()
+
+
+def test_agent_mode_change_is_blocked_when_no_active_mode_and_info_rule_are_loaded(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "no_active_mode.md").write_text(
+        "# Rule: no_active_mode\nActive mode is disabled in this repo.\n",
+        encoding="utf-8",
+    )
+    (rules_dir / "custom_note.md").write_text(
+        "# Rule: custom_note\nHuman-readable guidance only.\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)

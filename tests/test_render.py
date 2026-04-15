@@ -5,9 +5,18 @@ from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from snappy_putty.agent_discovery import AgentRule, AgentRuleRegistry
 from snappy_putty.fs_models import FsPlan, PlannedOp
 from snappy_putty.models import AgentOutput, PlanStep, Snippet, SuggestedCommand
-from snappy_putty.render import render_agent_output, render_fs_plan, render_fs_rule_block, single_line_command
+from snappy_putty.render import (
+    block_message_from_decision,
+    policy_notes_from_decision,
+    render_agent_output,
+    render_fs_plan,
+    render_fs_rule_block,
+    single_line_command,
+)
+from snappy_putty.rule_hooks import evaluate_filesystem_policy
 
 
 def _sample_output(command_text: str) -> AgentOutput:
@@ -80,3 +89,53 @@ def test_render_fs_rule_block_displays_goal_then_policy_block_then_next_step() -
     block_index = output.index("Policy Block")
     next_step_index = output.index("Next Step")
     assert goal_index < block_index < next_step_index
+
+
+def test_policy_notes_from_confirm_decision_is_concise() -> None:
+    registry = AgentRuleRegistry(rules=[AgentRule("Require Confirm", "require_confirm", "body", supported_for_enforcement=True)])
+    plan = FsPlan(
+        goal="copy README.md README-copy.md",
+        cwd="/tmp/demo",
+        ops=[PlannedOp(op_id="op1", action="copy", src="README.md", dst="README-copy.md", notes=[], risk="low")],
+        warnings=[],
+        requires_confirmation=False,
+    )
+
+    policy_decision, _ = evaluate_filesystem_policy(
+        plan=plan,
+        cwd=Path("/tmp/demo"),
+        workspace_root=Path("/tmp/demo"),
+        rule_registry=registry,
+    )
+
+    assert policy_notes_from_decision(policy_decision) == [
+        "Loaded rules require confirmation before filesystem changes are applied."
+    ]
+
+
+def test_block_message_from_decision_includes_secondary_context_without_extra_panel() -> None:
+    registry = AgentRuleRegistry(
+        rules=[
+            AgentRule("Protect Project Root", "protect_project_root", "body", supported_for_enforcement=True),
+            AgentRule("Require Confirm", "require_confirm", "body", supported_for_enforcement=True),
+        ]
+    )
+    plan = FsPlan(
+        goal="copy README.md to /",
+        cwd="/tmp/demo",
+        ops=[PlannedOp(op_id="op1", action="copy", src="README.md", dst="/", notes=[], risk="low")],
+        warnings=[],
+        requires_confirmation=False,
+    )
+
+    policy_decision, blocked_message = evaluate_filesystem_policy(
+        plan=plan,
+        cwd=Path("/tmp/demo"),
+        workspace_root=Path("/tmp/demo"),
+        rule_registry=registry,
+    )
+
+    message = block_message_from_decision(blocked_message or "", policy_decision)
+
+    assert "Operation blocked by rule: protect_project_root" in message
+    assert "Additional policy context: confirmation rule(s) also matched: require_confirm" in message

@@ -54,6 +54,10 @@ class AgentRule:
     body: str
     supported_for_enforcement: bool = False
 
+    @property
+    def tier(self) -> str:
+        return classify_rule_tier(self.identifier, supported_for_enforcement=self.supported_for_enforcement)
+
 
 @dataclass(frozen=True)
 class AgentRuleRegistry:
@@ -70,6 +74,22 @@ class AgentRuleRegistry:
     @property
     def informational_rules(self) -> list[AgentRule]:
         return [rule for rule in self.rules if not rule.supported_for_enforcement]
+
+    @property
+    def block_rules(self) -> list[AgentRule]:
+        return [rule for rule in self.rules if rule.tier == "block"]
+
+    @property
+    def confirm_rules(self) -> list[AgentRule]:
+        return [rule for rule in self.rules if rule.tier == "confirm"]
+
+    @property
+    def warn_rules(self) -> list[AgentRule]:
+        return [rule for rule in self.rules if rule.tier == "warn"]
+
+    @property
+    def info_rules(self) -> list[AgentRule]:
+        return [rule for rule in self.rules if rule.tier == "info"]
 
 
 @dataclass(frozen=True)
@@ -101,6 +121,8 @@ _KNOWN_FIELDS: dict[str, type | tuple[type, ...]] = {
 
 _ALLOWED_AGENT_MODES = {"off", "passive", "active"}
 _SUPPORTED_RULE_IDENTIFIERS = frozenset({"require_confirm", "protect_project_root", "no_active_mode"})
+_BLOCK_RULE_IDENTIFIERS = frozenset({"protect_project_root", "no_active_mode"})
+_CONFIRM_RULE_IDENTIFIERS = frozenset({"require_confirm"})
 
 
 def normalize_agent_mode(value: str | None) -> str | None:
@@ -108,6 +130,16 @@ def normalize_agent_mode(value: str | None) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized if normalized in _ALLOWED_AGENT_MODES else None
+
+
+def classify_rule_tier(identifier: str, *, supported_for_enforcement: bool) -> str:
+    if not supported_for_enforcement:
+        return "info"
+    if identifier in _BLOCK_RULE_IDENTIFIERS:
+        return "block"
+    if identifier in _CONFIRM_RULE_IDENTIFIERS:
+        return "confirm"
+    return "warn"
 
 
 def resolve_agent_mode(session_mode: str | None = None) -> tuple[str, str]:

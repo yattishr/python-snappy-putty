@@ -46,6 +46,10 @@ def test_agent_command_runs(monkeypatch) -> None:
         assert "Agent Summary" in result.stdout
         assert "Agent name: Fixture Agent" in result.stdout
         assert "Version: 1" in result.stdout
+        assert "Block rules: (none)" in result.stdout
+        assert "Confirm rules: (none)" in result.stdout
+        assert "Warn rules: (none)" in result.stdout
+        assert "Info rules: safety" in result.stdout
         assert "Session memory keys: last_goal" in result.stdout
 
 
@@ -60,6 +64,7 @@ def test_agent_doctor_command_runs(monkeypatch) -> None:
         assert "Agent Doctor" in result.stdout
         assert ".snappy directory: present" in result.stdout
         assert "Manifest parse: ok" in result.stdout
+        assert "Policy tiers: block=0, confirm=0, warn=0, info=1" in result.stdout
         assert "Session parse: ok" in result.stdout
 
 
@@ -206,7 +211,7 @@ def test_rules_lists_loaded_rule_names(monkeypatch) -> None:
 
         assert result.exit_code == 0
         assert "Loaded rules:" in result.stdout
-        assert "Confirm Destructive Actions" in result.stdout
+        assert "Confirm Destructive Actions [confirm_destructive_actions] (informational)" in result.stdout
 
 
 def test_rules_handles_empty_rules_directory(monkeypatch) -> None:
@@ -429,3 +434,67 @@ def test_shell_workflow_ux_smoke_blocked_rule_is_prominent(tmp_path: Path) -> No
     assert "Policy Block" in proc.stdout
     assert "Operation blocked by rule: protect_project_root" in proc.stdout
     assert "Next Step" in proc.stdout
+
+
+def test_shell_workflow_ux_smoke_combined_block_and_confirm_stays_blocked(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "protect_project_root.md").write_text(
+        "# Rule: protect_project_root\nProtect the project root from dangerous mutations.\n",
+        encoding="utf-8",
+    )
+    (rules_dir / "require_confirm.md").write_text(
+        "# Rule: require_confirm\nAll filesystem mutations require confirmation before execution.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    env = _shell_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md to /\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Policy Block" in proc.stdout
+    assert "Operation blocked by rule: protect_project_root" in proc.stdout
+    assert "confirmation rule(s) also matched: require_confirm" in proc.stdout
+    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+
+
+def test_shell_workflow_ux_smoke_confirm_and_info_show_policy_without_block(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "require_confirm.md").write_text(
+        "# Rule: require_confirm\nAll filesystem mutations require confirmation before execution.\n",
+        encoding="utf-8",
+    )
+    (rules_dir / "custom_note.md").write_text(
+        "# Rule: custom_note\nHuman-readable guidance only.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+    env = _shell_env()
+    env["SNAPPY_AGENT_MODE"] = "passive"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nNO\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Policy" in proc.stdout
+    assert "Loaded rules require confirmation before filesystem changes are applied." in proc.stdout
+    assert "Policy Block" not in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
