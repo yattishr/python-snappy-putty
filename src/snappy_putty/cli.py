@@ -188,6 +188,10 @@ def _render_confirmation_prompt(state: SessionState, *, invalid: bool = False) -
     console.print(_confirmation_prompt_message(state))
 
 
+def _normalized_confirmation_token(value: str) -> str:
+    return value.strip().upper()
+
+
 def _empty_fs_plan_feedback(plan: FsPlan) -> tuple[str, str, list[str], str]:
     warnings = list(plan.warnings)
     lowered = [item.lower() for item in warnings]
@@ -1099,7 +1103,7 @@ def _set_fs_confirmation_state(
 
 
 def _consume_confirmation_response(response: str, state: SessionState, workspace_root: Path) -> None:
-    value = response.strip().upper()
+    value = _normalized_confirmation_token(response)
     if value not in {"YES", "NO"}:
         return
     if value == "NO":
@@ -1556,7 +1560,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
             overwrite_confirmation = ""
         except KeyboardInterrupt:
             overwrite_confirmation = ""
-        if overwrite_confirmation != "OVERWRITE":
+        if _normalized_confirmation_token(overwrite_confirmation) != "OVERWRITE":
             console.print(Panel.fit("Cancelled. Existing files were not overwritten.", title="Apply Cancelled", border_style="yellow"))
             return True
 
@@ -1571,7 +1575,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
             limit_confirmation = ""
         except KeyboardInterrupt:
             limit_confirmation = ""
-        if limit_confirmation != "PROCEED":
+        if _normalized_confirmation_token(limit_confirmation) != "PROCEED":
             console.print(Panel.fit("Cancelled. Large plan was not applied.", title="Apply Cancelled", border_style="yellow"))
             return True
 
@@ -1582,7 +1586,7 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
     except KeyboardInterrupt:
         confirmation = ""
 
-    if confirmation != "YES":
+    if _normalized_confirmation_token(confirmation) != "YES":
         console.print(Panel.fit("Cancelled. No filesystem changes were applied.", title="Apply Cancelled", border_style="yellow"))
         return True
 

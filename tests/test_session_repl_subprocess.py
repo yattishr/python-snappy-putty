@@ -75,6 +75,26 @@ def test_repl_overwrite_confirmation_flow_applies_on_yes(tmp_path: Path) -> None
     assert destination.read_text(encoding="utf-8") == "demo"
 
 
+def test_repl_overwrite_confirmation_flow_accepts_lowercase_yes(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    destination = tmp_path / "README-copy.md"
+    source.write_text("demo", encoding="utf-8")
+    destination.write_text("existing", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nyes\nyes\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Destination exists. Type YES to overwrite, or NO to cancel." in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert destination.read_text(encoding="utf-8") == "demo"
+
+
 def test_repl_invalid_confirmation_input_reprompts_cleanly(tmp_path: Path) -> None:
     source = tmp_path / "README.md"
     source.write_text("demo", encoding="utf-8")

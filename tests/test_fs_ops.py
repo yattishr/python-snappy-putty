@@ -66,6 +66,18 @@ def test_apply_runs_when_confirmation_is_exact_yes(tmp_path: Path, monkeypatch) 
     assert (tmp_path / "beta.txt").exists()
 
 
+def test_apply_runs_when_confirmation_is_lowercase_yes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SNAPPY_PUTTY_NO_SPINNER", "1")
+    source = tmp_path / "alpha.txt"
+    source.write_text("hello", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    handled = cli._handle_fs_intent("copy alpha.txt to beta.txt", prompt_reader=lambda _: "yes")
+    assert handled is True
+    assert source.exists()
+    assert (tmp_path / "beta.txt").exists()
+
+
 def test_incomplete_copy_intent_prompts_for_destination(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SNAPPY_PUTTY_NO_SPINNER", "1")
     source = tmp_path / "alpha.txt"
