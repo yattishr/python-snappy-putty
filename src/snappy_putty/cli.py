@@ -40,6 +40,7 @@ from snappy_putty.render import (
     render_git_read,
 )
 from snappy_putty.rule_hooks import before_agent_mode_change, before_filesystem_mutation_plan_or_execute
+from snappy_putty.rule_hooks import POLICY_HIERARCHY
 from snappy_putty.router import (
     ROUTE_ASK,
     ROUTE_BUILTIN_AFTER,
@@ -581,6 +582,8 @@ def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None
         f"Agent feature mode: {feature_mode}",
         "Agent loaded: yes",
         f"Manifest present: {'yes' if agent_config.discovery.manifest_path is not None else 'no'}",
+        "Control layer: centralized pre-execution policy gate",
+        f"Policy hierarchy: {' > '.join(POLICY_HIERARCHY).upper()}",
         f"Agent name: {manifest.name if manifest and manifest.name else '(unknown)'}",
         f"Version: {manifest.version if manifest and manifest.version is not None else '(unknown)'}",
         f"Agent mode: {manifest.mode if manifest and manifest.mode else '(unknown)'}",
@@ -639,6 +642,8 @@ def _build_agent_doctor_lines(cwd: Path | None = None, session_mode: str | None 
 
     lines.extend(
         [
+            "Control layer ready: yes",
+            f"Policy hierarchy: {' > '.join(POLICY_HIERARCHY).upper()}",
             f"Skills directory: {'present' if skills_dir.is_dir() else 'absent'}",
             f"Loaded skills: {len(skill_registry.skills)}",
             f"Rules directory: {'present' if rules_dir.is_dir() else 'absent'}",
@@ -646,6 +651,7 @@ def _build_agent_doctor_lines(cwd: Path | None = None, session_mode: str | None 
             f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
             f"Informational rules: {len(rule_registry.informational_rules)}",
             f"Policy tiers: block={len(rule_registry.block_rules)}, confirm={len(rule_registry.confirm_rules)}, warn={len(rule_registry.warn_rules)}, info={len(rule_registry.info_rules)}",
+            f"Confirmation-capable rules: {len(rule_registry.confirm_rules)}",
             f"Memory directory: {'present' if memory_dir.is_dir() else 'absent'}",
             f"Session file: {'present' if session_path.is_file() else 'absent'}",
         ]
@@ -750,6 +756,8 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
     manifest = agent_config.manifest
     lines.extend(
         [
+            "Control layer: centralized pre-execution policy gate",
+            f"Policy hierarchy: {' > '.join(POLICY_HIERARCHY).upper()}",
             f"Agent name: {manifest.name if manifest and manifest.name else '(unknown)'}",
             f"Agent version: {manifest.version if manifest and manifest.version is not None else '(unknown)'}",
             f"Agent mode: {manifest.mode if manifest and manifest.mode else '(unknown)'}",
@@ -758,6 +766,7 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
             f"Enforceable rules: {len(rule_registry.enforceable_rules)}",
             f"Informational rules: {len(rule_registry.informational_rules)}",
             f"Policy tiers: block={len(rule_registry.block_rules)}, confirm={len(rule_registry.confirm_rules)}, warn={len(rule_registry.warn_rules)}, info={len(rule_registry.info_rules)}",
+            f"Confirmation-capable rules: {len(rule_registry.confirm_rules)}",
             f"Agent memory: {'present' if memory.memory_found else 'absent'}",
         ]
     )
@@ -838,6 +847,7 @@ def run_shell() -> None:
             if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
                 pass
             else:
+                state.last_result = "Awaiting explicit YES/NO confirmation; invalid input was ignored."
                 _render_confirmation_prompt(state, invalid=True)
                 continue
 
@@ -1275,6 +1285,7 @@ def _handle_status(state: SessionState) -> None:
     last_cancelled_goal = state.last_cancelled_goal or "(none)"
     last_failed_goal = state.last_failed_goal or "(none)"
     error_message = state.error_message or "(none)"
+    control_state = _current_control_state(state)
     lines = [
         f"Current state: {current_state}",
         f"Active goal: {active_goal}",
@@ -1282,6 +1293,7 @@ def _handle_status(state: SessionState) -> None:
         f"Pending question: {pending_question}",
         f"Pending plan: {pending_plan}",
         f"Awaiting confirmation: {awaiting}",
+        f"Current control state: {control_state}",
         f"Last completed goal: {last_completed_goal}",
         f"Last cancelled goal: {last_cancelled_goal}",
         f"Last failed goal: {last_failed_goal}",
@@ -1289,6 +1301,14 @@ def _handle_status(state: SessionState) -> None:
     ]
     lines.extend(_build_status_agent_lines(session_mode=state.agent_mode))
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
+
+
+def _current_control_state(state: SessionState) -> str:
+    if state.awaiting_confirmation:
+        return "awaiting_confirm"
+    if state.current_state == LifecycleState.FAILED and state.error_message and "Operation blocked by rule:" in state.error_message:
+        return "blocked"
+    return "allowed"
 
 
 def _handle_git_read_repl(intent: str, workspace_root: Path, state: SessionState) -> bool:

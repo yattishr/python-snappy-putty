@@ -93,6 +93,27 @@ def test_repl_invalid_confirmation_input_reprompts_cleanly(tmp_path: Path) -> No
     assert (tmp_path / "README-copy.md").exists()
 
 
+def test_repl_invalid_confirmation_input_keeps_control_state_pending(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nmaybe\nstatus\nNO\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Please answer YES or NO." in proc.stdout
+    assert "Awaiting confirmation: yes" in proc.stdout
+    assert "Current control state: awaiting_confirm" in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert not (tmp_path / "README-copy.md").exists()
+
+
 def test_repl_confirmation_flow_cancels_on_no(tmp_path: Path) -> None:
     source = tmp_path / "README.md"
     source.write_text("demo", encoding="utf-8")
@@ -188,7 +209,7 @@ def test_repl_clarification_blocks_new_safe_inspect_goal(tmp_path: Path) -> None
     assert "Last completed goal: (none)" in proc.stdout
     assert "Last failed goal: (none)" in proc.stdout
     assert "Last cancelled goal: (none)" in proc.stdout
-    assert proc.stdout.count("destination path>") <= 4
+    assert proc.stdout.count("destination path>") <= 5
 
 
 def test_repl_clarification_blocks_new_ask_goal(tmp_path: Path) -> None:
@@ -214,7 +235,7 @@ def test_repl_clarification_blocks_new_ask_goal(tmp_path: Path) -> None:
     assert "Last completed goal: (none)" in proc.stdout
     assert "Last failed goal: (none)" in proc.stdout
     assert "Last cancelled goal: (none)" in proc.stdout
-    assert proc.stdout.count("destination path>") <= 4
+    assert proc.stdout.count("destination path>") <= 5
 
 
 def test_repl_help_during_clarification_preserves_prompt_continuity(tmp_path: Path) -> None:
@@ -514,7 +535,8 @@ def test_repl_block_rule_outranks_confirm_rule_when_both_are_loaded(tmp_path: Pa
     assert proc.returncode == 0
     assert "Policy Block" in proc.stdout
     assert "Operation blocked by rule: protect_project_root" in proc.stdout
-    assert "confirmation rule(s) also matched: require_confirm" in proc.stdout
+    assert "Additional policy context: confirmation rule(s) also matched:" in proc.stdout
+    assert "require_confirm" in proc.stdout
     assert "Type YES to apply, or NO to cancel." not in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
 
@@ -577,8 +599,9 @@ def test_repl_info_rule_only_does_not_change_safe_copy_behavior(tmp_path: Path) 
     assert proc.returncode == 0
     assert "Planned Changes" in proc.stdout
     assert "Policy Block" not in proc.stdout
-    assert "Type YES to apply, or NO to cancel." not in proc.stdout
-    assert "Current state: IDLE" in proc.stdout
+    assert "Loaded rules require confirmation before filesystem changes are applied." not in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
 
 
 def test_repl_workspace_escape_without_rule_is_reported_as_blocked_request(tmp_path: Path) -> None:

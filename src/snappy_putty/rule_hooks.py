@@ -11,42 +11,55 @@ from snappy_putty.fs_models import FsPlan
 REQUIRE_CONFIRM_RULE = "require_confirm"
 PROTECT_PROJECT_ROOT_RULE = "protect_project_root"
 NO_ACTIVE_MODE_RULE = "no_active_mode"
+POLICY_HIERARCHY: tuple[str, ...] = ("block", "confirm", "warn", "info")
 
 
 @dataclass(frozen=True)
 class PolicyDecision:
+    control_layer: str
     outcome: str
     block_rules: tuple[str, ...] = ()
     confirm_rules: tuple[str, ...] = ()
     warn_rules: tuple[str, ...] = ()
     info_rules: tuple[str, ...] = ()
+    highest_tier: str = "info"
+    hierarchy: tuple[str, ...] = POLICY_HIERARCHY
 
 
 def resolve_policy_decision(
     *,
+    control_layer: str = "runtime",
     block_rules: Iterable[str] = (),
     confirm_rules: Iterable[str] = (),
     warn_rules: Iterable[str] = (),
     info_rules: Iterable[str] = (),
 ) -> PolicyDecision:
-    resolved_block_rules = tuple(block_rules)
-    resolved_confirm_rules = tuple(confirm_rules)
-    resolved_warn_rules = tuple(warn_rules)
-    resolved_info_rules = tuple(info_rules)
+    resolved_block_rules = _canonicalize_rule_ids(block_rules)
+    resolved_confirm_rules = _canonicalize_rule_ids(confirm_rules)
+    resolved_warn_rules = _canonicalize_rule_ids(warn_rules)
+    resolved_info_rules = _canonicalize_rule_ids(info_rules)
 
     if resolved_block_rules:
         outcome = "block"
+        highest_tier = "block"
     elif resolved_confirm_rules:
         outcome = "confirm"
+        highest_tier = "confirm"
+    elif resolved_warn_rules:
+        outcome = "allow"
+        highest_tier = "warn"
     else:
         outcome = "allow"
+        highest_tier = "info"
 
     return PolicyDecision(
+        control_layer=control_layer,
         outcome=outcome,
         block_rules=resolved_block_rules,
         confirm_rules=resolved_confirm_rules,
         warn_rules=resolved_warn_rules,
         info_rules=resolved_info_rules,
+        highest_tier=highest_tier,
     )
 
 
@@ -76,11 +89,12 @@ def evaluate_filesystem_policy(
         if blocked_message is not None:
             block_rules.append(PROTECT_PROJECT_ROOT_RULE)
 
-    if plan.ops and rule_registry.is_active(REQUIRE_CONFIRM_RULE):
+    if (plan.ops or blocked_message is not None) and rule_registry.is_active(REQUIRE_CONFIRM_RULE):
         confirm_rules.append(REQUIRE_CONFIRM_RULE)
 
     return (
         resolve_policy_decision(
+            control_layer="filesystem_mutation",
             block_rules=block_rules,
             confirm_rules=confirm_rules,
             warn_rules=warn_rules,
@@ -97,7 +111,7 @@ def evaluate_agent_mode_policy(*, target_mode: str, rule_registry: AgentRuleRegi
     if target_mode == "active" and rule_registry.is_active(NO_ACTIVE_MODE_RULE):
         block_rules.append(NO_ACTIVE_MODE_RULE)
 
-    return resolve_policy_decision(block_rules=block_rules, info_rules=info_rules)
+    return resolve_policy_decision(control_layer="agent_mode", block_rules=block_rules, info_rules=info_rules)
 
 
 def before_filesystem_mutation_plan_or_execute(
@@ -165,3 +179,27 @@ def _relevant_op_paths(*, op, cwd: Path) -> list[Path]:
     if op.dst:
         candidates.append((cwd / op.dst).resolve())
     return candidates
+
+
+def policy_tier_counts(policy_decision: PolicyDecision) -> dict[str, int]:
+    return {
+        "block": len(policy_decision.block_rules),
+        "confirm": len(policy_decision.confirm_rules),
+        "warn": len(policy_decision.warn_rules),
+        "info": len(policy_decision.info_rules),
+    }
+
+
+def control_layer_summary(policy_decision: PolicyDecision) -> str:
+    counts = policy_tier_counts(policy_decision)
+    return (
+        f"Control layer: {policy_decision.control_layer} "
+        f"(hierarchy: {' > '.join(policy_decision.hierarchy)}; "
+        f"effective tier: {policy_decision.highest_tier}; "
+        f"outcome: {policy_decision.outcome}; "
+        f"tiers: block={counts['block']}, confirm={counts['confirm']}, warn={counts['warn']}, info={counts['info']})"
+    )
+
+
+def _canonicalize_rule_ids(rule_ids: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted({rule_id for rule_id in rule_ids if rule_id}))

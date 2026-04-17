@@ -49,7 +49,7 @@ def test_agent_command_runs(monkeypatch) -> None:
         assert "Block rules: (none)" in result.stdout
         assert "Confirm rules: (none)" in result.stdout
         assert "Warn rules: (none)" in result.stdout
-        assert "Info rules: safety" in result.stdout
+        assert "Info rules: confirm_destructive_actions" in result.stdout
         assert "Session memory keys: last_goal" in result.stdout
 
 
@@ -464,7 +464,8 @@ def test_shell_workflow_ux_smoke_combined_block_and_confirm_stays_blocked(tmp_pa
     assert proc.returncode == 0
     assert "Policy Block" in proc.stdout
     assert "Operation blocked by rule: protect_project_root" in proc.stdout
-    assert "confirmation rule(s) also matched: require_confirm" in proc.stdout
+    assert "Additional policy context: confirmation rule(s) also matched:" in proc.stdout
+    assert "require_confirm" in proc.stdout
     assert "Type YES to apply, or NO to cancel." not in proc.stdout
 
 

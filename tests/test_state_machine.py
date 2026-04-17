@@ -344,7 +344,10 @@ def test_status_displays_policy_tier_summary(monkeypatch, tmp_path: Path) -> Non
 
     output = buffer.getvalue()
     assert "Loaded rules: 1" in output
+    assert "Control layer: centralized pre-execution policy gate" in output
+    assert "Policy hierarchy: BLOCK > CONFIRM > WARN > INFO" in output
     assert "Policy tiers: block=0, confirm=1, warn=0, info=0" in output
+    assert "Confirmation-capable rules: 1" in output
 
 
 def test_agent_summary_displays_no_agent_loaded(monkeypatch, tmp_path: Path) -> None:
@@ -368,6 +371,8 @@ def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) 
     assert "Agent feature mode: passive" in lines
     assert "Agent loaded: yes" in lines
     assert "Manifest present: yes" in lines
+    assert "Control layer: centralized pre-execution policy gate" in lines
+    assert "Policy hierarchy: BLOCK > CONFIRM > WARN > INFO" in lines
     assert "Agent name: Fixture Agent" in lines
     assert "Version: 1" in lines
     assert "Agent mode: passive" in lines
@@ -378,7 +383,7 @@ def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) 
     assert "Block rules: (none)" in lines
     assert "Confirm rules: (none)" in lines
     assert "Warn rules: (none)" in lines
-    assert "Info rules: safety" in lines
+    assert "Info rules: confirm_destructive_actions" in lines
     assert "Memory present: yes" in lines
     assert "Session memory keys: last_goal, notes" in lines
 
@@ -408,6 +413,8 @@ def test_agent_doctor_reports_valid_full_agent_setup(monkeypatch, tmp_path: Path
     assert ".snappy directory: present" in lines
     assert "Manifest file: present" in lines
     assert "Manifest parse: ok" in lines
+    assert "Control layer ready: yes" in lines
+    assert "Policy hierarchy: BLOCK > CONFIRM > WARN > INFO" in lines
     assert "Skills directory: present" in lines
     assert "Loaded skills: 1" in lines
     assert "Rules directory: present" in lines
@@ -415,6 +422,7 @@ def test_agent_doctor_reports_valid_full_agent_setup(monkeypatch, tmp_path: Path
     assert "Enforceable rules: 0" in lines
     assert "Informational rules: 1" in lines
     assert "Policy tiers: block=0, confirm=0, warn=0, info=1" in lines
+    assert "Confirmation-capable rules: 0" in lines
     assert "Memory directory: present" in lines
     assert "Session file: present" in lines
     assert "Session parse: ok" in lines
@@ -555,6 +563,16 @@ def test_confirmation_without_pending_plan_records_failed_goal() -> None:
     assert state.last_failed_goal == "copy a b"
     assert state.error_message == "Confirmation received, but no actionable pending state remained."
     assert state.last_result == "Confirmation received, but no actionable pending state remained."
+
+
+def test_current_control_state_reports_confirmation_block_and_allow() -> None:
+    awaiting = SessionState(awaiting_confirmation=True)
+    blocked = SessionState(current_state=LifecycleState.FAILED, error_message="Operation blocked by rule: protect_project_root")
+    allowed = SessionState()
+
+    assert cli._current_control_state(awaiting) == "awaiting_confirm"
+    assert cli._current_control_state(blocked) == "blocked"
+    assert cli._current_control_state(allowed) == "allowed"
 
 
 def test_confirmation_prompt_message_varies_by_stage() -> None:
