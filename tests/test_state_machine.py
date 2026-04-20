@@ -2,14 +2,22 @@ from io import StringIO
 from pathlib import Path
 import sys
 
+import pytest
 from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tests.agent_fixtures import load_agent_fixture
 from snappy_putty import cli
-from snappy_putty.fs_models import FsPlan, PlannedOp
-from snappy_putty.session import LifecycleState, SessionState
+from snappy_putty.fs_models import FsApplyItem, FsApplyResult, FsPlan, PlannedOp
+from snappy_putty.session import (
+    ActiveGoalConflictError,
+    ExecutionOperation,
+    ExecutionResult,
+    InvalidLifecycleTransition,
+    LifecycleState,
+    SessionState,
+)
 
 
 def _capture_console(monkeypatch):
@@ -28,6 +36,7 @@ def test_session_state_defaults_to_idle_and_preserves_history_on_clear_pending()
         last_completed_goal="done",
         last_cancelled_goal="stopped",
         last_failed_goal="broken",
+        last_blocked_goal="denied",
         error_message="boom",
         pending_context={"type": "fs_confirmation"},
     )
@@ -41,6 +50,7 @@ def test_session_state_defaults_to_idle_and_preserves_history_on_clear_pending()
     assert state.last_completed_goal == "done"
     assert state.last_cancelled_goal == "stopped"
     assert state.last_failed_goal == "broken"
+    assert state.last_blocked_goal == "denied"
     assert state.error_message == "boom"
     assert SessionState().current_state == LifecycleState.IDLE
 
@@ -57,6 +67,7 @@ def test_session_reset_clears_active_and_pending_state() -> None:
         error_message="boom",
         pending_context={"type": "ask_followup", "base_intent": "git push"},
         last_completed_goal="done",
+        last_blocked_goal="denied",
     )
 
     state.reset()
@@ -69,6 +80,7 @@ def test_session_reset_clears_active_and_pending_state() -> None:
     assert state.error_message is None
     assert state.pending_context == {}
     assert state.last_completed_goal == "done"
+    assert state.last_blocked_goal == "denied"
 
 
 def test_reset_to_idle_preserving_history_keeps_failure_metadata() -> None:
@@ -95,6 +107,268 @@ def test_reset_to_idle_preserving_history_keeps_failure_metadata() -> None:
     assert state.last_route == "unknown"
     assert state.last_failed_goal == "git push"
     assert state.error_message == "Unrecognized command"
+
+
+def test_session_state_m3_transitions_allow_required_path_and_terminal_reset() -> None:
+    state = SessionState()
+
+    state.transition_to(LifecycleState.INTENT_RECEIVED)
+    state.transition_to(LifecycleState.PLANNING)
+    state.transition_to(LifecycleState.CONFIRMATION)
+    state.transition_to(LifecycleState.EXECUTING)
+    state.transition_to(LifecycleState.REFLECTING)
+    state.transition_to(LifecycleState.COMPLETED)
+    state.transition_to(LifecycleState.IDLE)
+
+    assert state.current_state == LifecycleState.IDLE
+
+
+def test_session_state_invalid_transition_is_rejected() -> None:
+    state = SessionState(current_state=LifecycleState.CONFIRMATION)
+
+    with pytest.raises(InvalidLifecycleTransition):
+        state.transition_to(LifecycleState.PLANNING)
+
+
+def test_session_state_start_goal_rejects_nested_active_goal() -> None:
+    state = SessionState(
+        current_state=LifecycleState.CONFIRMATION,
+        active_goal="copy README.md README-copy.md",
+    )
+
+    with pytest.raises(ActiveGoalConflictError):
+        state.start_goal(goal="git status", route="git_read")
+
+
+def test_complete_active_goal_produces_execution_result_completed() -> None:
+    state = SessionState(active_goal="git status", current_state=LifecycleState.EXECUTING)
+
+    cli._complete_active_goal(state, message="Git status retrieved.")
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "completed"
+    assert state.last_execution_result.goal == "git status"
+    assert state.last_result == "Git status retrieved."
+
+
+def test_fail_active_goal_produces_execution_result_failed() -> None:
+    state = SessionState(active_goal="copy a b", current_state=LifecycleState.EXECUTING)
+
+    cli._fail_active_goal(state, message="Copy failed.")
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "failed"
+    assert state.last_execution_result.error == "Copy failed."
+    assert state.last_failed_goal == "copy a b"
+
+
+def test_cancel_active_goal_produces_execution_result_cancelled() -> None:
+    state = SessionState(active_goal="copy a b", current_state=LifecycleState.CONFIRMATION)
+
+    cli._cancel_active_goal(state, message="Cancelled pending action.")
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "cancelled"
+    assert state.last_cancelled_goal == "copy a b"
+    assert state.last_blocked_goal is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_terminal"),
+    [
+        ("completed", LifecycleState.COMPLETED),
+        ("failed", LifecycleState.FAILED),
+        ("cancelled", LifecycleState.CANCELLED),
+        ("blocked", LifecycleState.BLOCKED),
+    ],
+)
+def test_reflection_maps_execution_result_status_to_terminal_state(monkeypatch, status: str, expected_terminal: LifecycleState) -> None:
+    terminal_states: list[LifecycleState] = []
+    state = SessionState(active_goal="demo", current_state=LifecycleState.EXECUTING)
+
+    def _capture_finish(session_state: SessionState) -> None:
+        terminal_states.append(session_state.current_state)
+
+    monkeypatch.setattr(cli, "_finish_terminal_state", _capture_finish)
+
+    cli._reflect_execution_result(
+        state,
+        ExecutionResult(
+            goal="demo",
+            status=status,
+            summary=f"{status} summary",
+            operations=(ExecutionOperation(action="demo", status="applied", message="done"),),
+            error="boom" if status in {"failed", "blocked"} else None,
+        ),
+    )
+
+    assert terminal_states == [expected_terminal]
+
+
+def test_single_goal_loop_successful_execution_returns_to_idle(monkeypatch, tmp_path: Path) -> None:
+    _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "README.md"
+    src.write_text("demo\n", encoding="utf-8")
+    state = SessionState()
+
+    handled = cli._handle_fs_intent_repl("copy README.md to README-copy.md", tmp_path, state)
+
+    assert handled is True
+    assert state.current_state == LifecycleState.CONFIRMATION
+    assert state.active_goal == "copy README.md to README-copy.md"
+    assert state.pending_plan is not None
+    assert state.awaiting_confirmation is True
+
+    cli._consume_confirmation_response("YES", state, tmp_path)
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "completed"
+    assert (tmp_path / "README-copy.md").read_text(encoding="utf-8") == "demo\n"
+
+
+def test_single_goal_loop_cancel_flow_returns_to_idle(monkeypatch, tmp_path: Path) -> None:
+    _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    state = SessionState()
+
+    cli._handle_fs_intent_repl("copy README.md to README-copy.md", tmp_path, state)
+    cli._consume_confirmation_response("NO", state, tmp_path)
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "cancelled"
+    assert not (tmp_path / "README-copy.md").exists()
+
+
+def test_single_goal_loop_blocked_flow_returns_to_idle(monkeypatch, tmp_path: Path) -> None:
+    _capture_console(monkeypatch)
+    rules_dir = tmp_path / ".snappy" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "protect_project_root.md").write_text(
+        "# Rule: protect_project_root\nProtect the project root from dangerous mutations.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    state = SessionState(agent_mode="passive")
+
+    handled = cli._handle_fs_intent_repl("copy README.md to /", tmp_path, state)
+
+    assert handled is True
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "blocked"
+    assert state.last_blocked_goal == "copy README.md to /"
+
+
+def test_single_goal_loop_execution_failure_returns_to_idle(monkeypatch, tmp_path: Path) -> None:
+    _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    state = SessionState()
+
+    cli._handle_fs_intent_repl("copy README.md to README-copy.md", tmp_path, state)
+
+    def _failed_apply(*args, **kwargs):
+        return FsApplyResult(
+            goal="copy README.md to README-copy.md",
+            results=[FsApplyItem(op_id="op1", action="copy", status="failed", message="write failed")],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(cli, "apply_fs_plan", _failed_apply)
+
+    cli._consume_confirmation_response("YES", state, tmp_path)
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "failed"
+    assert state.last_failed_goal == "copy README.md to README-copy.md"
+
+
+def test_invalid_confirmation_input_preserves_pending_confirmation_state(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    state = SessionState()
+
+    cli._handle_fs_intent_repl("copy README.md to README-copy.md", tmp_path, state)
+    pending_plan = state.pending_plan
+    active_goal = state.active_goal
+
+    consumed = cli._handle_confirmation_input(
+        text="maybe",
+        route="ask",
+        state=state,
+        workspace_root=tmp_path,
+    )
+
+    assert consumed is True
+    assert state.current_state == LifecycleState.CONFIRMATION
+    assert state.active_goal == active_goal
+    assert state.pending_plan == pending_plan
+    assert state.awaiting_confirmation is True
+    assert state.last_execution_result is None
+    assert not (tmp_path / "README-copy.md").exists()
+    assert "Please answer YES or NO." in buffer.getvalue()
+
+
+def test_no_second_goal_begins_while_confirmation_is_pending(monkeypatch, tmp_path: Path) -> None:
+    _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    state = SessionState()
+
+    cli._handle_fs_intent_repl("copy README.md to README-copy.md", tmp_path, state)
+    active_goal = state.active_goal
+
+    consumed = cli._handle_confirmation_input(
+        text="git status",
+        route="git_read",
+        state=state,
+        workspace_root=tmp_path,
+    )
+
+    assert consumed is True
+    assert state.current_state == LifecycleState.CONFIRMATION
+    assert state.active_goal == active_goal
+    assert state.last_execution_result is None
+
+
+def test_sequential_loop_integrity_across_multiple_runs(monkeypatch, tmp_path: Path) -> None:
+    _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    state = SessionState()
+
+    cli._handle_fs_intent_repl("copy README.md to first-copy.md", tmp_path, state)
+    cli._consume_confirmation_response("YES", state, tmp_path)
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.goal == "copy README.md to first-copy.md"
+
+    cli._handle_fs_intent_repl("copy README.md to second-copy.md", tmp_path, state)
+    cli._consume_confirmation_response("YES", state, tmp_path)
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.goal == "copy README.md to second-copy.md"
+    assert (tmp_path / "first-copy.md").exists()
+    assert (tmp_path / "second-copy.md").exists()
 
 
 def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch) -> None:
@@ -161,6 +435,7 @@ def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     state = SessionState(
         current_state=LifecycleState.IDLE,
         last_failed_goal="copy missing.txt out.txt",
+        last_blocked_goal="copy README.md to /",
         error_message="Applied 0 filesystem operation(s).",
     )
 
@@ -169,6 +444,7 @@ def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
     output = buffer.getvalue()
     assert "Current state: IDLE" in output
     assert "Last failed goal: copy missing.txt out.txt" in output
+    assert "Last blocked goal: copy README.md to /" in output
     assert "Error message: Applied 0 filesystem operation(s)." in output
 
 
@@ -470,7 +746,7 @@ def test_agent_mode_change_is_blocked_when_no_active_mode_and_info_rule_are_load
     assert "Active mode is disabled by the loaded agent rules." in buffer.getvalue()
 
 
-def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_failed(monkeypatch, tmp_path: Path) -> None:
+def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_blocked(monkeypatch, tmp_path: Path) -> None:
     buffer = _capture_console(monkeypatch)
     rules_dir = tmp_path / ".snappy" / "rules"
     rules_dir.mkdir(parents=True)
@@ -508,8 +784,13 @@ def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_failed(mon
     assert "Operation blocked by rule: protect_project_root" in output
     assert state.current_state == LifecycleState.IDLE
     assert state.active_goal is None
-    assert state.last_failed_goal == "make a folder called ."
+    assert state.last_failed_goal is None
     assert state.last_completed_goal is None
+    assert state.last_blocked_goal == "make a folder called ."
+    assert state.last_execution_result is not None
+    assert state.last_execution_result.status == "blocked"
+    assert state.error_message is not None
+    assert "Operation blocked by rule: protect_project_root" in state.error_message
 
 
 def test_agent_doctor_reports_malformed_manifest(monkeypatch, tmp_path: Path) -> None:
@@ -567,7 +848,7 @@ def test_confirmation_without_pending_plan_records_failed_goal() -> None:
 
 def test_current_control_state_reports_confirmation_block_and_allow() -> None:
     awaiting = SessionState(awaiting_confirmation=True)
-    blocked = SessionState(current_state=LifecycleState.FAILED, error_message="Operation blocked by rule: protect_project_root")
+    blocked = SessionState(current_state=LifecycleState.BLOCKED, error_message="Operation blocked by rule: protect_project_root")
     allowed = SessionState()
 
     assert cli._current_control_state(awaiting) == "awaiting_confirm"
@@ -701,6 +982,7 @@ def test_clarification_lock_rejects_new_command_without_mutating_state(monkeypat
         last_completed_goal="completed",
         last_failed_goal="failed",
         last_cancelled_goal="cancelled",
+        last_blocked_goal="blocked",
         pending_context={"type": "ask_followup", "base_intent": "git push"},
     )
     text = "give me a file listing for the current directory"
@@ -718,6 +1000,7 @@ def test_clarification_lock_rejects_new_command_without_mutating_state(monkeypat
     assert state.last_completed_goal == "completed"
     assert state.last_failed_goal == "failed"
     assert state.last_cancelled_goal == "cancelled"
+    assert state.last_blocked_goal == "blocked"
     assert cli._should_consume_pending_question(text=text, route=decision.route, state=state) is False
     assert "You have a pending question." in buffer.getvalue()
     assert "Answer it, or type 'cancel' to abandon the current goal." in buffer.getvalue()

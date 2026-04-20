@@ -56,7 +56,14 @@ from snappy_putty.router import (
     ROUTE_UNKNOWN,
     classify_input,
 )
-from snappy_putty.session import LifecycleState, SessionState
+from snappy_putty.session import (
+    ActiveGoalConflictError,
+    ExecutionOperation,
+    ExecutionResult,
+    InvalidLifecycleTransition,
+    LifecycleState,
+    SessionState,
+)
 from snappy_putty.status import busy, get_status_message
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
@@ -190,6 +197,19 @@ def _render_confirmation_prompt(state: SessionState, *, invalid: bool = False) -
 
 def _normalized_confirmation_token(value: str) -> str:
     return value.strip().upper()
+
+
+def _handle_confirmation_input(*, text: str, route: str, state: SessionState, workspace_root: Path) -> bool:
+    if not state.awaiting_confirmation:
+        return False
+    if text.upper() in {"YES", "NO"}:
+        _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)
+        return True
+    if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
+        return False
+    state.last_result = "Awaiting explicit YES/NO confirmation; invalid input was ignored."
+    _render_confirmation_prompt(state, invalid=True)
+    return True
 
 
 def _empty_fs_plan_feedback(plan: FsPlan) -> tuple[str, str, list[str], str]:
@@ -384,14 +404,11 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
 
 
 def _set_state(state: SessionState, lifecycle: LifecycleState) -> None:
-    state.current_state = lifecycle
+    state.transition_to(lifecycle)
 
 
 def _begin_goal(state: SessionState, *, goal: str, route: str) -> None:
-    state.active_goal = goal
-    state.last_route = route
-    state.error_message = None
-    _set_state(state, LifecycleState.INTENT_RECEIVED)
+    state.start_goal(goal=goal, route=route)
 
 
 def _enter_planning(state: SessionState) -> None:
@@ -425,9 +442,10 @@ def _record_agent_planning_result(
         _set_state(state, LifecycleState.CLARIFICATION)
 
 
-def _handle_safe_inspect_repl(intent: str, state: SessionState) -> bool:
+def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goal: bool = True) -> bool:
     if _is_listing_request(intent) and _extract_requested_path(intent) is None and not _listing_request_is_ambiguous(intent):
-        _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+        if start_new_goal:
+            _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
         _record_clarification(
             state,
             question=_build_listing_choice_question(),
@@ -436,8 +454,13 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState) -> bool:
         state.last_result = "Awaiting guided listing selection."
         return True
 
-    _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
-    _enter_planning(state)
+    if start_new_goal:
+        _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+        _enter_planning(state)
+    else:
+        state.active_goal = intent
+        state.last_route = ROUTE_SAFE_INSPECT
+        state.error_message = None
     result = handle_ask(intent=intent)
     if result.output.question:
         state.last_result = result.output.goal
@@ -454,39 +477,72 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState) -> bool:
 
 
 def _finish_terminal_state(state: SessionState) -> None:
-    state.active_goal = None
-    state.clear_pending()
-    _set_state(state, LifecycleState.IDLE)
+    state.finish_cycle()
+
+
+def _reflect_execution_result(state: SessionState, result: ExecutionResult) -> None:
+    state.last_execution_result = result
+    if state.current_state != LifecycleState.REFLECTING:
+        _set_state(state, LifecycleState.REFLECTING)
+
+    terminal_state = {
+        "completed": LifecycleState.COMPLETED,
+        "failed": LifecycleState.FAILED,
+        "cancelled": LifecycleState.CANCELLED,
+        "blocked": LifecycleState.BLOCKED,
+    }[result.status]
+    _set_state(state, terminal_state)
+
+    if result.status == "completed":
+        state.last_completed_goal = result.goal
+        state.error_message = None
+    elif result.status == "cancelled":
+        state.last_cancelled_goal = result.goal
+        state.error_message = None
+    elif result.status == "failed":
+        state.last_failed_goal = result.goal
+        state.error_message = result.error
+    else:
+        state.last_blocked_goal = result.goal
+        state.error_message = result.error
+
+    state.last_result = result.summary
+    _finish_terminal_state(state)
+
+
+def _execution_result(
+    *,
+    state: SessionState,
+    status: str,
+    message: str,
+    operations: list[ExecutionOperation] | None = None,
+    warnings: list[str] | None = None,
+    error: str | None = None,
+) -> ExecutionResult:
+    goal = state.active_goal or ""
+    return ExecutionResult(
+        goal=goal,
+        status=status,
+        summary=message,
+        operations=tuple(operations or ()),
+        error=error,
+        warnings=tuple(warnings or ()),
+    )
 
 
 def _cancel_active_goal(state: SessionState, *, message: str) -> None:
-    goal = state.active_goal
-    _set_state(state, LifecycleState.CANCELLED)
-    if goal:
-        state.last_cancelled_goal = goal
-    state.last_result = message
-    state.error_message = None
-    _finish_terminal_state(state)
+    result = _execution_result(state=state, status="cancelled", message=message)
+    _reflect_execution_result(state, result)
 
 
 def _fail_active_goal(state: SessionState, *, message: str) -> None:
-    goal = state.active_goal
-    _set_state(state, LifecycleState.FAILED)
-    if goal:
-        state.last_failed_goal = goal
-    state.last_result = message
-    state.error_message = message
-    _finish_terminal_state(state)
+    result = _execution_result(state=state, status="failed", message=message, error=message)
+    _reflect_execution_result(state, result)
 
 
 def _complete_active_goal(state: SessionState, *, message: str) -> None:
-    goal = state.active_goal
-    _set_state(state, LifecycleState.COMPLETED)
-    if goal:
-        state.last_completed_goal = goal
-    state.last_result = message
-    state.error_message = None
-    _finish_terminal_state(state)
+    result = _execution_result(state=state, status="completed", message=message)
+    _reflect_execution_result(state, result)
 
 
 def _debug_enabled() -> bool:
@@ -844,16 +900,8 @@ def run_shell() -> None:
             _render_clarification_lock_message(state)
             continue
 
-        if state.awaiting_confirmation and text.upper() in {"YES", "NO"}:
-            _consume_confirmation_response(response=text, state=state, workspace_root=workspace_root)
+        if _handle_confirmation_input(text=text, route=route, state=state, workspace_root=workspace_root):
             continue
-        if state.awaiting_confirmation:
-            if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
-                pass
-            else:
-                state.last_result = "Awaiting explicit YES/NO confirmation; invalid input was ignored."
-                _render_confirmation_prompt(state, invalid=True)
-                continue
 
         if _should_consume_pending_question(text=text, route=route, state=state):
             _consume_pending_question_answer(answer=text, state=state)
@@ -1175,7 +1223,8 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
     if rule_decision.blocked:
         message = rule_decision.message or "Operation blocked by loaded agent rules."
         console.print(message)
-        _fail_active_goal(state, message=message)
+        result = _execution_result(state=state, status="blocked", message=message, error=message)
+        _reflect_execution_result(state, result)
         return
 
     _set_state(state, LifecycleState.EXECUTING)
@@ -1188,15 +1237,34 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             allow_excess_ops=allow_excess_ops,
         )
     render_fs_apply_result(console=console, result=result)
+    operations = [
+        ExecutionOperation(action=item.action, status=item.status, message=item.message)
+        for item in result.results
+    ]
     applied_count = sum(1 for item in result.results if item.status == "applied")
     failed_messages = [item.message for item in result.results if item.status == "failed" and item.message]
     message = f"Applied {applied_count} filesystem operation(s)."
     if any(item.status == "failed" for item in result.results):
         if failed_messages:
             message = f"{message} Failure: {failed_messages[0]}"
-        _fail_active_goal(state, message=message)
+        failure_result = _execution_result(
+            state=state,
+            status="failed",
+            message=message,
+            operations=operations,
+            warnings=result.warnings,
+            error=message,
+        )
+        _reflect_execution_result(state, failure_result)
         return
-    _complete_active_goal(state, message=message)
+    success_result = _execution_result(
+        state=state,
+        status="completed",
+        message=message,
+        operations=operations,
+        warnings=result.warnings,
+    )
+    _reflect_execution_result(state, success_result)
 
 
 def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
@@ -1214,14 +1282,22 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         state.pending_question = None
         state.pending_context = {}
         _enter_planning(state)
-        _handle_safe_inspect_repl(intent=f'give me a file listing for "{selected}"', state=state)
+        _handle_safe_inspect_repl(
+            intent=f'give me a file listing for "{selected}"',
+            state=state,
+            start_new_goal=False,
+        )
         return
 
     if question_context.get("type") == "guided_listing_custom_path":
         state.pending_question = None
         state.pending_context = {}
         _enter_planning(state)
-        _handle_safe_inspect_repl(intent=f'give me a file listing for "{answer.strip()}"', state=state)
+        _handle_safe_inspect_repl(
+            intent=f'give me a file listing for "{answer.strip()}"',
+            state=state,
+            start_new_goal=False,
+        )
         return
 
     if question_context.get("type") == "fs_destination":
@@ -1231,14 +1307,21 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         state.pending_question = None
         state.pending_context = {}
         _enter_planning(state)
-        _handle_fs_intent_repl(intent=f"{action} {src} to {answer.strip()}", workspace_root=root, state=state)
+        _handle_fs_intent_repl(
+            intent=f"{action} {src} to {answer.strip()}",
+            workspace_root=root,
+            state=state,
+            start_new_goal=False,
+        )
         return
 
     base_intent = str(question_context.get("base_intent") or state.active_goal or "").strip()
     state.pending_question = None
     state.pending_context = {}
     followup_intent = f"{base_intent} for {answer.strip()}" if base_intent else answer.strip()
-    _begin_goal(state, goal=followup_intent, route=ROUTE_ASK)
+    state.active_goal = followup_intent
+    state.last_route = ROUTE_ASK
+    state.error_message = None
     _enter_planning(state)
     result = handle_ask(intent=followup_intent)
     state.last_result = result.output.goal
@@ -1288,6 +1371,7 @@ def _handle_status(state: SessionState) -> None:
     last_completed_goal = state.last_completed_goal or "(none)"
     last_cancelled_goal = state.last_cancelled_goal or "(none)"
     last_failed_goal = state.last_failed_goal or "(none)"
+    last_blocked_goal = state.last_blocked_goal or "(none)"
     error_message = state.error_message or "(none)"
     control_state = _current_control_state(state)
     lines = [
@@ -1301,6 +1385,7 @@ def _handle_status(state: SessionState) -> None:
         f"Last completed goal: {last_completed_goal}",
         f"Last cancelled goal: {last_cancelled_goal}",
         f"Last failed goal: {last_failed_goal}",
+        f"Last blocked goal: {last_blocked_goal}",
         f"Error message: {error_message}",
     ]
     lines.extend(_build_status_agent_lines(session_mode=state.agent_mode))
@@ -1310,6 +1395,8 @@ def _handle_status(state: SessionState) -> None:
 def _current_control_state(state: SessionState) -> str:
     if state.awaiting_confirmation:
         return "awaiting_confirm"
+    if state.current_state == LifecycleState.BLOCKED:
+        return "blocked"
     if state.current_state == LifecycleState.FAILED and state.error_message and "Operation blocked by rule:" in state.error_message:
         return "blocked"
     return "allowed"
@@ -1328,18 +1415,36 @@ def _handle_git_read_repl(intent: str, workspace_root: Path, state: SessionState
     with busy(get_status_message("ask"), console=console):
         result = execute_git_read(git_intent, workspace_root.resolve())
     render_git_read(console=console, title=result.title, content=result.body, ok=result.ok)
+    execution_result = _execution_result(
+        state=state,
+        status="completed" if result.ok else "failed",
+        message=result.summary if result.ok else (result.error_message or result.summary),
+        operations=[
+            ExecutionOperation(
+                action=git_intent.kind,
+                status="applied" if result.ok else "failed",
+                message=result.summary if result.ok else (result.error_message or result.summary),
+            )
+        ],
+        error=result.error_message,
+    )
     if result.ok:
-        _complete_active_goal(state, message=result.summary)
+        _reflect_execution_result(state, execution_result)
     else:
-        _fail_active_goal(state, message=result.error_message or result.summary)
+        _reflect_execution_result(state, execution_result)
     return True
 
 
-def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionState) -> bool:
+def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionState, *, start_new_goal: bool = True) -> bool:
     root = workspace_root.resolve()
     _debug(f"raw fs intent={intent!r}")
-    _begin_goal(state, goal=intent, route=ROUTE_FS_MUTATION)
-    _enter_planning(state)
+    if start_new_goal:
+        _begin_goal(state, goal=intent, route=ROUTE_FS_MUTATION)
+        _enter_planning(state)
+    else:
+        state.active_goal = intent
+        state.last_route = ROUTE_FS_MUTATION
+        state.error_message = None
     plan = plan_fs_intent(intent=intent, cwd=Path.cwd(), workspace_root=root)
 
     if plan is None:
@@ -1375,7 +1480,8 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             message=message,
             next_step_hint="Adjust the target path or request, then try again.",
         )
-        _fail_active_goal(state, message=message)
+        blocked_result = _execution_result(state=state, status="blocked", message=message, error=message)
+        _reflect_execution_result(state, blocked_result)
         return True
 
     if not plan.ops:
