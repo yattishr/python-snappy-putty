@@ -58,6 +58,9 @@ from snappy_putty.router import (
 )
 from snappy_putty.session import (
     ActiveGoalConflictError,
+    ActiveWorkflowSnapshot,
+    ClarificationContext,
+    ConfirmationContext,
     ExecutionOperation,
     ExecutionResult,
     InvalidLifecycleTransition,
@@ -138,12 +141,49 @@ def _pending_question_message(question: object) -> str:
     return str(question or "(none)")
 
 
+def _workflow_snapshot(state: SessionState) -> ActiveWorkflowSnapshot | None:
+    return state.active_workflow
+
+
+def _workflow_pending_question(state: SessionState) -> str:
+    snapshot = _workflow_snapshot(state)
+    if snapshot and snapshot.pending_question:
+        return snapshot.pending_question
+    return _pending_question_message(state.pending_question)
+
+
+def _workflow_pending_plan_summary(state: SessionState) -> str:
+    snapshot = _workflow_snapshot(state)
+    if snapshot and snapshot.pending_plan_summary:
+        return snapshot.pending_plan_summary
+    if isinstance(state.pending_plan, FsPlan):
+        return f"filesystem plan with {len(state.pending_plan.ops)} op(s)"
+    if isinstance(state.pending_plan, list):
+        return f"agent plan with {len(state.pending_plan)} step(s)"
+    return "(none)"
+
+
+def _workflow_awaiting_confirmation(state: SessionState) -> bool:
+    snapshot = _workflow_snapshot(state)
+    if snapshot is not None:
+        return snapshot.awaiting_confirmation
+    return state.awaiting_confirmation
+
+
+def _workflow_control_state(state: SessionState) -> str:
+    snapshot = _workflow_snapshot(state)
+    if snapshot and snapshot.control_state:
+        return snapshot.control_state
+    return _current_control_state(state)
+
+
 def _clarification_input_is_locked(*, text: str, route: str, state: SessionState) -> bool:
     if state.current_state != LifecycleState.CLARIFICATION:
         return False
     if not state.pending_question:
         return False
-    if state.pending_context.get("type") in {"fs_destination", "guided_listing_choice", "guided_listing_custom_path"}:
+    context = state.pending_context
+    if isinstance(context, ClarificationContext) and context.prompt_kind in {"fs_destination", "guided_listing_choice", "guided_listing_custom_path"}:
         if is_valid_clarification_response(text, state):
             return False
         return route not in {ROUTE_GIT_READ}
@@ -180,8 +220,8 @@ def _render_clarification_followup(state: SessionState, *, blocked: bool) -> Non
 
 
 def _confirmation_prompt_message(state: SessionState) -> str:
-    context = state.pending_context if isinstance(state.pending_context, dict) else {}
-    stage = str(context.get("stage", "apply"))
+    context = state.pending_context
+    stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
     if stage == "overwrite":
         return "Destination exists. Type YES to overwrite, or NO to cancel."
     if stage == "limit":
@@ -379,8 +419,8 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
     if route in RESERVED_CONTROL_ROUTES:
         return False
 
-    question_context = dict(state.pending_context)
-    context_type = question_context.get("type")
+    question_context = state.pending_context
+    context_type = question_context.prompt_kind if isinstance(question_context, ClarificationContext) else None
 
     if context_type == "fs_destination":
         if isinstance(state.pending_question, dict) and state.pending_question.get("type") == "path":
@@ -419,7 +459,15 @@ def _record_clarification(state: SessionState, *, question: object, pending_cont
     state.pending_question = question
     state.pending_plan = None
     state.awaiting_confirmation = False
-    state.pending_context = pending_context
+    context = ClarificationContext(
+        source_path=str(pending_context.get("src")) if pending_context.get("src") is not None else None,
+        expected_input="choice" if isinstance(question, dict) and question.get("type") == "choice" else ("path" if isinstance(question, dict) and question.get("type") == "path" else "answer"),
+        action=str(pending_context.get("action")) if pending_context.get("action") is not None else None,
+        base_intent=str(pending_context.get("base_intent")) if pending_context.get("base_intent") is not None else None,
+        workspace_root=str(pending_context.get("workspace_root")) if pending_context.get("workspace_root") is not None else None,
+        prompt_kind=str(pending_context.get("type") or "clarification"),
+    )
+    state.update_workflow_context(context)
     _set_state(state, LifecycleState.CLARIFICATION)
 
 
@@ -437,7 +485,20 @@ def _record_agent_planning_result(
     state.pending_plan = result.output.plan
     state.pending_question = result.output.question
     state.awaiting_confirmation = False
-    state.pending_context = dict(pending_context or {})
+    if pending_context:
+        state.update_workflow_context(
+            ClarificationContext(
+                source_path=None,
+                expected_input="answer",
+                action=None,
+                base_intent=str(pending_context.get("base_intent")) if pending_context.get("base_intent") is not None else None,
+                workspace_root=None,
+                prompt_kind=str(pending_context.get("type") or "ask_followup"),
+            )
+        )
+    else:
+        state.update_workflow_context(None)
+    state.sync_active_workflow()
     if result.output.question:
         _set_state(state, LifecycleState.CLARIFICATION)
 
@@ -461,13 +522,23 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goa
         state.active_goal = intent
         state.last_route = ROUTE_SAFE_INSPECT
         state.error_message = None
+        state.sync_active_workflow()
     result = handle_ask(intent=intent)
     if result.output.question:
         state.last_result = result.output.goal
         state.pending_plan = result.output.plan
         state.pending_question = result.output.question
         state.awaiting_confirmation = False
-        state.pending_context = {"type": "ask_followup", "base_intent": intent}
+        state.update_workflow_context(
+            ClarificationContext(
+                source_path=None,
+                expected_input="answer",
+                action=None,
+                base_intent=intent,
+                workspace_root=None,
+                prompt_kind="ask_followup",
+            )
+        )
         _set_state(state, LifecycleState.CLARIFICATION)
         return True
 
@@ -1139,14 +1210,17 @@ def _set_fs_confirmation_state(
     state.pending_plan = plan
     state.pending_question = None
     state.awaiting_confirmation = True
-    state.pending_context = {
-        "type": "fs_confirmation",
-        "stage": stage,
-        "workspace_root": str(workspace_root),
-        "allow_overwrite": allow_overwrite,
-        "allow_excess_ops": allow_excess_ops,
-        "excess_ops": excess_ops,
-    }
+    state.update_workflow_context(
+        ConfirmationContext(
+            operation_count=len(plan.ops),
+            overwrite_detected=stage == "overwrite",
+            stage=stage,
+            workspace_root=str(workspace_root),
+            allow_overwrite=allow_overwrite,
+            allow_excess_ops=allow_excess_ops,
+            excess_ops=excess_ops,
+        )
+    )
     _set_state(state, LifecycleState.CONFIRMATION)
 
 
@@ -1160,18 +1234,18 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
         return
 
     context = state.pending_context
-    if context.get("type") != "fs_confirmation":
+    if not isinstance(context, ConfirmationContext):
         _fail_active_goal(state, message="Confirmation received, but no actionable pending state remained.")
         return
     if not isinstance(state.pending_plan, FsPlan):
         _fail_active_goal(state, message="Confirmation received, but no plan was available.")
         return
 
-    stage = str(context.get("stage", "apply"))
-    allow_overwrite = bool(context.get("allow_overwrite", False))
-    allow_excess_ops = bool(context.get("allow_excess_ops", False))
-    excess_ops = bool(context.get("excess_ops", False))
-    root = Path(str(context.get("workspace_root") or workspace_root)).resolve()
+    stage = context.stage
+    allow_overwrite = context.allow_overwrite
+    allow_excess_ops = context.allow_excess_ops
+    excess_ops = context.excess_ops
+    root = Path(context.workspace_root or str(workspace_root)).resolve()
 
     if stage == "overwrite":
         allow_overwrite = True
@@ -1268,19 +1342,20 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
 
 
 def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
-    question_context = dict(state.pending_context)
-    if question_context.get("type") == "guided_listing_choice":
+    question_context = state.pending_context
+    prompt_kind = question_context.prompt_kind if isinstance(question_context, ClarificationContext) else None
+    if prompt_kind == "guided_listing_choice":
         selected = answer.strip()
         if selected == "custom":
             _record_clarification(
                 state,
                 question={"type": "path", "prompt": "Enter custom path:"},
-                pending_context={"type": "guided_listing_custom_path", "base_intent": str(question_context.get("base_intent", ""))},
+                pending_context={"type": "guided_listing_custom_path", "base_intent": question_context.base_intent or ""},
             )
             state.last_result = "Awaiting custom listing path."
             return
         state.pending_question = None
-        state.pending_context = {}
+        state.update_workflow_context(None)
         _enter_planning(state)
         _handle_safe_inspect_repl(
             intent=f'give me a file listing for "{selected}"',
@@ -1289,9 +1364,9 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         )
         return
 
-    if question_context.get("type") == "guided_listing_custom_path":
+    if prompt_kind == "guided_listing_custom_path":
         state.pending_question = None
-        state.pending_context = {}
+        state.update_workflow_context(None)
         _enter_planning(state)
         _handle_safe_inspect_repl(
             intent=f'give me a file listing for "{answer.strip()}"',
@@ -1300,12 +1375,12 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         )
         return
 
-    if question_context.get("type") == "fs_destination":
-        action = str(question_context.get("action", "copy"))
-        src = str(question_context.get("src", "")).strip()
-        root = Path(str(question_context.get("workspace_root", Path.cwd()))).resolve()
+    if prompt_kind == "fs_destination":
+        action = (question_context.action or "copy") if isinstance(question_context, ClarificationContext) else "copy"
+        src = (question_context.source_path or "").strip() if isinstance(question_context, ClarificationContext) else ""
+        root = Path((question_context.workspace_root if isinstance(question_context, ClarificationContext) and question_context.workspace_root else str(Path.cwd()))).resolve()
         state.pending_question = None
-        state.pending_context = {}
+        state.update_workflow_context(None)
         _enter_planning(state)
         _handle_fs_intent_repl(
             intent=f"{action} {src} to {answer.strip()}",
@@ -1315,13 +1390,14 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
         )
         return
 
-    base_intent = str(question_context.get("base_intent") or state.active_goal or "").strip()
+    base_intent = ((question_context.base_intent or "") if isinstance(question_context, ClarificationContext) else (state.active_goal or "")).strip()
     state.pending_question = None
-    state.pending_context = {}
+    state.update_workflow_context(None)
     followup_intent = f"{base_intent} for {answer.strip()}" if base_intent else answer.strip()
     state.active_goal = followup_intent
     state.last_route = ROUTE_ASK
     state.error_message = None
+    state.sync_active_workflow()
     _enter_planning(state)
     result = handle_ask(intent=followup_intent)
     state.last_result = result.output.goal
@@ -1329,17 +1405,26 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
     state.pending_question = result.output.question
     state.awaiting_confirmation = False
     if result.output.question:
-        state.pending_context = {"type": "ask_followup", "base_intent": base_intent or followup_intent}
+        state.update_workflow_context(
+            ClarificationContext(
+                source_path=None,
+                expected_input="answer",
+                action=None,
+                base_intent=base_intent or followup_intent,
+                workspace_root=None,
+                prompt_kind="ask_followup",
+            )
+        )
         _set_state(state, LifecycleState.CLARIFICATION)
     else:
-        state.pending_context = {}
+        state.update_workflow_context(None)
 
 
 def _handle_after(state: SessionState) -> None:
     if state.pending_question:
-        console.print(f"Pending question: {_pending_question_message(state.pending_question)}")
+        console.print(f"Pending question: {_workflow_pending_question(state)}")
         return
-    if state.awaiting_confirmation:
+    if _workflow_awaiting_confirmation(state):
         console.print(f"Awaiting confirmation: {_confirmation_prompt_message(state)}")
         return
     if isinstance(state.pending_plan, list) and state.pending_plan:
@@ -1358,22 +1443,18 @@ def _handle_after(state: SessionState) -> None:
 
 def _handle_status(state: SessionState) -> None:
     current_state = state.current_state.value
-    active_goal = state.active_goal or "(none)"
-    last_route = state.last_route or "(none)"
-    pending_question = _pending_question_message(state.pending_question)
-    if isinstance(state.pending_plan, FsPlan):
-        pending_plan = f"filesystem plan with {len(state.pending_plan.ops)} op(s)"
-    elif isinstance(state.pending_plan, list):
-        pending_plan = f"agent plan with {len(state.pending_plan)} step(s)"
-    else:
-        pending_plan = "(none)"
-    awaiting = "yes" if state.awaiting_confirmation else "no"
+    snapshot = _workflow_snapshot(state)
+    active_goal = (snapshot.goal if snapshot else state.active_goal) or "(none)"
+    last_route = (snapshot.route if snapshot else state.last_route) or "(none)"
+    pending_question = _workflow_pending_question(state)
+    pending_plan = _workflow_pending_plan_summary(state)
+    awaiting = "yes" if _workflow_awaiting_confirmation(state) else "no"
     last_completed_goal = state.last_completed_goal or "(none)"
     last_cancelled_goal = state.last_cancelled_goal or "(none)"
     last_failed_goal = state.last_failed_goal or "(none)"
     last_blocked_goal = state.last_blocked_goal or "(none)"
     error_message = state.error_message or "(none)"
-    control_state = _current_control_state(state)
+    control_state = _workflow_control_state(state)
     lines = [
         f"Current state: {current_state}",
         f"Active goal: {active_goal}",
@@ -1445,6 +1526,7 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
         state.active_goal = intent
         state.last_route = ROUTE_FS_MUTATION
         state.error_message = None
+        state.sync_active_workflow()
     plan = plan_fs_intent(intent=intent, cwd=Path.cwd(), workspace_root=root)
 
     if plan is None:
@@ -1501,11 +1583,12 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
     render_fs_plan(console=console, plan=plan, policy_notes=policy_notes)
     state.pending_plan = plan
     state.pending_question = None
+    state.sync_active_workflow()
 
     requires_confirmation = plan.requires_confirmation or rule_decision.requires_confirmation
     if not requires_confirmation:
         state.awaiting_confirmation = False
-        state.pending_context = {}
+        state.update_workflow_context(None)
         state.last_result = "Planned filesystem change(s) with no apply confirmation needed."
         return True
 

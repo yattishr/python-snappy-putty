@@ -12,6 +12,9 @@ from snappy_putty import cli
 from snappy_putty.fs_models import FsApplyItem, FsApplyResult, FsPlan, PlannedOp
 from snappy_putty.session import (
     ActiveGoalConflictError,
+    ActiveWorkflowSnapshot,
+    ClarificationContext,
+    ConfirmationContext,
     ExecutionOperation,
     ExecutionResult,
     InvalidLifecycleTransition,
@@ -38,7 +41,7 @@ def test_session_state_defaults_to_idle_and_preserves_history_on_clear_pending()
         last_failed_goal="broken",
         last_blocked_goal="denied",
         error_message="boom",
-        pending_context={"type": "fs_confirmation"},
+        pending_context=ConfirmationContext(operation_count=1),
     )
 
     state.clear_pending()
@@ -46,7 +49,7 @@ def test_session_state_defaults_to_idle_and_preserves_history_on_clear_pending()
     assert state.pending_question is None
     assert state.pending_plan is None
     assert state.awaiting_confirmation is False
-    assert state.pending_context == {}
+    assert state.pending_context is None
     assert state.last_completed_goal == "done"
     assert state.last_cancelled_goal == "stopped"
     assert state.last_failed_goal == "broken"
@@ -65,7 +68,7 @@ def test_session_reset_clears_active_and_pending_state() -> None:
         pending_plan=["step"],
         awaiting_confirmation=True,
         error_message="boom",
-        pending_context={"type": "ask_followup", "base_intent": "git push"},
+        pending_context=ClarificationContext(base_intent="git push", prompt_kind="ask_followup"),
         last_completed_goal="done",
         last_blocked_goal="denied",
     )
@@ -78,7 +81,7 @@ def test_session_reset_clears_active_and_pending_state() -> None:
     assert state.pending_plan is None
     assert state.awaiting_confirmation is False
     assert state.error_message is None
-    assert state.pending_context == {}
+    assert state.pending_context is None
     assert state.last_completed_goal == "done"
     assert state.last_blocked_goal == "denied"
 
@@ -93,7 +96,7 @@ def test_reset_to_idle_preserving_history_keeps_failure_metadata() -> None:
         awaiting_confirmation=True,
         last_failed_goal="git push",
         error_message="Unrecognized command",
-        pending_context={"type": "ask_followup", "base_intent": "git push"},
+        pending_context=ClarificationContext(base_intent="git push", prompt_kind="ask_followup"),
     )
 
     state.reset_to_idle_preserving_history()
@@ -103,7 +106,7 @@ def test_reset_to_idle_preserving_history_keeps_failure_metadata() -> None:
     assert state.pending_question is None
     assert state.pending_plan is None
     assert state.awaiting_confirmation is False
-    assert state.pending_context == {}
+    assert state.pending_context is None
     assert state.last_route == "unknown"
     assert state.last_failed_goal == "git push"
     assert state.error_message == "Unrecognized command"
@@ -128,6 +131,81 @@ def test_session_state_invalid_transition_is_rejected() -> None:
 
     with pytest.raises(InvalidLifecycleTransition):
         state.transition_to(LifecycleState.PLANNING)
+
+
+def test_active_workflow_snapshot_can_be_created_for_clarification_state() -> None:
+    state = SessionState()
+
+    state.start_goal(goal="copy README.md", route="fs_mutation")
+    state.pending_question = "destination path>"
+    state.update_workflow_context(
+        ClarificationContext(source_path="README.md", expected_input="path", action="copy", prompt_kind="fs_destination")
+    )
+    state.transition_to(LifecycleState.PLANNING)
+    state.transition_to(LifecycleState.CLARIFICATION)
+
+    assert state.active_workflow is not None
+    assert state.active_workflow.goal == "copy README.md"
+    assert state.active_workflow.state == "CLARIFICATION"
+    assert state.active_workflow.pending_question == "destination path>"
+    assert isinstance(state.active_workflow.context, ClarificationContext)
+
+
+def test_active_workflow_snapshot_clears_on_terminal_cleanup() -> None:
+    state = SessionState()
+
+    state.start_goal(goal="git status", route="git_read")
+    assert state.active_workflow is not None
+
+    state.transition_to(LifecycleState.REFLECTING)
+    state.transition_to(LifecycleState.COMPLETED)
+    state.finish_cycle()
+
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_workflow is None
+
+
+def test_session_state_uses_single_active_workflow_snapshot() -> None:
+    state = SessionState()
+
+    state.start_goal(goal="first goal", route="ask")
+    first_id = state.active_workflow.workflow_id if state.active_workflow else None
+    state.sync_active_workflow()
+
+    assert state.active_workflow is not None
+    assert state.active_workflow.workflow_id == first_id
+
+    with pytest.raises(ActiveGoalConflictError):
+        state.start_goal(goal="second goal", route="git_read")
+
+
+def test_restoration_friendly_snapshot_can_drive_status_reads(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(
+        current_state=LifecycleState.CONFIRMATION,
+        active_goal="copy README.md to backup/README.md",
+        last_route="fs_mutation",
+        active_workflow=ActiveWorkflowSnapshot(
+            workflow_id="wf-123",
+            state="CONFIRMATION",
+            goal="copy README.md to backup/README.md",
+            route="fs_mutation",
+            pending_question="destination path>",
+            pending_plan_summary="filesystem plan with 1 op(s)",
+            awaiting_confirmation=True,
+            control_state="awaiting_confirm",
+            context=ConfirmationContext(operation_count=1, overwrite_detected=True, stage="overwrite"),
+        ),
+    )
+
+    cli._handle_status(state)
+
+    output = buffer.getvalue()
+    assert "Active goal: copy README.md to backup/README.md" in output
+    assert "Pending question: destination path>" in output
+    assert "Pending plan: filesystem plan with 1 op(s)" in output
+    assert "Awaiting confirmation: yes" in output
+    assert "Current control state: awaiting_confirm" in output
 
 
 def test_session_state_start_goal_rejects_nested_active_goal() -> None:
@@ -768,14 +846,14 @@ def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_blocked(mo
             requires_confirmation=True,
         ),
         awaiting_confirmation=True,
-        pending_context={
-            "type": "fs_confirmation",
-            "stage": "apply",
-            "workspace_root": str(tmp_path),
-            "allow_overwrite": False,
-            "allow_excess_ops": False,
-            "excess_ops": False,
-        },
+        pending_context=ConfirmationContext(
+            operation_count=1,
+            stage="apply",
+            workspace_root=str(tmp_path),
+            allow_overwrite=False,
+            allow_excess_ops=False,
+            excess_ops=False,
+        ),
     )
 
     cli._consume_confirmation_response("YES", state, tmp_path)
@@ -857,9 +935,9 @@ def test_current_control_state_reports_confirmation_block_and_allow() -> None:
 
 
 def test_confirmation_prompt_message_varies_by_stage() -> None:
-    apply_state = SessionState(pending_context={"type": "fs_confirmation", "stage": "apply"})
-    overwrite_state = SessionState(pending_context={"type": "fs_confirmation", "stage": "overwrite"})
-    limit_state = SessionState(pending_context={"type": "fs_confirmation", "stage": "limit"})
+    apply_state = SessionState(pending_context=ConfirmationContext(operation_count=1, stage="apply"))
+    overwrite_state = SessionState(pending_context=ConfirmationContext(operation_count=1, stage="overwrite", overwrite_detected=True))
+    limit_state = SessionState(pending_context=ConfirmationContext(operation_count=6, stage="limit"))
 
     assert cli._confirmation_prompt_message(apply_state) == "Type YES to apply, or NO to cancel."
     assert cli._confirmation_prompt_message(overwrite_state) == "Destination exists. Type YES to overwrite, or NO to cancel."
@@ -908,7 +986,7 @@ def test_after_uses_stage_specific_confirmation_prompt(monkeypatch) -> None:
     state = SessionState(
         current_state=LifecycleState.CONFIRMATION,
         awaiting_confirmation=True,
-        pending_context={"type": "fs_confirmation", "stage": "overwrite"},
+        pending_context=ConfirmationContext(operation_count=1, stage="overwrite", overwrite_detected=True),
     )
 
     cli._handle_after(state)
@@ -931,7 +1009,7 @@ def test_clarification_response_validation_distinguishes_answers_from_new_comman
         current_state=LifecycleState.CLARIFICATION,
         active_goal="copy a.txt",
         pending_question="destination path>",
-        pending_context={"type": "fs_destination", "action": "copy", "src": "a.txt"},
+        pending_context=ClarificationContext(source_path="a.txt", expected_input="path", action="copy", prompt_kind="fs_destination"),
     )
 
     assert cli.is_valid_clarification_response("b.txt", state) is True
@@ -944,7 +1022,7 @@ def test_path_clarification_accepts_path_like_input_and_rejects_command_like_inp
         current_state=LifecycleState.CLARIFICATION,
         active_goal="copy README.md",
         pending_question={"type": "path", "prompt": "destination path>"},
-        pending_context={"type": "fs_destination", "action": "copy", "src": "README.md"},
+        pending_context=ClarificationContext(source_path="README.md", expected_input="path", action="copy", prompt_kind="fs_destination"),
     )
 
     assert cli.is_valid_clarification_response("tests/", state) is True
@@ -965,7 +1043,7 @@ def test_resolve_choice_menu_input_maps_numeric_selection_to_value() -> None:
 def test_should_consume_path_clarification_response_even_when_route_is_unknown() -> None:
     state = SessionState(
         pending_question={"type": "path", "prompt": "destination path>"},
-        pending_context={"type": "fs_destination", "action": "copy", "src": "README.md"},
+        pending_context=ClarificationContext(source_path="README.md", expected_input="path", action="copy", prompt_kind="fs_destination"),
     )
 
     assert cli._should_consume_pending_question(text="tests/", route="unknown", state=state) is True
@@ -983,7 +1061,7 @@ def test_clarification_lock_rejects_new_command_without_mutating_state(monkeypat
         last_failed_goal="failed",
         last_cancelled_goal="cancelled",
         last_blocked_goal="blocked",
-        pending_context={"type": "ask_followup", "base_intent": "git push"},
+        pending_context=ClarificationContext(base_intent="git push", expected_input="answer", prompt_kind="ask_followup"),
     )
     text = "give me a file listing for the current directory"
     decision = cli.classify_input(text)
@@ -1012,14 +1090,18 @@ def test_guided_listing_custom_selection_switches_to_custom_path_prompt(monkeypa
         current_state=LifecycleState.CLARIFICATION,
         active_goal="give me a file listing",
         pending_question=cli._build_listing_choice_question(),
-        pending_context={"type": "guided_listing_choice", "base_intent": "give me a file listing"},
+        pending_context=ClarificationContext(base_intent="give me a file listing", expected_input="choice", prompt_kind="guided_listing_choice"),
     )
 
     cli._consume_pending_question_answer("custom", state)
 
     assert state.current_state == LifecycleState.CLARIFICATION
     assert state.pending_question == {"type": "path", "prompt": "Enter custom path:"}
-    assert state.pending_context == {"type": "guided_listing_custom_path", "base_intent": "give me a file listing"}
+    assert state.pending_context == ClarificationContext(
+        base_intent="give me a file listing",
+        expected_input="path",
+        prompt_kind="guided_listing_custom_path",
+    )
     assert buffer.getvalue() == ""
 
 
