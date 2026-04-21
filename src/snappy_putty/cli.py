@@ -101,6 +101,19 @@ def looks_like_new_command(text: str) -> bool:
     return any(lowered.startswith(prefix) for prefix in _COMMAND_SHAPED_PREFIXES)
 
 
+def _is_path_clarification_response(user_input: str) -> bool:
+    raw_text = user_input.strip()
+    if not raw_text:
+        return False
+    if not looks_like_path(raw_text):
+        return False
+
+    # Path clarifications are data-only. Reject anything routable as a new goal
+    # so command-shaped follow-ups cannot escape into planning.
+    route = classify_input(raw_text).route
+    return route == ROUTE_UNKNOWN
+
+
 def is_valid_clarification_response(user_input: str, state: SessionState) -> bool:
     raw_text = user_input.strip()
     text = raw_text.lower()
@@ -109,7 +122,7 @@ def is_valid_clarification_response(user_input: str, state: SessionState) -> boo
     if isinstance(state.pending_question, dict):
         question_type = state.pending_question.get("type")
         if question_type == "path":
-            return looks_like_path(raw_text)
+            return _is_path_clarification_response(raw_text)
         if question_type == "choice":
             return _is_choice_input(raw_text, state.pending_question)
     if state.pending_question and not looks_like_new_command(text):
@@ -426,7 +439,7 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
 
     if context_type == "fs_destination":
         if isinstance(state.pending_question, dict) and state.pending_question.get("type") == "path":
-            return looks_like_path(text)
+            return _is_path_clarification_response(text)
         return route == ROUTE_ASK
 
     if context_type == "ask_followup":
@@ -439,7 +452,7 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
 
     if context_type == "guided_listing_custom_path":
         if isinstance(state.pending_question, dict) and state.pending_question.get("type") == "path":
-            return looks_like_path(text)
+            return _is_path_clarification_response(text)
         return True
 
     return True

@@ -1029,6 +1029,7 @@ def test_path_clarification_accepts_path_like_input_and_rejects_command_like_inp
     assert cli.is_valid_clarification_response("./backup", state) is True
     assert cli.is_valid_clarification_response("../dir", state) is True
     assert cli.is_valid_clarification_response("git status", state) is False
+    assert cli.is_valid_clarification_response("copy README.md README_manual_12.md", state) is False
 
 
 def test_resolve_choice_menu_input_maps_numeric_selection_to_value() -> None:

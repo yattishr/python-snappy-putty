@@ -1019,3 +1019,27 @@ def test_fs_path_clarification_rejects_command_override_and_preserves_workflow(t
     assert "Active goal: copy README.md" in proc.stdout
     assert "Pending question: destination path>" in proc.stdout
     assert "Last route: fs_mutation" in proc.stdout
+
+
+def test_fs_destination_clarification_rejects_command_shaped_copy_repro(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md\ncopy README.md README_manual_12.md\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "destination path>" in proc.stdout
+    assert "You have a pending question." in proc.stdout
+    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
+    assert "Active goal: copy README.md" in proc.stdout
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Active goal: copy README.md to copy README.md README_manual_12.md" not in proc.stdout
+    assert "Destination: copy" not in proc.stdout
+    assert not (tmp_path / "README_manual_12.md").exists()
