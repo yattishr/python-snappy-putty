@@ -81,24 +81,24 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_EXIT,
 }
 _AGENT_MODE_PATTERN = re.compile(r"^\s*agent\s+mode(?:\s+(?P<mode>\S+))?\s*$", flags=re.IGNORECASE)
+_COMMAND_SHAPED_PREFIXES = (
+    "git",
+    "copy",
+    "move",
+    "delete",
+    "remove",
+    "list",
+    "show",
+    "status",
+    "give me",
+    "create",
+    "make",
+)
 
 
 def looks_like_new_command(text: str) -> bool:
     lowered = text.strip().lower()
-    command_prefixes = (
-        "git",
-        "copy",
-        "move",
-        "delete",
-        "remove",
-        "list",
-        "show",
-        "status",
-        "give me",
-        "create",
-        "make",
-    )
-    return any(lowered.startswith(prefix) for prefix in command_prefixes)
+    return any(lowered.startswith(prefix) for prefix in _COMMAND_SHAPED_PREFIXES)
 
 
 def is_valid_clarification_response(user_input: str, state: SessionState) -> bool:
@@ -182,14 +182,16 @@ def _clarification_input_is_locked(*, text: str, route: str, state: SessionState
         return False
     if not state.pending_question:
         return False
+    # Trust boundary: clarification is a data-only channel. Only explicit control
+    # commands may escape it; command-shaped input must not start a new goal.
+    if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
+        return False
     context = state.pending_context
     if isinstance(context, ClarificationContext) and context.prompt_kind in {"fs_destination", "guided_listing_choice", "guided_listing_custom_path"}:
         if is_valid_clarification_response(text, state):
             return False
-        return route not in {ROUTE_GIT_READ}
+        return True
     if _is_choice_question(state.pending_question):
-        return False
-    if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
         return False
     return not is_valid_clarification_response(text, state)
 

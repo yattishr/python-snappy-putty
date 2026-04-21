@@ -1084,6 +1084,41 @@ def test_clarification_lock_rejects_new_command_without_mutating_state(monkeypat
     assert "Answer it, or type 'cancel' to abandon the current goal." in buffer.getvalue()
 
 
+def test_fs_destination_clarification_rejects_command_shaped_input_without_mutating_state(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(
+        current_state=LifecycleState.CLARIFICATION,
+        active_goal="copy README.md",
+        pending_question={"type": "path", "prompt": "destination path>"},
+        pending_plan=None,
+        last_route="fs_mutation",
+        pending_context=ClarificationContext(
+            source_path="README.md",
+            expected_input="path",
+            action="copy",
+            workspace_root="/tmp/workspace",
+            prompt_kind="fs_destination",
+        ),
+    )
+    text = "git status"
+    decision = cli.classify_input(text)
+
+    assert cli._clarification_input_is_locked(text=text, route=decision.route, state=state) is True
+
+    cli._render_clarification_lock_message(state)
+
+    assert state.current_state == LifecycleState.CLARIFICATION
+    assert state.active_goal == "copy README.md"
+    assert state.pending_question == {"type": "path", "prompt": "destination path>"}
+    assert state.pending_plan is None
+    assert state.last_route == "fs_mutation"
+    assert state.last_execution_result is None
+    assert state.active_workflow is None
+    assert cli._should_consume_pending_question(text=text, route=decision.route, state=state) is False
+    assert "You have a pending question." in buffer.getvalue()
+    assert "Answer it, or type 'cancel' to abandon the current goal." in buffer.getvalue()
+
+
 def test_guided_listing_custom_selection_switches_to_custom_path_prompt(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState(

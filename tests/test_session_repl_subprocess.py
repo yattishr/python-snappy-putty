@@ -997,7 +997,7 @@ def test_fs_path_clarification_accepts_relative_directory_input(tmp_path: Path) 
     assert "snappy> " in proc.stdout
 
 
-def test_fs_path_clarification_still_allows_command_override(tmp_path: Path) -> None:
+def test_fs_path_clarification_rejects_command_override_and_preserves_workflow(tmp_path: Path) -> None:
     source = tmp_path / "README.md"
     source.write_text("demo", encoding="utf-8")
     proc = subprocess.run(
@@ -1011,7 +1011,11 @@ def test_fs_path_clarification_still_allows_command_override(tmp_path: Path) -> 
     )
     assert proc.returncode == 0
     assert "destination path>" in proc.stdout
-    assert "Git Read Failed" in proc.stdout
+    assert "You have a pending question." in proc.stdout
+    assert "Answer it, or type 'cancel' to abandon the current goal." in proc.stdout
+    assert "Git Read Failed" not in proc.stdout
     assert not (tmp_path / "README-copy.md").exists()
-    assert "Current state: IDLE" in proc.stdout
-    assert "Last route: git_read" in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
+    assert "Active goal: copy README.md" in proc.stdout
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Last route: fs_mutation" in proc.stdout
