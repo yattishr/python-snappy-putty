@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+import json
+import logging
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+
+from snappy_putty.fs_models import FsPlan
+from snappy_putty.models import PlanStep
+
+logger = logging.getLogger(__name__)
+
+_SESSION_MEMORY_DIR = Path(".snappy") / "memory"
+_SESSION_MEMORY_FILE = _SESSION_MEMORY_DIR / "session.json"
 
 
 class LifecycleState(str, Enum):
@@ -140,6 +151,8 @@ class ActiveWorkflowSnapshot:
     awaiting_confirmation: bool
     control_state: str | None
     context: WorkflowContext | None
+    pending_question_data: dict[str, Any] | str | None = None
+    pending_plan_data: dict[str, Any] | list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -257,10 +270,26 @@ class SessionState:
             awaiting_confirmation=self.awaiting_confirmation,
             control_state=_control_state_from_snapshot(self),
             context=self.pending_context,
+            pending_question_data=_pending_question_data(self.pending_question),
+            pending_plan_data=_pending_plan_data(self.pending_plan),
         )
+        save_workflow_snapshot(self.active_workflow)
 
     def clear_active_workflow(self) -> None:
         self.active_workflow = None
+        clear_workflow_snapshot()
+
+    def restore_workflow(self, snapshot: ActiveWorkflowSnapshot) -> None:
+        self.current_state = _lifecycle_state_from_workflow(snapshot.state)
+        self.active_goal = snapshot.goal
+        self.last_route = snapshot.route
+        self.pending_question = _restore_pending_question(snapshot)
+        self.pending_plan = _restore_pending_plan(snapshot)
+        self.awaiting_confirmation = snapshot.awaiting_confirmation
+        self.pending_context = snapshot.context
+        self.error_message = None
+        self.active_workflow = snapshot
+        save_workflow_snapshot(snapshot)
 
 
 def _pending_question_snapshot(question: Any | None) -> str | None:
@@ -272,6 +301,16 @@ def _pending_question_snapshot(question: Any | None) -> str | None:
     return str(question)
 
 
+def _pending_question_data(question: Any | None) -> dict[str, Any] | str | None:
+    if question is None:
+        return None
+    if isinstance(question, dict):
+        return dict(question)
+    if isinstance(question, str):
+        return question
+    return None
+
+
 def _pending_plan_summary(plan: Any | None) -> str | None:
     if plan is None:
         return None
@@ -281,6 +320,23 @@ def _pending_plan_summary(plan: Any | None) -> str | None:
     if isinstance(plan, list):
         return f"agent plan with {len(plan)} step(s)"
     return str(plan)
+
+
+def _pending_plan_data(plan: Any | None) -> dict[str, Any] | list[dict[str, Any]] | None:
+    if plan is None:
+        return None
+    if isinstance(plan, FsPlan):
+        return plan.model_dump(mode="json")
+    if isinstance(plan, list):
+        serialized_steps: list[dict[str, Any]] = []
+        for item in plan:
+            if isinstance(item, PlanStep):
+                serialized_steps.append(item.model_dump(mode="json"))
+                continue
+            if isinstance(item, dict):
+                serialized_steps.append(dict(item))
+        return serialized_steps
+    return None
 
 
 def _workflow_state_from_lifecycle(state: LifecycleState) -> WorkflowState | None:
@@ -295,6 +351,18 @@ def _workflow_state_from_lifecycle(state: LifecycleState) -> WorkflowState | Non
     return mapping.get(state)
 
 
+def _lifecycle_state_from_workflow(state: WorkflowState) -> LifecycleState:
+    mapping: dict[WorkflowState, LifecycleState] = {
+        "INTENT_RECEIVED": LifecycleState.INTENT_RECEIVED,
+        "PLANNING": LifecycleState.PLANNING,
+        "CLARIFICATION": LifecycleState.CLARIFICATION,
+        "CONFIRMATION": LifecycleState.CONFIRMATION,
+        "EXECUTING": LifecycleState.EXECUTING,
+        "REFLECTING": LifecycleState.REFLECTING,
+    }
+    return mapping[state]
+
+
 def _control_state_from_snapshot(state: SessionState) -> str:
     if state.awaiting_confirmation:
         return "awaiting_confirm"
@@ -303,3 +371,273 @@ def _control_state_from_snapshot(state: SessionState) -> str:
     if state.current_state == LifecycleState.FAILED and state.error_message and "Operation blocked by rule:" in state.error_message:
         return "blocked"
     return "allowed"
+
+
+def _restore_pending_question(snapshot: ActiveWorkflowSnapshot) -> Any | None:
+    if snapshot.pending_question_data is not None:
+        return snapshot.pending_question_data
+    return snapshot.pending_question
+
+
+def _restore_pending_plan(snapshot: ActiveWorkflowSnapshot) -> Any | None:
+    raw_plan = snapshot.pending_plan_data
+    if raw_plan is None:
+        return None
+    if isinstance(raw_plan, dict):
+        return FsPlan.model_validate(raw_plan)
+    if isinstance(raw_plan, list):
+        return [PlanStep.model_validate(item) for item in raw_plan]
+    return None
+
+
+def save_workflow_snapshot(snapshot: ActiveWorkflowSnapshot, cwd: Path | None = None) -> None:
+    session_path = (cwd or Path.cwd()).resolve() / _SESSION_MEMORY_FILE
+    payload = _read_session_payload(session_path)
+    payload["workflow"] = _serialize_workflow_snapshot(snapshot)
+    _write_session_payload(session_path, payload)
+
+
+def load_workflow_snapshot(cwd: Path | None = None) -> ActiveWorkflowSnapshot | None:
+    session_path = (cwd or Path.cwd()).resolve() / _SESSION_MEMORY_FILE
+    if not session_path.is_file():
+        return None
+
+    payload = _read_session_payload(session_path, log_errors=True)
+    raw_snapshot: Any = payload.get("workflow")
+    if raw_snapshot is None and _looks_like_workflow_snapshot(payload):
+        raw_snapshot = payload
+    if raw_snapshot is None:
+        return None
+
+    try:
+        return _deserialize_workflow_snapshot(raw_snapshot)
+    except ValueError as exc:
+        logger.warning("Invalid workflow snapshot: %s", exc)
+        clear_workflow_snapshot(cwd)
+        return None
+
+
+def clear_workflow_snapshot(cwd: Path | None = None) -> None:
+    session_path = (cwd or Path.cwd()).resolve() / _SESSION_MEMORY_FILE
+    if not session_path.exists():
+        return
+
+    payload = _read_session_payload(session_path)
+    if "workflow" not in payload and not _looks_like_workflow_snapshot(payload):
+        return
+
+    if "workflow" in payload:
+        payload.pop("workflow", None)
+    else:
+        payload = {}
+
+    if payload:
+        _write_session_payload(session_path, payload)
+        return
+
+    try:
+        session_path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def _serialize_workflow_snapshot(snapshot: ActiveWorkflowSnapshot) -> dict[str, Any]:
+    payload = {
+        "workflow_id": snapshot.workflow_id,
+        "state": snapshot.state,
+        "goal": snapshot.goal,
+        "route": snapshot.route,
+        "pending_question": snapshot.pending_question,
+        "pending_plan_summary": snapshot.pending_plan_summary,
+        "awaiting_confirmation": snapshot.awaiting_confirmation,
+        "control_state": snapshot.control_state,
+        "context": asdict(snapshot.context) if snapshot.context is not None else None,
+        "pending_question_data": snapshot.pending_question_data,
+        "pending_plan_data": snapshot.pending_plan_data,
+    }
+    return payload
+
+
+def _deserialize_workflow_snapshot(raw_snapshot: Any) -> ActiveWorkflowSnapshot:
+    if not isinstance(raw_snapshot, dict):
+        raise ValueError("workflow snapshot must be a JSON object")
+
+    state = raw_snapshot.get("state")
+    if state not in {"INTENT_RECEIVED", "PLANNING", "CLARIFICATION", "CONFIRMATION", "EXECUTING", "REFLECTING"}:
+        raise ValueError(f"unsupported workflow state: {state!r}")
+
+    workflow_id = raw_snapshot.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        raise ValueError("workflow_id must be a non-empty string")
+
+    pending_question = raw_snapshot.get("pending_question")
+    if pending_question is not None and not isinstance(pending_question, str):
+        raise ValueError("pending_question must be a string when present")
+
+    pending_plan_summary = raw_snapshot.get("pending_plan_summary")
+    if pending_plan_summary is not None and not isinstance(pending_plan_summary, str):
+        raise ValueError("pending_plan_summary must be a string when present")
+
+    awaiting_confirmation = raw_snapshot.get("awaiting_confirmation")
+    if not isinstance(awaiting_confirmation, bool):
+        raise ValueError("awaiting_confirmation must be a boolean")
+
+    context = _deserialize_workflow_context(raw_snapshot.get("context"))
+    question_data = _deserialize_question_data(raw_snapshot.get("pending_question_data"))
+    plan_data = _deserialize_plan_data(raw_snapshot.get("pending_plan_data"))
+
+    snapshot = ActiveWorkflowSnapshot(
+        workflow_id=workflow_id,
+        state=state,
+        goal=_coerce_optional_string(raw_snapshot.get("goal"), field_name="goal"),
+        route=_coerce_optional_string(raw_snapshot.get("route"), field_name="route"),
+        pending_question=pending_question,
+        pending_plan_summary=pending_plan_summary,
+        awaiting_confirmation=awaiting_confirmation,
+        control_state=_coerce_optional_string(raw_snapshot.get("control_state"), field_name="control_state"),
+        context=context,
+        pending_question_data=question_data,
+        pending_plan_data=plan_data,
+    )
+    _validate_workflow_snapshot(snapshot)
+    return snapshot
+
+
+def _deserialize_workflow_context(raw_context: Any) -> WorkflowContext | None:
+    if raw_context is None:
+        return None
+    if not isinstance(raw_context, dict):
+        raise ValueError("context must be an object when present")
+
+    kind = raw_context.get("kind")
+    if kind == "clarification":
+        return ClarificationContext(
+            source_path=_coerce_optional_string(raw_context.get("source_path"), field_name="context.source_path"),
+            expected_input=_coerce_literal(
+                raw_context.get("expected_input"),
+                {"path", "choice", "answer"},
+                field_name="context.expected_input",
+            ),
+            action=_coerce_optional_string(raw_context.get("action"), field_name="context.action"),
+            base_intent=_coerce_optional_string(raw_context.get("base_intent"), field_name="context.base_intent"),
+            workspace_root=_coerce_optional_string(raw_context.get("workspace_root"), field_name="context.workspace_root"),
+            prompt_kind=_coerce_optional_string(raw_context.get("prompt_kind"), field_name="context.prompt_kind"),
+        )
+    if kind == "confirmation":
+        return ConfirmationContext(
+            operation_count=_coerce_int(raw_context.get("operation_count"), field_name="context.operation_count"),
+            overwrite_detected=_coerce_bool(raw_context.get("overwrite_detected"), field_name="context.overwrite_detected"),
+            stage=_coerce_literal(raw_context.get("stage"), {"apply", "overwrite", "limit"}, field_name="context.stage"),
+            workspace_root=_coerce_optional_string(raw_context.get("workspace_root"), field_name="context.workspace_root"),
+            allow_overwrite=_coerce_bool(raw_context.get("allow_overwrite"), field_name="context.allow_overwrite"),
+            allow_excess_ops=_coerce_bool(raw_context.get("allow_excess_ops"), field_name="context.allow_excess_ops"),
+            excess_ops=_coerce_bool(raw_context.get("excess_ops"), field_name="context.excess_ops"),
+        )
+    raise ValueError(f"unsupported workflow context kind: {kind!r}")
+
+
+def _deserialize_question_data(raw_question: Any) -> dict[str, Any] | str | None:
+    if raw_question is None or isinstance(raw_question, str):
+        return raw_question
+    if isinstance(raw_question, dict):
+        return dict(raw_question)
+    raise ValueError("pending_question_data must be a string, object, or null")
+
+
+def _deserialize_plan_data(raw_plan: Any) -> dict[str, Any] | list[dict[str, Any]] | None:
+    if raw_plan is None:
+        return None
+    if isinstance(raw_plan, dict):
+        FsPlan.model_validate(raw_plan)
+        return dict(raw_plan)
+    if isinstance(raw_plan, list):
+        validated_steps: list[dict[str, Any]] = []
+        for item in raw_plan:
+            if not isinstance(item, dict):
+                raise ValueError("pending_plan_data list items must be objects")
+            validated_steps.append(PlanStep.model_validate(item).model_dump(mode="json"))
+        return validated_steps
+    raise ValueError("pending_plan_data must be an object, list, or null")
+
+
+def _validate_workflow_snapshot(snapshot: ActiveWorkflowSnapshot) -> None:
+    if snapshot.goal is None or not snapshot.goal.strip():
+        raise ValueError("goal must be present")
+    if snapshot.route is None or not snapshot.route.strip():
+        raise ValueError("route must be present")
+
+    if snapshot.state == "CLARIFICATION":
+        if not snapshot.pending_question:
+            raise ValueError("clarification workflow is missing pending_question")
+        if not isinstance(snapshot.context, ClarificationContext):
+            raise ValueError("clarification workflow requires ClarificationContext")
+        if snapshot.awaiting_confirmation:
+            raise ValueError("clarification workflow must not await confirmation")
+        return
+
+    if snapshot.state == "CONFIRMATION":
+        if not snapshot.awaiting_confirmation:
+            raise ValueError("confirmation workflow must await confirmation")
+        if not isinstance(snapshot.context, ConfirmationContext):
+            raise ValueError("confirmation workflow requires ConfirmationContext")
+        if snapshot.pending_plan_data is None:
+            raise ValueError("confirmation workflow requires pending_plan_data")
+        if not isinstance(snapshot.pending_plan_data, dict):
+            raise ValueError("confirmation workflow requires filesystem plan data")
+        return
+
+    if snapshot.context is not None:
+        raise ValueError("workflow context only persists for clarification or confirmation states")
+
+
+def _coerce_optional_string(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string when present")
+    return value
+
+
+def _coerce_literal(value: Any, allowed: set[str], *, field_name: str) -> Any:
+    if value not in allowed:
+        raise ValueError(f"{field_name} must be one of {sorted(allowed)}")
+    return value
+
+
+def _coerce_int(value: Any, *, field_name: str) -> int:
+    if not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _coerce_bool(value: Any, *, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a boolean")
+    return value
+
+
+def _read_session_payload(session_path: Path, *, log_errors: bool = False) -> dict[str, Any]:
+    if not session_path.is_file():
+        return {}
+    try:
+        raw_payload = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        if log_errors:
+            logger.warning("Invalid workflow session file: %s", exc)
+        return {}
+    if not isinstance(raw_payload, dict):
+        if log_errors:
+            logger.warning("Invalid workflow session file: top-level JSON must be an object")
+        return {}
+    return raw_payload
+
+
+def _write_session_payload(session_path: Path, payload: dict[str, Any]) -> None:
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = session_path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path.replace(session_path)
+
+
+def _looks_like_workflow_snapshot(payload: dict[str, Any]) -> bool:
+    return "workflow_id" in payload and "state" in payload

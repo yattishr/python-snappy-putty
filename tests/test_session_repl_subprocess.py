@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -35,6 +36,57 @@ def test_repl_pending_question_consumes_next_input_as_answer(tmp_path: Path) -> 
     assert "Directory Listing" in proc.stdout
 
 
+def test_repl_restores_clarification_and_reprompts_without_replanning(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "workflow_id": "wf-clarify",
+                    "state": "CLARIFICATION",
+                    "goal": "copy README.md",
+                    "route": "fs_mutation",
+                    "pending_question": "destination path>",
+                    "pending_plan_summary": None,
+                    "awaiting_confirmation": False,
+                    "control_state": "allowed",
+                    "context": {
+                        "kind": "clarification",
+                        "source_path": "README.md",
+                        "expected_input": "path",
+                        "action": "copy",
+                        "base_intent": None,
+                        "workspace_root": str(tmp_path),
+                        "prompt_kind": "fs_destination",
+                    },
+                    "pending_question_data": {"type": "path", "prompt": "destination path>"},
+                    "pending_plan_data": None,
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="status\ncancel\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Restored pending question: destination path>" in proc.stdout
+    assert "Current state: CLARIFICATION" in proc.stdout
+    assert "Pending question: destination path>" in proc.stdout
+    assert "Directory Listing" not in proc.stdout
+
+
 def test_repl_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
     source = tmp_path / "README.md"
     source.write_text("demo", encoding="utf-8")
@@ -53,6 +105,75 @@ def test_repl_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
     assert proc.stdout.index("Plan Warnings") < proc.stdout.index("Type YES to apply, or NO to cancel.")
     assert "Type YES to apply, or NO to cancel." in proc.stdout
     assert (tmp_path / "README-copy.md").exists()
+
+
+def test_repl_restores_confirmation_without_automatic_execution(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "workflow_id": "wf-confirm",
+                    "state": "CONFIRMATION",
+                    "goal": "copy README.md to README-copy.md",
+                    "route": "fs_mutation",
+                    "pending_question": None,
+                    "pending_plan_summary": "filesystem plan with 1 op(s)",
+                    "awaiting_confirmation": True,
+                    "control_state": "awaiting_confirm",
+                    "context": {
+                        "kind": "confirmation",
+                        "operation_count": 1,
+                        "overwrite_detected": False,
+                        "stage": "apply",
+                        "workspace_root": str(tmp_path),
+                        "allow_overwrite": False,
+                        "allow_excess_ops": False,
+                        "excess_ops": False,
+                    },
+                    "pending_question_data": None,
+                    "pending_plan_data": {
+                        "goal": "copy README.md to README-copy.md",
+                        "cwd": str(tmp_path),
+                        "ops": [
+                            {
+                                "op_id": "op1",
+                                "action": "copy",
+                                "src": "README.md",
+                                "dst": "README-copy.md",
+                                "notes": [],
+                                "risk": "low",
+                            }
+                        ],
+                        "warnings": [],
+                        "requires_confirmation": True,
+                    },
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("demo", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="status\nNO\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Restored pending confirmation." in proc.stdout
+    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
+    assert "Awaiting confirmation: yes" in proc.stdout
+    assert "Cancelled. No pending action was applied." in proc.stdout
+    assert not (tmp_path / "README-copy.md").exists()
 
 
 def test_repl_overwrite_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
@@ -524,7 +645,7 @@ def test_repl_protect_project_root_blocks_workspace_escape_with_rule_message(tmp
     assert "Path escapes workspace root" not in proc.stdout
     assert "Current state: IDLE" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
-    assert "Last failed goal: copy README.md to /" in proc.stdout
+    assert "Last blocked goal: copy README.md to /" in proc.stdout
 
 
 def test_repl_block_rule_outranks_confirm_rule_when_both_are_loaded(tmp_path: Path) -> None:

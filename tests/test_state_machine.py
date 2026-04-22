@@ -20,6 +20,9 @@ from snappy_putty.session import (
     InvalidLifecycleTransition,
     LifecycleState,
     SessionState,
+    clear_workflow_snapshot,
+    load_workflow_snapshot,
+    save_workflow_snapshot,
 )
 
 
@@ -151,6 +154,87 @@ def test_active_workflow_snapshot_can_be_created_for_clarification_state() -> No
     assert isinstance(state.active_workflow.context, ClarificationContext)
 
 
+def test_save_workflow_snapshot_persists_json_safe_fields(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    snapshot = ActiveWorkflowSnapshot(
+        workflow_id="wf-clarify",
+        state="CLARIFICATION",
+        goal="copy README.md",
+        route="fs_mutation",
+        pending_question="destination path>",
+        pending_plan_summary=None,
+        awaiting_confirmation=False,
+        control_state="allowed",
+        context=ClarificationContext(
+            source_path="README.md",
+            expected_input="path",
+            action="copy",
+            workspace_root=str(tmp_path),
+            prompt_kind="fs_destination",
+        ),
+        pending_question_data={"type": "path", "prompt": "destination path>"},
+        pending_plan_data=None,
+    )
+
+    save_workflow_snapshot(snapshot)
+
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    assert session_path.is_file()
+    payload = session_path.read_text(encoding="utf-8")
+    assert '"workflow"' in payload
+    assert '"state": "CLARIFICATION"' in payload
+    assert '"pending_question_data"' in payload
+
+
+def test_load_workflow_snapshot_restores_valid_confirmation_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    state = SessionState()
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+
+    cli._handle_fs_intent_repl("copy README.md to README-copy.md", tmp_path, state)
+
+    restored = load_workflow_snapshot(tmp_path)
+
+    assert restored is not None
+    assert restored.state == "CONFIRMATION"
+    assert restored.goal == "copy README.md to README-copy.md"
+    assert restored.awaiting_confirmation is True
+    assert isinstance(restored.context, ConfirmationContext)
+    assert isinstance(restored.pending_plan_data, dict)
+
+
+def test_load_workflow_snapshot_ignores_invalid_snapshot_and_clears_it(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.chdir(tmp_path)
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        '{"workflow": {"workflow_id": "wf-bad", "state": "CLARIFICATION", "goal": "copy README.md", "route": "fs_mutation", "pending_question": null, "awaiting_confirmation": false, "control_state": "allowed", "context": null}}\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING"):
+        restored = load_workflow_snapshot(tmp_path)
+
+    assert restored is None
+    assert "Invalid workflow snapshot:" in caplog.text
+    assert not session_path.exists()
+
+
+def test_clear_workflow_snapshot_preserves_unrelated_agent_memory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        '{"last_goal": "inspect logs", "workflow": {"workflow_id": "wf-1", "state": "PLANNING", "goal": "inspect logs", "route": "ask", "pending_question": null, "pending_plan_summary": "agent plan with 1 step(s)", "awaiting_confirmation": false, "control_state": "allowed", "context": null, "pending_question_data": null, "pending_plan_data": [{"step": 1, "action": "Inspect logs", "why": "Need current data"}]}}\n',
+        encoding="utf-8",
+    )
+
+    clear_workflow_snapshot(tmp_path)
+
+    assert session_path.is_file()
+    assert session_path.read_text(encoding="utf-8").strip() == '{\n  "last_goal": "inspect logs"\n}'
+
+
 def test_active_workflow_snapshot_clears_on_terminal_cleanup() -> None:
     state = SessionState()
 
@@ -206,6 +290,78 @@ def test_restoration_friendly_snapshot_can_drive_status_reads(monkeypatch) -> No
     assert "Pending plan: filesystem plan with 1 op(s)" in output
     assert "Awaiting confirmation: yes" in output
     assert "Current control state: awaiting_confirm" in output
+
+
+def test_restore_session_from_disk_recovers_clarification_without_execution(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    save_workflow_snapshot(
+        ActiveWorkflowSnapshot(
+            workflow_id="wf-clarify",
+            state="CLARIFICATION",
+            goal="copy README.md",
+            route="fs_mutation",
+            pending_question="destination path>",
+            pending_plan_summary=None,
+            awaiting_confirmation=False,
+            control_state="allowed",
+            context=ClarificationContext(
+                source_path="README.md",
+                expected_input="path",
+                action="copy",
+                workspace_root=str(tmp_path),
+                prompt_kind="fs_destination",
+            ),
+            pending_question_data={"type": "path", "prompt": "destination path>"},
+            pending_plan_data=None,
+        ),
+        tmp_path,
+    )
+    state = SessionState()
+
+    message = cli._restore_session_from_disk(state, tmp_path)
+
+    assert message == "Restored pending question: destination path>"
+    assert state.current_state == LifecycleState.CLARIFICATION
+    assert state.active_goal == "copy README.md"
+    assert state.awaiting_confirmation is False
+    assert state.last_execution_result is None
+    assert buffer.getvalue() == ""
+
+
+def test_restore_session_from_disk_marks_interrupted_execution_failed(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    save_workflow_snapshot(
+        ActiveWorkflowSnapshot(
+            workflow_id="wf-exec",
+            state="EXECUTING",
+            goal="copy README.md README-copy.md",
+            route="fs_mutation",
+            pending_question=None,
+            pending_plan_summary="filesystem plan with 1 op(s)",
+            awaiting_confirmation=False,
+            control_state="allowed",
+            context=None,
+            pending_question_data=None,
+            pending_plan_data={
+                "goal": "copy README.md README-copy.md",
+                "cwd": str(tmp_path),
+                "ops": [{"op_id": "op1", "action": "copy", "src": "README.md", "dst": "README-copy.md", "notes": [], "risk": "low"}],
+                "warnings": [],
+                "requires_confirmation": True,
+            },
+        ),
+        tmp_path,
+    )
+    state = SessionState()
+
+    message = cli._restore_session_from_disk(state, tmp_path)
+
+    assert message == "Previous workflow was interrupted during executing. It has been marked failed."
+    assert state.current_state == LifecycleState.IDLE
+    assert state.last_failed_goal == "copy README.md README-copy.md"
+    assert state.active_goal is None
+    assert load_workflow_snapshot(tmp_path) is None
 
 
 def test_session_state_start_goal_rejects_nested_active_goal() -> None:

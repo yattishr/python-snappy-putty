@@ -65,6 +65,7 @@ from snappy_putty.session import (
     ExecutionResult,
     InvalidLifecycleTransition,
     LifecycleState,
+    load_workflow_snapshot,
     SessionState,
 )
 from snappy_putty.status import busy, get_status_message
@@ -200,7 +201,7 @@ def _clarification_input_is_locked(*, text: str, route: str, state: SessionState
     if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
         return False
     context = state.pending_context
-    if isinstance(context, ClarificationContext) and context.prompt_kind in {"fs_destination", "guided_listing_choice", "guided_listing_custom_path"}:
+    if isinstance(context, ClarificationContext) and context.prompt_kind in {"fs_destination", "guided_listing_custom_path"}:
         if is_valid_clarification_response(text, state):
             return False
         return True
@@ -435,7 +436,12 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
         return False
 
     question_context = state.pending_context
-    context_type = question_context.prompt_kind if isinstance(question_context, ClarificationContext) else None
+    if isinstance(question_context, ClarificationContext):
+        context_type = question_context.prompt_kind
+    elif isinstance(question_context, dict):
+        context_type = str(question_context.get("type") or "")
+    else:
+        context_type = None
 
     if context_type == "fs_destination":
         if isinstance(state.pending_question, dict) and state.pending_question.get("type") == "path":
@@ -456,6 +462,15 @@ def _should_consume_pending_question(*, text: str, route: str, state: SessionSta
         return True
 
     return True
+
+
+def _should_override_guided_listing_question(*, route: str, state: SessionState) -> bool:
+    if state.current_state != LifecycleState.CLARIFICATION:
+        return False
+    if route in RESERVED_CONTROL_ROUTES or route == ROUTE_BUILTIN_EXIT:
+        return False
+    context = state.pending_context
+    return isinstance(context, ClarificationContext) and context.prompt_kind == "guided_listing_choice"
 
 
 def _set_state(state: SessionState, lifecycle: LifecycleState) -> None:
@@ -522,6 +537,7 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goa
     if _is_listing_request(intent) and _extract_requested_path(intent) is None and not _listing_request_is_ambiguous(intent):
         if start_new_goal:
             _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+            _enter_planning(state)
         _record_clarification(
             state,
             question=_build_listing_choice_question(),
@@ -926,9 +942,28 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
     return lines
 
 
+def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> str | None:
+    snapshot = load_workflow_snapshot(workspace_root)
+    if snapshot is None:
+        return None
+
+    state.restore_workflow(snapshot)
+    if snapshot.state in {"EXECUTING", "REFLECTING"}:
+        message = f"Previous workflow was interrupted during {snapshot.state.lower()}. It has been marked failed."
+        _fail_active_goal(state, message=message)
+        return message
+
+    if snapshot.state == "CLARIFICATION":
+        return f"Restored pending question: {_workflow_pending_question(state)}"
+    if snapshot.state == "CONFIRMATION":
+        return "Restored pending confirmation."
+    return f"Restored workflow in {snapshot.state} state."
+
+
 def run_shell() -> None:
     workspace_root = Path.cwd().resolve()
     state = SessionState()
+    restore_message = _restore_session_from_disk(state, workspace_root)
     session = None
     if sys.stdin.isatty():
         try:
@@ -943,6 +978,10 @@ def run_shell() -> None:
             session = None
 
     print_repl_cheatsheet()
+    if restore_message:
+        console.print(restore_message)
+        if state.current_state == LifecycleState.CONFIRMATION:
+            _render_confirmation_prompt(state)
 
     while True:
         try:
@@ -992,6 +1031,8 @@ def run_shell() -> None:
         if _should_consume_pending_question(text=text, route=route, state=state):
             _consume_pending_question_answer(answer=text, state=state)
             continue
+        if _should_override_guided_listing_question(route=route, state=state):
+            state.reset_to_idle_preserving_history()
 
         if route == ROUTE_BUILTIN_EXIT:
             break
