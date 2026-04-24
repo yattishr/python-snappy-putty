@@ -81,9 +81,12 @@ def test_repl_restores_clarification_and_reprompts_without_replanning(tmp_path: 
     )
 
     assert proc.returncode == 0
-    assert "Restored pending question: destination path>" in proc.stdout
+    assert "Restored pending workflow: copy README.md" in proc.stdout
+    assert "State: clarification" in proc.stdout
+    assert "Awaiting: destination path>" in proc.stdout
     assert "Current state: CLARIFICATION" in proc.stdout
     assert "Pending question: destination path>" in proc.stdout
+    assert "Workflow restored from memory: yes" in proc.stdout
     assert "Directory Listing" not in proc.stdout
 
 
@@ -168,12 +171,40 @@ def test_repl_restores_confirmation_without_automatic_execution(tmp_path: Path) 
     )
 
     assert proc.returncode == 0
-    assert "Restored pending confirmation." in proc.stdout
+    assert "Restored pending workflow: copy README.md to README-copy.md" in proc.stdout
+    assert "State: confirmation" in proc.stdout
+    assert "Awaiting: YES/NO" in proc.stdout
     assert "Type YES to apply, or NO to cancel." in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
     assert "Awaiting confirmation: yes" in proc.stdout
+    assert "Workflow restored from memory: yes" in proc.stdout
     assert "Cancelled. No pending action was applied." in proc.stdout
     assert not (tmp_path / "README-copy.md").exists()
+
+
+def test_repl_warns_and_starts_clean_when_snapshot_is_invalid(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        '{"workflow": {"workflow_id": "wf-bad", "state": "CLARIFICATION", "goal": "copy README.md", "route": "fs_mutation", "pending_question": null, "awaiting_confirmation": false, "control_state": "allowed", "context": null}}\n',
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="status\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Stored workflow snapshot was invalid and was ignored." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Workflow restored from memory: yes" not in proc.stdout
+    assert not session_path.exists()
 
 
 def test_repl_overwrite_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
@@ -253,6 +284,24 @@ def test_repl_invalid_confirmation_input_keeps_control_state_pending(tmp_path: P
     assert "Current control state: awaiting_confirm" in proc.stdout
     assert "Type YES to apply, or NO to cancel." in proc.stdout
     assert not (tmp_path / "README-copy.md").exists()
+
+
+def test_repl_status_reprompts_confirmation_with_confirmation_prompt(tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="copy README.md README-copy.md\nstatus\nNO\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "confirm [YES/NO]>" in proc.stdout
+    assert "Cancelled. No pending action was applied." in proc.stdout
 
 
 def test_repl_confirmation_flow_cancels_on_no(tmp_path: Path) -> None:

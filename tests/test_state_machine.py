@@ -280,6 +280,8 @@ def test_restoration_friendly_snapshot_can_drive_status_reads(monkeypatch) -> No
             control_state="awaiting_confirm",
             context=ConfirmationContext(operation_count=1, overwrite_detected=True, stage="overwrite"),
         ),
+        workflow_restored_from_memory=True,
+        restore_source=".snappy/memory/session.json",
     )
 
     cli._handle_status(state)
@@ -290,6 +292,8 @@ def test_restoration_friendly_snapshot_can_drive_status_reads(monkeypatch) -> No
     assert "Pending plan: filesystem plan with 1 op(s)" in output
     assert "Awaiting confirmation: yes" in output
     assert "Current control state: awaiting_confirm" in output
+    assert "Workflow restored from memory: yes" in output
+    assert "Restore source: .snappy/memory/session.json" in output
 
 
 def test_restore_session_from_disk_recovers_clarification_without_execution(monkeypatch, tmp_path: Path) -> None:
@@ -319,13 +323,21 @@ def test_restore_session_from_disk_recovers_clarification_without_execution(monk
     )
     state = SessionState()
 
-    message = cli._restore_session_from_disk(state, tmp_path)
+    message, warning = cli._restore_session_from_disk(state, tmp_path)
 
-    assert message == "Restored pending question: destination path>"
+    assert warning is None
+    assert message == "\n".join(
+        [
+            "Restored pending workflow: copy README.md",
+            "State: clarification",
+            "Awaiting: destination path>",
+        ]
+    )
     assert state.current_state == LifecycleState.CLARIFICATION
     assert state.active_goal == "copy README.md"
     assert state.awaiting_confirmation is False
     assert state.last_execution_result is None
+    assert state.workflow_restored_from_memory is True
     assert buffer.getvalue() == ""
 
 
@@ -355,13 +367,44 @@ def test_restore_session_from_disk_marks_interrupted_execution_failed(monkeypatc
     )
     state = SessionState()
 
-    message = cli._restore_session_from_disk(state, tmp_path)
+    message, warning = cli._restore_session_from_disk(state, tmp_path)
 
+    assert warning is None
     assert message == "Previous workflow was interrupted during executing. It has been marked failed."
     assert state.current_state == LifecycleState.IDLE
     assert state.last_failed_goal == "copy README.md README-copy.md"
     assert state.active_goal is None
     assert load_workflow_snapshot(tmp_path) is None
+
+
+def test_restore_session_from_disk_surfaces_invalid_snapshot_warning(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        '{"workflow": {"workflow_id": "wf-bad", "state": "CLARIFICATION", "goal": "copy README.md", "route": "fs_mutation", "pending_question": null, "awaiting_confirmation": false, "control_state": "allowed", "context": null}}\n',
+        encoding="utf-8",
+    )
+    state = SessionState()
+
+    message, warning = cli._restore_session_from_disk(state, tmp_path)
+
+    assert message is None
+    assert warning == "Stored workflow snapshot was invalid and was ignored."
+    assert state.current_state == LifecycleState.IDLE
+    assert state.active_goal is None
+    assert state.workflow_restored_from_memory is False
+    assert not session_path.exists()
+
+
+def test_render_prompt_uses_confirmation_context_when_confirmation_is_pending() -> None:
+    state = SessionState(
+        current_state=LifecycleState.CONFIRMATION,
+        awaiting_confirmation=True,
+        pending_context=ConfirmationContext(operation_count=1, stage="apply"),
+    )
+
+    assert cli.render_prompt(state) == "confirm [YES/NO]> "
 
 
 def test_session_state_start_goal_rejects_nested_active_goal() -> None:

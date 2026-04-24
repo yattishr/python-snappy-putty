@@ -155,6 +155,13 @@ class ActiveWorkflowSnapshot:
     pending_plan_data: dict[str, Any] | list[dict[str, Any]] | None = None
 
 
+@dataclass(frozen=True)
+class WorkflowRestoreResult:
+    snapshot: ActiveWorkflowSnapshot | None
+    warning: str | None = None
+    source_path: str | None = None
+
+
 @dataclass
 class SessionState:
     agent_mode: str | None = None
@@ -173,6 +180,8 @@ class SessionState:
     pending_context: WorkflowContext | None = None
     last_execution_result: ExecutionResult | None = None
     active_workflow: ActiveWorkflowSnapshot | None = None
+    workflow_restored_from_memory: bool = False
+    restore_source: str | None = None
 
     @property
     def has_active_goal(self) -> bool:
@@ -208,6 +217,8 @@ class SessionState:
         self.clear_pending()
         self.transition_to(LifecycleState.IDLE)
         self.clear_active_workflow()
+        self.workflow_restored_from_memory = False
+        self.restore_source = None
 
     def clear_pending(self) -> None:
         self.pending_question = None
@@ -224,6 +235,8 @@ class SessionState:
         self.awaiting_confirmation = False
         self.error_message = None
         self.pending_context = None
+        self.workflow_restored_from_memory = False
+        self.restore_source = None
         self.clear_active_workflow()
 
     def reset_to_idle_preserving_history(self) -> None:
@@ -233,6 +246,8 @@ class SessionState:
         self.pending_plan = None
         self.awaiting_confirmation = False
         self.pending_context = None
+        self.workflow_restored_from_memory = False
+        self.restore_source = None
         self.clear_active_workflow()
 
     def begin_workflow(self, *, goal: str, route: str) -> None:
@@ -279,7 +294,7 @@ class SessionState:
         self.active_workflow = None
         clear_workflow_snapshot()
 
-    def restore_workflow(self, snapshot: ActiveWorkflowSnapshot) -> None:
+    def restore_workflow(self, snapshot: ActiveWorkflowSnapshot, *, source_path: str | None = None) -> None:
         self.current_state = _lifecycle_state_from_workflow(snapshot.state)
         self.active_goal = snapshot.goal
         self.last_route = snapshot.route
@@ -289,6 +304,8 @@ class SessionState:
         self.pending_context = snapshot.context
         self.error_message = None
         self.active_workflow = snapshot
+        self.workflow_restored_from_memory = True
+        self.restore_source = source_path
         save_workflow_snapshot(snapshot)
 
 
@@ -398,23 +415,32 @@ def save_workflow_snapshot(snapshot: ActiveWorkflowSnapshot, cwd: Path | None = 
 
 
 def load_workflow_snapshot(cwd: Path | None = None) -> ActiveWorkflowSnapshot | None:
+    return restore_workflow_snapshot(cwd).snapshot
+
+
+def restore_workflow_snapshot(cwd: Path | None = None) -> WorkflowRestoreResult:
     session_path = (cwd or Path.cwd()).resolve() / _SESSION_MEMORY_FILE
     if not session_path.is_file():
-        return None
+        return WorkflowRestoreResult(snapshot=None, source_path=str(session_path))
 
     payload = _read_session_payload(session_path, log_errors=True)
     raw_snapshot: Any = payload.get("workflow")
     if raw_snapshot is None and _looks_like_workflow_snapshot(payload):
         raw_snapshot = payload
     if raw_snapshot is None:
-        return None
+        return WorkflowRestoreResult(snapshot=None, source_path=str(session_path))
 
     try:
-        return _deserialize_workflow_snapshot(raw_snapshot)
+        snapshot = _deserialize_workflow_snapshot(raw_snapshot)
     except ValueError as exc:
         logger.warning("Invalid workflow snapshot: %s", exc)
         clear_workflow_snapshot(cwd)
-        return None
+        return WorkflowRestoreResult(
+            snapshot=None,
+            warning="Stored workflow snapshot was invalid and was ignored.",
+            source_path=str(session_path),
+        )
+    return WorkflowRestoreResult(snapshot=snapshot, source_path=str(session_path))
 
 
 def clear_workflow_snapshot(cwd: Path | None = None) -> None:

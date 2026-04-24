@@ -66,6 +66,7 @@ from snappy_putty.session import (
     InvalidLifecycleTransition,
     LifecycleState,
     load_workflow_snapshot,
+    restore_workflow_snapshot,
     SessionState,
 )
 from snappy_putty.status import busy, get_status_message
@@ -235,6 +236,16 @@ def _render_clarification_followup(state: SessionState, *, blocked: bool) -> Non
     )
 
 
+def _confirmation_prompt_label(state: SessionState) -> str:
+    context = state.pending_context
+    stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
+    if stage == "overwrite":
+        return "overwrite [YES/NO]> "
+    if stage == "limit":
+        return "continue [YES/NO]> "
+    return "confirm [YES/NO]> "
+
+
 def _confirmation_prompt_message(state: SessionState) -> str:
     context = state.pending_context
     stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
@@ -303,6 +314,8 @@ def _empty_fs_plan_feedback(plan: FsPlan) -> tuple[str, str, list[str], str]:
 def render_prompt(state: SessionState) -> str:
     if state.current_state == LifecycleState.CLARIFICATION and state.pending_question and not _is_choice_question(state.pending_question):
         return _pending_question_message(state.pending_question)
+    if state.current_state == LifecycleState.CONFIRMATION and state.awaiting_confirmation:
+        return _confirmation_prompt_label(state)
     return "snappy> "
 
 
@@ -942,28 +955,38 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
     return lines
 
 
-def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> str | None:
-    snapshot = load_workflow_snapshot(workspace_root)
-    if snapshot is None:
-        return None
+def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> tuple[str | None, str | None]:
+    restore_result = restore_workflow_snapshot(workspace_root)
+    if restore_result.snapshot is None:
+        return None, restore_result.warning
 
-    state.restore_workflow(snapshot)
+    snapshot = restore_result.snapshot
+    state.restore_workflow(snapshot, source_path=restore_result.source_path)
     if snapshot.state in {"EXECUTING", "REFLECTING"}:
         message = f"Previous workflow was interrupted during {snapshot.state.lower()}. It has been marked failed."
         _fail_active_goal(state, message=message)
-        return message
+        return message, None
 
     if snapshot.state == "CLARIFICATION":
-        return f"Restored pending question: {_workflow_pending_question(state)}"
-    if snapshot.state == "CONFIRMATION":
-        return "Restored pending confirmation."
-    return f"Restored workflow in {snapshot.state} state."
+        awaiting = _workflow_pending_question(state)
+    elif snapshot.state == "CONFIRMATION":
+        awaiting = "YES/NO"
+    else:
+        awaiting = "(none)"
+    message = "\n".join(
+        [
+            f"Restored pending workflow: {snapshot.goal}",
+            f"State: {snapshot.state.lower()}",
+            f"Awaiting: {awaiting}",
+        ]
+    )
+    return message, None
 
 
 def run_shell() -> None:
     workspace_root = Path.cwd().resolve()
     state = SessionState()
-    restore_message = _restore_session_from_disk(state, workspace_root)
+    restore_message, restore_warning = _restore_session_from_disk(state, workspace_root)
     session = None
     if sys.stdin.isatty():
         try:
@@ -978,6 +1001,8 @@ def run_shell() -> None:
             session = None
 
     print_repl_cheatsheet()
+    if restore_warning:
+        console.print(restore_warning)
     if restore_message:
         console.print(restore_message)
         if state.current_state == LifecycleState.CONFIRMATION:
@@ -1519,12 +1544,20 @@ def _handle_status(state: SessionState) -> None:
         f"Pending plan: {pending_plan}",
         f"Awaiting confirmation: {awaiting}",
         f"Current control state: {control_state}",
-        f"Last completed goal: {last_completed_goal}",
-        f"Last cancelled goal: {last_cancelled_goal}",
-        f"Last failed goal: {last_failed_goal}",
-        f"Last blocked goal: {last_blocked_goal}",
-        f"Error message: {error_message}",
     ]
+    if state.workflow_restored_from_memory and state.active_goal:
+        lines.append("Workflow restored from memory: yes")
+        if state.restore_source:
+            lines.append(f"Restore source: {state.restore_source}")
+    lines.extend(
+        [
+            f"Last completed goal: {last_completed_goal}",
+            f"Last cancelled goal: {last_cancelled_goal}",
+            f"Last failed goal: {last_failed_goal}",
+            f"Last blocked goal: {last_blocked_goal}",
+            f"Error message: {error_message}",
+        ]
+    )
     lines.extend(_build_status_agent_lines(session_mode=state.agent_mode))
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 
