@@ -3,6 +3,13 @@
 Snappy PuTTy is a suggestion-first terminal assistant for planning and explaining shell workflows.
 It is designed to help you reason about commands safely before you run anything yourself.
 
+## Recent Changes
+
+- interactive workflows can now be restored after a shell restart
+- restored clarification and confirmation states are shown explicitly at startup
+- `status` now reports whether the active workflow came from memory
+- invalid restore snapshots are warned about and ignored instead of being silently dropped
+
 ## Purpose
 
 This repository provides a Python CLI that:
@@ -109,6 +116,8 @@ REPL commands:
 
 - `help` -> prints the cheat-sheet
 - `doctor` -> runs doctor report
+- `status` -> shows the current session state, including any restored workflow
+- `after` -> shows the next expected input or step
 - `explain <command>` -> explain route
 - any other non-empty line -> ask route
 - `exit` / `quit` -> exit REPL
@@ -116,6 +125,16 @@ REPL commands:
 History is stored at:
 
 - `~/.snappy_putty_history`
+
+### Workflow restore and resume safety
+
+Snappy PuTTy persists pending workflow state in `.snappy/memory/session.json` so clarification and confirmation flows can survive shell restarts.
+
+- restored clarification prompts remain active and show the pending question again
+- restored confirmation prompts still require an explicit `YES` or `NO`
+- `status` shows whether the active workflow was restored from memory
+- invalid or incompatible snapshots are ignored with a warning instead of silently failing
+- `help` and `status` preserve the pending workflow instead of clearing it
 
 ### 2. Non-interactive commands
 
