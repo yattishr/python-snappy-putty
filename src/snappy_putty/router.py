@@ -25,6 +25,7 @@ ROUTE_SHOW_SNAPSHOT = "show_snapshot"
 ROUTE_SHOW_PLAN = "show_plan"
 ROUTE_REFRESH_SNAPSHOT = "refresh_snapshot"
 ROUTE_ASK = "ask"
+ROUTE_OUT_OF_SCOPE = "out_of_scope"
 ROUTE_UNKNOWN = "unknown"
 
 _EXPLAIN_PATTERN = re.compile(r"^\s*explain(?:\s+(?P<command>.+))?\s*$", flags=re.IGNORECASE | re.DOTALL)
@@ -57,6 +58,10 @@ def _is_supported_ask_intent(text: str) -> bool:
     ask_prefixes = (
         "deploy",
         "summarize",
+        "give me",
+        "tell me",
+        "show me",
+        "latest",
         "what ",
         "how ",
         "why ",
@@ -77,6 +82,135 @@ def _is_supported_ask_intent(text: str) -> bool:
         "debug ",
     )
     return any(lowered.startswith(prefix) for prefix in ask_prefixes)
+
+
+def _is_tech_related_intent(text: str) -> bool:
+    lowered = text.lower()
+    tech_terms = (
+        "software",
+        "hardware",
+        "technology",
+        "tech",
+        "code",
+        "coding",
+        "program",
+        "programming",
+        "app",
+        "application",
+        "cli",
+        "terminal",
+        "shell",
+        "command",
+        "repository",
+        "repo",
+        "git",
+        "branch",
+        "commit",
+        "pull request",
+        "bug",
+        "error",
+        "stack trace",
+        "debug",
+        "fix",
+        "build",
+        "deploy",
+        "test",
+        "refactor",
+        "script",
+        "function",
+        "class",
+        "api",
+        "sdk",
+        "package",
+        "dependency",
+        "install",
+        "version",
+        "database",
+        "server",
+        "client",
+        "network",
+        "linux",
+        "windows",
+        "mac",
+        "python",
+        "javascript",
+        "typescript",
+        "rust",
+        "go",
+        "java",
+        "c++",
+        "c#",
+        "ruby",
+        "php",
+        "html",
+        "css",
+        "react",
+        "node",
+        "docker",
+        "kubernetes",
+        "aws",
+        "azure",
+        "gcp",
+        "openai",
+        "llm",
+        "ai",
+        "machine learning",
+        "security",
+        "database",
+        "sql",
+        "regex",
+        "vim",
+        "neovim",
+    )
+
+    def _term_matches(term: str) -> bool:
+        if term in {"c++", "c#"}:
+            return term in lowered
+        return re.search(rf"\b{re.escape(term)}\b", lowered) is not None
+
+    return any(_term_matches(term) for term in tech_terms)
+
+
+def _is_out_of_scope_intent(text: str) -> bool:
+    lowered = text.lower().strip()
+    if not _is_supported_ask_intent(lowered):
+        return False
+    if _is_tech_related_intent(lowered):
+        return False
+
+    topical_markers = (
+        "news",
+        "weather",
+        "forecast",
+        "sports",
+        "score",
+        "scores",
+        "politics",
+        "election",
+        "celebrity",
+        "movie",
+        "movies",
+        "music",
+        "recipe",
+        "recipes",
+        "travel",
+        "restaurant",
+        "restaurants",
+        "shopping",
+        "fashion",
+        "joke",
+        "story",
+        "poem",
+        "finance",
+        "stock",
+        "stocks",
+        "crypto",
+        "bitcoin",
+        "crypto price",
+        "latest news",
+        "breaking news",
+    )
+    return any(marker in lowered for marker in topical_markers)
 
 
 def classify_input(text: str) -> RouteDecision:
@@ -131,6 +265,9 @@ def classify_input(text: str) -> RouteDecision:
 
     if _is_safe_inspection_intent(stripped):
         return RouteDecision(route=ROUTE_SAFE_INSPECT, payload={"intent": stripped})
+
+    if _is_out_of_scope_intent(stripped):
+        return RouteDecision(route=ROUTE_OUT_OF_SCOPE, payload={"intent": stripped})
 
     if _is_supported_ask_intent(stripped):
         return RouteDecision(route=ROUTE_ASK, payload={"intent": stripped})

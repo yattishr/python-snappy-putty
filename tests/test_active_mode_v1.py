@@ -119,6 +119,86 @@ def test_active_mode_rejects_irrelevant_goal_without_creating_plan(tmp_path: Pat
     assert "Grounded planning skipped" in history_path.read_text(encoding="utf-8")
 
 
+def test_rejected_grounded_planning_resets_workflow_state(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me build a rocketship\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "This request does not appear to be related to the current project." in proc.stdout
+    assert "I did not create a grounded project plan because there is no clear connection" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Awaiting confirmation: no" in proc.stdout
+    assert "Last blocked goal: help me build a rocketship" in proc.stdout
+    assert "Error message: goal_not_project_related" in proc.stdout
+
+
+def test_second_rejected_request_does_not_crash(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me build a rocketship\nhelp me create a fitness routine\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "ActiveGoalConflictError" not in proc.stdout
+    assert "fitness routine" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+
+
+def test_valid_project_request_still_works_after_rejection(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me build a rocketship\nhelp me improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "This request does not appear to be related to the current project." in proc.stdout
+    assert "Grounded Plan" in proc.stdout
+    assert "Current state: PLANNING" in proc.stdout or "Current state: CONFIRMATION" in proc.stdout
+    assert "Last plan status: awaiting_confirmation" in proc.stdout
+
+
 def test_active_mode_creates_plan_for_readme_reference(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",

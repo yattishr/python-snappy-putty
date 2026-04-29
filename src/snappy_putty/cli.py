@@ -85,6 +85,7 @@ from snappy_putty.router import (
     ROUTE_INSPECT_FILES,
     ROUTE_INSPECT_PROJECT,
     ROUTE_INSPECT_STRUCTURE,
+    ROUTE_OUT_OF_SCOPE,
     ROUTE_REFRESH_SNAPSHOT,
     ROUTE_SAFE_INSPECT,
     ROUTE_SHOW_PLAN,
@@ -117,6 +118,8 @@ app.add_typer(show_app, name="show")
 app.add_typer(refresh_app, name="refresh")
 console = Console()
 UNKNOWN_COMMAND_MESSAGE = "I don't recognize that command. Try 'help' to see what I can do."
+OUT_OF_SCOPE_MESSAGE = "I can only help with software, hardware, and technology topics."
+OUT_OF_SCOPE_HINT_MESSAGE = "Try asking about code, debugging, CLIs, repos, APIs, or hardware."
 RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_HELP,
     ROUTE_BUILTIN_DOCTOR,
@@ -577,8 +580,12 @@ def _record_agent_planning_result(
     pending_context: dict[str, object] | None = None,
 ) -> None:
     if not result.output.plan and result.output.question is None and result.plan_mode is None:
-        state.last_result = result.output.goal
         state.reset_to_idle_preserving_history()
+        state.last_result = result.output.goal
+        if result.blocked_reason:
+            state.last_blocked_goal = goal
+            state.error_message = result.blocked_reason
+            state.last_route = route
         return
     _begin_goal(state, goal=goal, route=route)
     _enter_planning(state)
@@ -1348,6 +1355,14 @@ def run_shell() -> None:
             console.print(UNKNOWN_COMMAND_MESSAGE)
             state.reset_to_idle_preserving_history()
             continue
+        if route == ROUTE_OUT_OF_SCOPE:
+            state.last_route = ROUTE_OUT_OF_SCOPE
+            state.last_failed_goal = text
+            state.error_message = "Out of scope"
+            console.print(OUT_OF_SCOPE_MESSAGE)
+            console.print(OUT_OF_SCOPE_HINT_MESSAGE)
+            state.reset_to_idle_preserving_history()
+            continue
         if route == ROUTE_EXPLAIN:
             command = decision.payload.get("command", "").strip()
             if not command:
@@ -1486,6 +1501,10 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     if route == ROUTE_UNKNOWN:
         console.print(UNKNOWN_COMMAND_MESSAGE)
         return
+    if route == ROUTE_OUT_OF_SCOPE:
+        console.print(OUT_OF_SCOPE_MESSAGE)
+        console.print(OUT_OF_SCOPE_HINT_MESSAGE)
+        return
     if route == ROUTE_FS_MUTATION:
         _handle_fs_intent(
             intent=decision.payload.get("intent", intent),
@@ -1510,6 +1529,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
         if not related:
             console.print("This request does not appear to be related to the current project.")
+            console.print("I did not create a grounded project plan because there is no clear connection between the request and the inspected workspace.")
             console.print("No grounded plan was created.")
             append_history_event(
                 root,
@@ -1535,6 +1555,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 parse_error=None,
                 directory_listing=None,
                 plan_mode=None,
+                blocked_reason=relevance_reason,
             )
         try:
             if planning_mode == PlanningMode.LLM_ASSISTED:

@@ -36,6 +36,24 @@ def test_repl_pending_question_consumes_next_input_as_answer(tmp_path: Path) -> 
     assert "Directory Listing" in proc.stdout
 
 
+def test_repl_out_of_scope_request_is_declined_without_planning(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="what is the weather in Paris\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "I can only help with software, hardware, and technology topics." in proc.stdout
+    assert "Try asking about code, debugging, CLIs, repos, APIs, or hardware." in proc.stdout
+    assert "Planned Changes" not in proc.stdout
+    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+
+
 def test_repl_restores_clarification_and_reprompts_without_replanning(tmp_path: Path) -> None:
     session_path = tmp_path / ".snappy" / "memory" / "session.json"
     session_path.parent.mkdir(parents=True)

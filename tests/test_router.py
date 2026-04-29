@@ -41,6 +41,10 @@ from snappy_putty.router import classify_input
         ("show files", "safe_inspect"),
         ("deploy this to google cloud", "ask"),
         ("what should I run to rotate nginx logs", "ask"),
+        ("give me the latest news on the election", "out_of_scope"),
+        ("what is the weather in Paris", "out_of_scope"),
+        ("show me sports scores", "out_of_scope"),
+        ("give me the latest news on Python 3.13", "ask"),
         ("do something random and undefined", "unknown"),
     ],
 )

@@ -370,6 +370,17 @@ def test_ask_unknown_command_stays_local_and_does_not_call_agent(monkeypatch) ->
     assert "I don't recognize that command. Try 'help' to see what I can do." in result.stdout
 
 
+def test_ask_out_of_scope_request_is_declined_without_calling_agent(monkeypatch) -> None:
+    def fail_handle_ask(*args, **kwargs):
+        raise AssertionError("handle_ask should not run for out-of-scope requests")
+
+    monkeypatch.setattr("snappy_putty.cli.handle_ask", fail_handle_ask)
+    result = runner.invoke(app, ["ask", "give me the latest news on the election"])
+    assert result.exit_code == 0
+    assert "I can only help with software, hardware, and technology topics." in result.stdout
+    assert "Try asking about code, debugging, CLIs, repos, APIs, or hardware." in result.stdout
+
+
 def test_shell_workflow_ux_smoke_clarification_confirmation_and_after(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
 
