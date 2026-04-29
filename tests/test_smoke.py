@@ -339,6 +339,8 @@ def test_shell_agent_doctor_command_runs() -> None:
 
 
 def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:
+    monkeypatch.setenv("SNAPPY_PUTTY_ENABLE_SDK", "1")
+
     async def fake_run_with_sdk(mode: str, user_text: str, snapshot) -> str:
         return """```json
 {
@@ -352,7 +354,7 @@ def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:
 ```"""
 
     monkeypatch.setattr(agent_module, "_run_with_sdk", fake_run_with_sdk)
-    result = runner.invoke(app, ["ask", "show me status"])
+    result = runner.invoke(app, ["ask", "help me add logging to the CLI"])
     assert result.exit_code == 0
     assert "Fenced Goal" in result.stdout
     assert "Commands" in result.stdout

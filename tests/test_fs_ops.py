@@ -122,10 +122,8 @@ def test_copy_space_separated_keeps_src_and_dst_and_is_not_incomplete(tmp_path: 
 
     plan = plan_fs_intent("copy README.md README.md", cwd=tmp_path, workspace_root=tmp_path)
     assert plan is not None
-    assert len(plan.ops) == 1
-    assert plan.ops[0].action == "copy"
-    assert plan.ops[0].src == "README.md"
-    assert plan.ops[0].dst == "README.md"
+    assert plan.ops == []
+    assert any("same file" in warning.lower() for warning in plan.warnings)
     assert parse_incomplete_fs_intent("copy README.md README.md") is None
 
 

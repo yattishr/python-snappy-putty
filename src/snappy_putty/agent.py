@@ -482,6 +482,20 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
         output = _apply_safety(_cloud_deploy_cli_branch_output(effective_text))
         return AgentRunResult(output=output)
 
+    if not _sdk_planning_enabled():
+        fallback_snapshot = snapshot if snapshot is not None else ContextSnapshot(
+            os_name="unknown",
+            platform_info="unknown",
+            cwd="unknown",
+            in_git_repo=False,
+            git_branch=None,
+            git_state=None,
+            tools={},
+            project_types=[],
+        )
+        fallback = _apply_safety(_fallback_output(mode=mode, user_text=effective_text, snapshot=fallback_snapshot))
+        return AgentRunResult(output=fallback)
+
     try:
         raw_text = asyncio.run(_run_with_sdk(mode=mode, user_text=effective_text, snapshot=snapshot))
         parsed = parse_agent_output(raw_text)
@@ -512,3 +526,7 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
         )
         fallback = _apply_safety(_fallback_output(mode=mode, user_text=effective_text, snapshot=fallback_snapshot))
         return AgentRunResult(output=fallback)
+
+
+def _sdk_planning_enabled() -> bool:
+    return os.getenv("SNAPPY_PUTTY_ENABLE_SDK") == "1"

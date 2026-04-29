@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -20,11 +21,37 @@ from snappy_putty.agent_discovery import (
     load_agent_skill_registry,
     normalize_agent_mode,
 )
+from snappy_putty.active_planner import (
+    GroundedPlan,
+    LLMPlannerUnavailableError,
+    LLMPlanValidationError,
+    PlanStep as GroundedPlanStep,
+    PlanningMode,
+    build_grounded_plan,
+    build_llm_prompt,
+    classify_planning_mode,
+    create_llm_assisted_plan,
+    grounded_plan_to_lines,
+)
 from snappy_putty.agent_init import init_agent_project
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
 from snappy_putty.git_read import execute_git_read, parse_git_read_intent
+from snappy_putty.history import append_history_event
+from snappy_putty.memory import (
+    ensure_project_snapshot,
+    history_path,
+    invalidate_grounded_plan,
+    load_grounded_plan,
+    load_project_snapshot,
+    load_current_snapshot_metadata,
+    load_or_refresh_snapshot,
+    project_snapshot_path,
+    save_grounded_plan,
+    save_session_payload,
+    snapshot_is_stale,
+)
 from snappy_putty.render import (
     block_message_from_decision,
     policy_notes_from_decision,
@@ -39,6 +66,7 @@ from snappy_putty.render import (
     render_fs_rule_block,
     render_git_read,
 )
+from snappy_putty.project_inspector import ProjectSnapshot, snapshot_from_payload, snapshot_to_payload
 from snappy_putty.rule_hooks import before_agent_mode_change, before_filesystem_mutation_plan_or_execute
 from snappy_putty.rule_hooks import POLICY_HIERARCHY
 from snappy_putty.router import (
@@ -52,7 +80,14 @@ from snappy_putty.router import (
     ROUTE_EXPLAIN,
     ROUTE_FS_MUTATION,
     ROUTE_GIT_READ,
+    ROUTE_INSPECT_FILE,
+    ROUTE_INSPECT_FILES,
+    ROUTE_INSPECT_PROJECT,
+    ROUTE_INSPECT_STRUCTURE,
+    ROUTE_REFRESH_SNAPSHOT,
     ROUTE_SAFE_INSPECT,
+    ROUTE_SHOW_PLAN,
+    ROUTE_SHOW_SNAPSHOT,
     ROUTE_UNKNOWN,
     classify_input,
 )
@@ -70,8 +105,15 @@ from snappy_putty.session import (
     SessionState,
 )
 from snappy_putty.status import busy, get_status_message
+from snappy_putty.models import AgentOutput, PlanStep as AgentPlanStep
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
+inspect_app = typer.Typer(help="Read-only project inspection commands.", invoke_without_command=False)
+show_app = typer.Typer(help="Display cached inspection and planning state.", invoke_without_command=False)
+refresh_app = typer.Typer(help="Refresh cached project inspection state.", invoke_without_command=False)
+app.add_typer(inspect_app, name="inspect")
+app.add_typer(show_app, name="show")
+app.add_typer(refresh_app, name="refresh")
 console = Console()
 UNKNOWN_COMMAND_MESSAGE = "I don't recognize that command. Try 'help' to see what I can do."
 RESERVED_CONTROL_ROUTES = {
@@ -81,6 +123,13 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_AFTER,
     ROUTE_BUILTIN_CANCEL,
     ROUTE_BUILTIN_EXIT,
+    ROUTE_INSPECT_PROJECT,
+    ROUTE_INSPECT_FILES,
+    ROUTE_INSPECT_STRUCTURE,
+    ROUTE_INSPECT_FILE,
+    ROUTE_SHOW_SNAPSHOT,
+    ROUTE_SHOW_PLAN,
+    ROUTE_REFRESH_SNAPSHOT,
 }
 _AGENT_MODE_PATTERN = re.compile(r"^\s*agent\s+mode(?:\s+(?P<mode>\S+))?\s*$", flags=re.IGNORECASE)
 _COMMAND_SHAPED_PREFIXES = (
@@ -567,7 +616,7 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goa
         state.last_route = ROUTE_SAFE_INSPECT
         state.error_message = None
         state.sync_active_workflow()
-    result = handle_ask(intent=intent)
+    result = handle_ask(intent=intent, session_mode=state.agent_mode)
     if result.output.question:
         state.last_result = result.output.goal
         state.pending_plan = result.output.plan
@@ -690,6 +739,13 @@ def print_repl_cheatsheet() -> None:
             "- init              Scaffold a .snappy/ agent directory.",
             "- skills            List loaded .snappy skills.",
             "- rules             List loaded .snappy rules.",
+            "- inspect project   Cache a project snapshot.",
+            "- inspect files     Show important files from the snapshot.",
+            "- inspect structure Show the current project structure.",
+            "- inspect file <p>  Show a read-only file excerpt.",
+            "- show snapshot     Display the cached project snapshot.",
+            "- show plan         Display the cached grounded plan.",
+            "- refresh snapshot  Force a new project snapshot.",
             "- explain <command> Explain a command safely.",
             "- after             Show the next expected input or step.",
             "- status            Show diagnostic session and agent status.",
@@ -955,6 +1011,137 @@ def _build_status_agent_lines(cwd: Path | None = None, session_mode: str | None 
     return lines
 
 
+def _project_root(cwd: Path | None = None) -> Path:
+    return (cwd or Path.cwd()).resolve()
+
+
+def _snapshot_summary_lines(snapshot: ProjectSnapshot) -> list[str]:
+    return [
+        f"Snapshot ID: {snapshot.snapshot_id}",
+        f"Root: {snapshot.root_path}",
+        f"Created at: {snapshot.created_at}",
+        f"Root hash: {snapshot.root_hash or '(none)'}",
+        f"Git branch: {snapshot.git_branch or '(none)'}",
+        f"Git status: {snapshot.git_status_summary or '(none)'}",
+        f"Languages: {', '.join(snapshot.languages) if snapshot.languages else '(none)'}",
+        f"Package managers: {', '.join(snapshot.package_managers) if snapshot.package_managers else '(none)'}",
+        f"Frameworks/tools: {', '.join(snapshot.frameworks) if snapshot.frameworks else '(none)'}",
+        f"Config files: {', '.join(snapshot.config_files) if snapshot.config_files else '(none)'}",
+        f"Docs: {', '.join(snapshot.docs[:6]) if snapshot.docs else '(none)'}",
+        f"Tests: {', '.join(snapshot.test_files[:6]) if snapshot.test_files else '(none)'}",
+        f"Source files: {', '.join(snapshot.source_files[:6]) if snapshot.source_files else '(none)'}",
+        f"Entry points: {', '.join(snapshot.entry_points) if snapshot.entry_points else '(none)'}",
+        f"File count: {snapshot.file_count}",
+        f"Sampled files: {', '.join(snapshot.sampled_files) if snapshot.sampled_files else '(none)'}",
+    ]
+
+
+def _render_snapshot_report(snapshot: ProjectSnapshot, *, title: str = "Project Inspection") -> None:
+    lines = _snapshot_summary_lines(snapshot)
+    lines.append("")
+    lines.append(f"Snapshot saved: {project_snapshot_path(Path(snapshot.root_path)).as_posix()}")
+    console.print(Panel.fit("\n".join(lines), title=title, border_style="bright_blue"))
+
+
+def _render_grounded_plan_report(plan: GroundedPlan, *, title: str = "Grounded Plan") -> None:
+    console.print(Panel.fit("\n".join(grounded_plan_to_lines(plan)), title=title, border_style="bright_blue"))
+
+
+def _grounded_plan_to_agent_steps(plan: GroundedPlan) -> list[AgentPlanStep]:
+    return [
+        AgentPlanStep(
+            step=index + 1,
+            action=step.description,
+            why=f"Risk={step.risk}; files={', '.join(step.files) if step.files else '(none)'}",
+        )
+        for index, step in enumerate(plan.steps)
+    ]
+
+
+def _render_project_files_report(snapshot: ProjectSnapshot, *, title: str = "Project Files") -> None:
+    body = [
+        "Important files",
+        "",
+        "Config files:",
+        *(f"- {item}" for item in snapshot.config_files or ["(none)"]),
+        "",
+        "Docs:",
+        *(f"- {item}" for item in snapshot.docs or ["(none)"]),
+        "",
+        "Tests:",
+        *(f"- {item}" for item in snapshot.test_files or ["(none)"]),
+        "",
+        "Source files:",
+        *(f"- {item}" for item in snapshot.source_files or ["(none)"]),
+    ]
+    console.print(Panel("\n".join(body), title=title, border_style="bright_blue"))
+
+
+def _render_project_structure_report(snapshot: ProjectSnapshot, *, title: str = "Structure") -> None:
+    body = [
+        "Project Structure",
+        "",
+        f"Root: {snapshot.root_path}",
+        f"File count: {snapshot.file_count}",
+        f"Languages: {', '.join(snapshot.languages) if snapshot.languages else '(none)'}",
+        f"Package managers: {', '.join(snapshot.package_managers) if snapshot.package_managers else '(none)'}",
+        f"Frameworks/tools: {', '.join(snapshot.frameworks) if snapshot.frameworks else '(none)'}",
+        f"Entry points: {', '.join(snapshot.entry_points) if snapshot.entry_points else '(none)'}",
+    ]
+    console.print(Panel("\n".join(body), title=title, border_style="bright_blue"))
+
+
+def _print_file_excerpt(path: Path, *, title: str) -> None:
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        console.print(Panel.fit(str(exc), title=title, border_style="red"))
+        return
+    excerpt = content if len(content) <= 12000 else content[:12000] + "\n...\n[truncated]"
+    console.print(Panel(excerpt, title=title, border_style="bright_blue"))
+
+
+def _inspect_project_command(cwd: Path | None = None, *, force_refresh: bool = False) -> ProjectSnapshot:
+    root = _project_root(cwd)
+    return ensure_project_snapshot(root, force_refresh=force_refresh)
+
+
+def _load_snapshot_for_display(root: Path) -> ProjectSnapshot:
+    snapshot = load_project_snapshot(root)
+    if snapshot is not None:
+        append_history_event(root, "project snapshot reused", {"Snapshot ID": snapshot.snapshot_id})
+        return snapshot
+    return ensure_project_snapshot(root, force_refresh=True)
+
+
+def _show_current_snapshot(root: Path) -> ProjectSnapshot:
+    snapshot = load_project_snapshot(root)
+    if snapshot is None:
+        if project_snapshot_path(root).is_file():
+            console.print("Stored project snapshot was invalid and was ignored.")
+        snapshot = ensure_project_snapshot(root, force_refresh=True)
+    append_history_event(root, "project snapshot reused", {"Snapshot ID": snapshot.snapshot_id})
+    _render_snapshot_report(snapshot, title="Project Snapshot")
+    return snapshot
+
+
+def _show_current_plan(root: Path) -> GroundedPlan | None:
+    snapshot = _load_snapshot_for_display(root)
+    plan = load_grounded_plan(root)
+    if plan is None:
+        console.print("No grounded plan is currently stored.")
+        return None
+    if snapshot_is_stale(root, snapshot) or plan.based_on_snapshot_id != snapshot.snapshot_id:
+        reason = "Project snapshot changed"
+        plan = invalidate_grounded_plan(root, plan, reason)
+        console.print("Stored plan was based on an outdated project snapshot and was invalidated.")
+        _render_grounded_plan_report(plan, title="Grounded Plan")
+        return plan
+    append_history_event(root, "grounded plan shown", {"Plan ID": plan.plan_id, "Status": plan.status})
+    _render_grounded_plan_report(plan, title="Grounded Plan")
+    return plan
+
+
 def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> tuple[str | None, str | None]:
     restore_result = restore_workflow_snapshot(workspace_root)
     if restore_result.snapshot is None:
@@ -1077,6 +1264,40 @@ def run_shell() -> None:
             if state.current_state == LifecycleState.CLARIFICATION and state.pending_question and not _is_choice_question(state.pending_question):
                 _render_clarification_followup(state, blocked=False)
             continue
+        if route == ROUTE_INSPECT_PROJECT:
+            _render_snapshot_report(ensure_project_snapshot(workspace_root, force_refresh=True))
+            continue
+        if route == ROUTE_INSPECT_FILES:
+            _render_project_files_report(_load_snapshot_for_display(workspace_root))
+            continue
+        if route == ROUTE_INSPECT_STRUCTURE:
+            _render_project_structure_report(_load_snapshot_for_display(workspace_root))
+            continue
+        if route == ROUTE_INSPECT_FILE:
+            inspect_path = decision.payload.get("path", "").strip()
+            if not inspect_path:
+                console.print("Usage: inspect file <path>")
+            else:
+                candidate = (workspace_root / inspect_path).resolve() if not Path(inspect_path).is_absolute() else Path(inspect_path).resolve()
+                try:
+                    candidate.relative_to(workspace_root)
+                except ValueError:
+                    console.print("Refusing to inspect a file outside the current project root.")
+                else:
+                    if candidate.is_file():
+                        _print_file_excerpt(candidate, title=f"File: {inspect_path}")
+                    else:
+                        console.print(f"File not found: {inspect_path}")
+            continue
+        if route == ROUTE_SHOW_SNAPSHOT:
+            _show_current_snapshot(workspace_root)
+            continue
+        if route == ROUTE_SHOW_PLAN:
+            _show_current_plan(workspace_root)
+            continue
+        if route == ROUTE_REFRESH_SNAPSHOT:
+            _render_snapshot_report(ensure_project_snapshot(workspace_root, force_refresh=True), title="Refreshed Snapshot")
+            continue
         if route == ROUTE_BUILTIN_DOCTOR:
             doctor(verbose=False)
             continue
@@ -1127,7 +1348,7 @@ def run_shell() -> None:
             continue
 
         current_intent = decision.payload.get("intent", text)
-        result = handle_ask(intent=current_intent)
+        result = handle_ask(intent=current_intent, session_mode=state.agent_mode)
         pending_context = {"type": "ask_followup", "base_intent": current_intent} if result.output.question else {}
         _record_agent_planning_result(state, route=route, goal=current_intent, result=result, pending_context=pending_context)
 
@@ -1137,6 +1358,62 @@ def main(ctx: typer.Context) -> None:
     """Start shell when no subcommand is provided."""
     if ctx.invoked_subcommand is None and not ctx.resilient_parsing:
         run_shell()
+
+
+@inspect_app.command("project")
+def inspect_project() -> None:
+    """Inspect the current repository and cache a project snapshot."""
+    snapshot = ensure_project_snapshot(Path.cwd().resolve(), force_refresh=True)
+    _render_snapshot_report(snapshot)
+
+
+@inspect_app.command("files")
+def inspect_files() -> None:
+    """Inspect the project file inventory."""
+    snapshot = _load_snapshot_for_display(Path.cwd().resolve())
+    _render_project_files_report(snapshot)
+
+
+@inspect_app.command("structure")
+def inspect_structure() -> None:
+    """Inspect the overall project structure."""
+    snapshot = _load_snapshot_for_display(Path.cwd().resolve())
+    _render_project_structure_report(snapshot)
+
+
+@inspect_app.command("file")
+def inspect_file(path: str) -> None:
+    """Inspect a single file in read-only mode."""
+    root = Path.cwd().resolve()
+    candidate = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        console.print("Refusing to inspect a file outside the current project root.")
+        return
+    if not candidate.is_file():
+        console.print(f"File not found: {path}")
+        return
+    _print_file_excerpt(candidate, title=f"File: {path}")
+
+
+@show_app.command("snapshot")
+def show_snapshot() -> None:
+    """Show the current cached project snapshot."""
+    _show_current_snapshot(Path.cwd().resolve())
+
+
+@show_app.command("plan")
+def show_plan() -> None:
+    """Show the current grounded plan."""
+    _show_current_plan(Path.cwd().resolve())
+
+
+@refresh_app.command("snapshot")
+def refresh_snapshot() -> None:
+    """Force a fresh project snapshot."""
+    snapshot = ensure_project_snapshot(Path.cwd().resolve(), force_refresh=True)
+    _render_snapshot_report(snapshot, title="Refreshed Snapshot")
 
 
 @app.command()
@@ -1185,11 +1462,82 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     if route == ROUTE_GIT_READ:
         _handle_git_read(intent=decision.payload.get("intent", intent), workspace_root=Path.cwd().resolve())
         return
-    handle_ask(decision.payload.get("intent", intent))
+    handle_ask(decision.payload.get("intent", intent), session_mode=None)
 
 
-def handle_ask(intent: str) -> AgentRunResult:
+def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
     """Run ask flow and render output."""
+    if get_agent_mode(session_mode) == "active":
+        root = Path.cwd().resolve()
+        snapshot = ensure_project_snapshot(root)
+        planning_mode = classify_planning_mode(intent)
+        console.print("Inspecting project context...")
+        console.print(f"Using snapshot: {snapshot.snapshot_id}")
+        try:
+            if planning_mode == PlanningMode.LLM_ASSISTED:
+                plan = create_llm_assisted_plan(intent, snapshot)
+            else:
+                plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
+        except LLMPlannerUnavailableError as exc:
+            console.print(str(exc))
+            plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
+        except LLMPlanValidationError as exc:
+            console.print("LLM-assisted plan was rejected by validation.")
+            console.print(f"Reason: {exc}")
+            append_history_event(
+                root,
+                "LLM-assisted plan rejected",
+                {
+                    "Goal": intent,
+                    "Reason": str(exc),
+                    "Status": "rejected",
+                },
+            )
+            plan = None
+        if plan is None:
+            return AgentRunResult(
+                output=AgentOutput(
+                    goal=intent,
+                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
+                    question=None,
+                    plan=[],
+                    commands=[],
+                    warnings=["No changes have been applied."],
+                    snippets=[],
+                ),
+                raw_model_text=None,
+                parse_error=None,
+                directory_listing=None,
+            )
+        save_grounded_plan(root, plan, snapshot)
+        event_name = "LLM-assisted plan created" if plan.mode == PlanningMode.LLM_ASSISTED.value else "Grounded plan created"
+        append_history_event(
+            root,
+            event_name,
+            {
+                "Mode": plan.mode,
+                "Goal": plan.goal,
+                "Plan ID": plan.plan_id,
+                "Based on snapshot": plan.based_on_snapshot_id,
+                "Files referenced": plan.files_inspected,
+                "Status": plan.status,
+            },
+        )
+        _render_grounded_plan_report(plan)
+        return AgentRunResult(
+            output=AgentOutput(
+                goal=plan.goal,
+                assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}", f"Inspection root: {snapshot.root_path}"],
+                question=None,
+                plan=_grounded_plan_to_agent_steps(plan),
+                commands=[],
+                warnings=plan.risks,
+                snippets=[],
+            ),
+            raw_model_text=None,
+            parse_error=None,
+            directory_listing=None,
+        )
     with busy(get_status_message("ask"), console=console):
         snapshot = collect_context()
         result = plan_with_agent(mode="ask", user_text=intent, snapshot=snapshot)
@@ -1480,7 +1828,7 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
     state.error_message = None
     state.sync_active_workflow()
     _enter_planning(state)
-    result = handle_ask(intent=followup_intent)
+    result = handle_ask(intent=followup_intent, session_mode=state.agent_mode)
     state.last_result = result.output.goal
     state.pending_plan = result.output.plan
     state.pending_question = result.output.question
@@ -1523,6 +1871,7 @@ def _handle_after(state: SessionState) -> None:
 
 
 def _handle_status(state: SessionState) -> None:
+    root = Path.cwd().resolve()
     current_state = state.current_state.value
     snapshot = _workflow_snapshot(state)
     active_goal = (snapshot.goal if snapshot else state.active_goal) or "(none)"
@@ -1558,6 +1907,40 @@ def _handle_status(state: SessionState) -> None:
             f"Error message: {error_message}",
         ]
     )
+    project_snapshot = load_current_snapshot_metadata(root)
+    snapshot_present = project_snapshot_path(root).is_file()
+    snapshot_valid = project_snapshot is not None
+    current_plan = load_grounded_plan(root)
+    if current_plan is not None and not snapshot_valid:
+        current_plan = invalidate_grounded_plan(root, current_plan, "Project snapshot changed")
+    if current_plan is not None and project_snapshot is not None and current_plan.based_on_snapshot_id != project_snapshot.snapshot_id:
+        current_plan = invalidate_grounded_plan(root, current_plan, "Project snapshot changed")
+    lines.append(f"Agent mode: {get_agent_mode(state.agent_mode)}")
+    lines.append(f"Project snapshot: {'present' if snapshot_present else 'absent'}")
+    lines.append(f"Snapshot valid: {'yes' if snapshot_valid else 'no'}")
+    if project_snapshot is not None:
+        lines.append(f"Snapshot ID: {project_snapshot.snapshot_id}")
+        lines.append(f"Snapshot root: {project_snapshot.root_path}")
+        lines.append(f"Snapshot status: {project_snapshot.git_status_summary or '(none)'}")
+        try:
+            created_at = datetime.fromisoformat(project_snapshot.created_at)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            age_seconds = max(0, int((datetime.now(created_at.tzinfo) - created_at).total_seconds()))
+            lines.append(f"Snapshot age: {age_seconds // 60}m")
+        except ValueError:
+            lines.append("Snapshot age: unknown")
+    lines.append(f"Grounded planning: {'yes' if current_plan is not None else 'no'}")
+    if current_plan is not None:
+        lines.append("Last plan: present")
+        lines.append(f"Last plan mode: {current_plan.mode}")
+        lines.append(f"Last plan status: {current_plan.status}")
+        lines.append(f"Last plan based on snapshot: {current_plan.based_on_snapshot_id}")
+        lines.append(f"Last plan id: {current_plan.plan_id}")
+    else:
+        lines.append("Last plan: absent")
+    lines.append(f"Writes allowed: confirmation only")
+    lines.append(f"History log: {history_path(root)}")
     lines.extend(_build_status_agent_lines(session_mode=state.agent_mode))
     console.print(Panel.fit("\n".join(lines), title="Session Status", border_style="bright_blue"))
 

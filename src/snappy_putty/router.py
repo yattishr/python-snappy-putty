@@ -17,6 +17,13 @@ ROUTE_EXPLAIN = "explain"
 ROUTE_FS_MUTATION = "fs_mutation"
 ROUTE_GIT_READ = "git_read"
 ROUTE_SAFE_INSPECT = "safe_inspect"
+ROUTE_INSPECT_PROJECT = "inspect_project"
+ROUTE_INSPECT_FILES = "inspect_files"
+ROUTE_INSPECT_STRUCTURE = "inspect_structure"
+ROUTE_INSPECT_FILE = "inspect_file"
+ROUTE_SHOW_SNAPSHOT = "show_snapshot"
+ROUTE_SHOW_PLAN = "show_plan"
+ROUTE_REFRESH_SNAPSHOT = "refresh_snapshot"
 ROUTE_ASK = "ask"
 ROUTE_UNKNOWN = "unknown"
 
@@ -74,6 +81,22 @@ def _is_supported_ask_intent(text: str) -> bool:
 def classify_input(text: str) -> RouteDecision:
     stripped = text.strip()
     lowered = stripped.lower()
+
+    if lowered == "inspect project":
+        return RouteDecision(route=ROUTE_INSPECT_PROJECT, payload={"text": stripped})
+    if lowered == "inspect files":
+        return RouteDecision(route=ROUTE_INSPECT_FILES, payload={"text": stripped})
+    if lowered == "inspect structure":
+        return RouteDecision(route=ROUTE_INSPECT_STRUCTURE, payload={"text": stripped})
+    if lowered.startswith("inspect file"):
+        path = stripped[len("inspect file") :].strip()
+        return RouteDecision(route=ROUTE_INSPECT_FILE, payload={"text": stripped, "path": path})
+    if lowered == "show snapshot":
+        return RouteDecision(route=ROUTE_SHOW_SNAPSHOT, payload={"text": stripped})
+    if lowered == "show plan":
+        return RouteDecision(route=ROUTE_SHOW_PLAN, payload={"text": stripped})
+    if lowered == "refresh snapshot":
+        return RouteDecision(route=ROUTE_REFRESH_SNAPSHOT, payload={"text": stripped})
 
     if lowered == "help":
         return RouteDecision(route=ROUTE_BUILTIN_HELP, payload={"text": stripped})
