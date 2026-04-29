@@ -94,6 +94,55 @@ def test_active_mode_plan_is_invalidated_when_snapshot_changes(tmp_path: Path) -
     assert updated_session["current_plan"]["status"] == "invalidated"
 
 
+def test_active_mode_rejects_irrelevant_goal_without_creating_plan(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me build a rocketship"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "does not appear to be related to the current project" in proc.stdout
+    assert "No grounded plan was created." in proc.stdout
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    assert not session_path.exists()
+    history_path = tmp_path / ".snappy" / "memory" / "history.md"
+    assert "Grounded planning skipped" in history_path.read_text(encoding="utf-8")
+
+
+def test_active_mode_creates_plan_for_readme_reference(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "summarize README.md"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert session["current_plan"]["based_on_snapshot_id"]
+    assert session["current_plan"]["status"] == "awaiting_confirmation"
+    assert "README.md" in session["current_plan"]["files_inspected"]
+
+
 def test_validate_llm_plan_accepts_grounded_response(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
@@ -274,3 +323,25 @@ def test_status_reports_plan_provenance(tmp_path: Path, capsys) -> None:
     assert "Last plan: present" in captured.out
     assert "Last plan mode: deterministic" in captured.out
     assert "Last plan status: awaiting_confirmation" in captured.out
+
+
+def test_active_shell_status_uses_grounded_plan_label(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Pending plan: deterministic plan with" in proc.stdout
+    assert "agent plan" not in proc.stdout.lower()

@@ -27,6 +27,7 @@ from snappy_putty.active_planner import (
     LLMPlanValidationError,
     PlanStep as GroundedPlanStep,
     PlanningMode,
+    assess_project_relevance,
     build_grounded_plan,
     build_llm_prompt,
     classify_planning_mode,
@@ -219,11 +220,15 @@ def _workflow_pending_question(state: SessionState) -> str:
 def _workflow_pending_plan_summary(state: SessionState) -> str:
     snapshot = _workflow_snapshot(state)
     if snapshot and snapshot.pending_plan_summary:
+        if snapshot.pending_plan_mode in {"deterministic", "llm_assisted"} and snapshot.pending_plan_summary.startswith("plan with "):
+            return f"{snapshot.pending_plan_mode} {snapshot.pending_plan_summary}"
         return snapshot.pending_plan_summary
     if isinstance(state.pending_plan, FsPlan):
         return f"filesystem plan with {len(state.pending_plan.ops)} op(s)"
     if isinstance(state.pending_plan, list):
-        return f"agent plan with {len(state.pending_plan)} step(s)"
+        if state.pending_plan_mode in {"deterministic", "llm_assisted"}:
+            return f"{state.pending_plan_mode} plan with {len(state.pending_plan)} step(s)"
+        return f"plan with {len(state.pending_plan)} step(s)"
     return "(none)"
 
 
@@ -571,10 +576,15 @@ def _record_agent_planning_result(
     result: AgentRunResult,
     pending_context: dict[str, object] | None = None,
 ) -> None:
+    if not result.output.plan and result.output.question is None and result.plan_mode is None:
+        state.last_result = result.output.goal
+        state.reset_to_idle_preserving_history()
+        return
     _begin_goal(state, goal=goal, route=route)
     _enter_planning(state)
     state.last_result = result.output.goal
     state.pending_plan = result.output.plan
+    state.pending_plan_mode = result.plan_mode
     state.pending_question = result.output.question
     state.awaiting_confirmation = False
     if pending_context:
@@ -721,6 +731,28 @@ def _debug(message: str) -> None:
 def print_repl_cheatsheet() -> None:
     snapshot = collect_context()
     tools = " ".join(f"{name} {'✓' if found else '✗'}" for name, found in snapshot.tools.items())
+    quick_commands = [
+        ("doctor", "Planning diagnostics."),
+        ("agent", "Agent summary."),
+        ("agent mode", "Edit runtime mode."),
+        ("init", "Scaffold .snappy/."),
+        ("skills", "Skills list."),
+        ("rules", "Rules list."),
+        ("inspect project", "Snapshot cache."),
+        ("inspect files", "Snapshot files."),
+        ("inspect structure", "Project structure."),
+        ("inspect file <p>", "File excerpt."),
+        ("show snapshot", "Cached snapshot."),
+        ("show plan", "Cached plan."),
+        ("refresh snapshot", "Refresh snapshot."),
+        ("explain <command>", "Explain command."),
+        ("after", "Next input or step."),
+        ("status", "Session status."),
+        ("cancel", "Clear workflow."),
+        ("help", "Help panel."),
+        ("exit / quit", "Leave shell."),
+    ]
+    quick_commands_block = _render_compact_command_block(quick_commands, columns=2)
     content = "\n".join(
         [
             "[bold]Snappy PuTTy[/bold]",
@@ -733,25 +765,7 @@ def print_repl_cheatsheet() -> None:
             "- Ask follow-up questions when a request needs clarification.",
             "",
             "[bold]Quick commands[/bold]",
-            "- doctor            Show local planning diagnostics.",
-            "- agent             Show the loaded agent summary.",
-            "- agent mode        Inspect or change agent runtime mode.",
-            "- init              Scaffold a .snappy/ agent directory.",
-            "- skills            List loaded .snappy skills.",
-            "- rules             List loaded .snappy rules.",
-            "- inspect project   Cache a project snapshot.",
-            "- inspect files     Show important files from the snapshot.",
-            "- inspect structure Show the current project structure.",
-            "- inspect file <p>  Show a read-only file excerpt.",
-            "- show snapshot     Display the cached project snapshot.",
-            "- show plan         Display the cached grounded plan.",
-            "- refresh snapshot  Force a new project snapshot.",
-            "- explain <command> Explain a command safely.",
-            "- after             Show the next expected input or step.",
-            "- status            Show diagnostic session and agent status.",
-            "- cancel            Clear pending workflow state.",
-            "- help              Show this help panel.",
-            "- exit / quit       Leave the interactive shell.",
+            quick_commands_block,
             "",
             "[bold]Workflow tips[/bold]",
             "- If Snappy asks a question, answer it directly or type 'cancel'.",
@@ -782,6 +796,26 @@ def _build_agent_mode_lines(
         f"Current: {current_mode}",
         f"Source: {resolved_source}",
     ]
+
+
+def _render_compact_command_block(commands: list[tuple[str, str]], *, columns: int) -> str:
+    command_width = max(len(name) for name, _ in commands)
+    description_width = max(len(description) for _, description in commands)
+    cell_width = max(command_width, description_width) + 2
+    rows: list[str] = []
+    for index in range(0, len(commands), columns):
+        group = commands[index : index + columns]
+        top_line: list[str] = []
+        bottom_line: list[str] = []
+        for name, description in group:
+            top_line.append(f"- {name:<{cell_width - 2}}")
+            bottom_line.append(f"  {description:<{cell_width - 2}}")
+        while len(top_line) < columns:
+            top_line.append(" " * cell_width)
+            bottom_line.append(" " * cell_width)
+        rows.append("   ".join(top_line))
+        rows.append("   ".join(bottom_line))
+    return "\n".join(rows)
 
 
 def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None = None) -> list[str]:
@@ -1471,8 +1505,37 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         root = Path.cwd().resolve()
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
+        related, relevance_reason = assess_project_relevance(intent, snapshot)
         console.print("Inspecting project context...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
+        if not related:
+            console.print("This request does not appear to be related to the current project.")
+            console.print("No grounded plan was created.")
+            append_history_event(
+                root,
+                "Grounded planning skipped",
+                {
+                    "Goal": intent,
+                    "Reason": relevance_reason,
+                    "Snapshot ID": snapshot.snapshot_id,
+                    "Result": "no_plan_created",
+                },
+            )
+            return AgentRunResult(
+                output=AgentOutput(
+                    goal=intent,
+                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
+                    question=None,
+                    plan=[],
+                    commands=[],
+                    warnings=["No changes have been applied."],
+                    snippets=[],
+                ),
+                raw_model_text=None,
+                parse_error=None,
+                directory_listing=None,
+                plan_mode=None,
+            )
         try:
             if planning_mode == PlanningMode.LLM_ASSISTED:
                 plan = create_llm_assisted_plan(intent, snapshot)
@@ -1508,6 +1571,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 raw_model_text=None,
                 parse_error=None,
                 directory_listing=None,
+                plan_mode=None,
             )
         save_grounded_plan(root, plan, snapshot)
         event_name = "LLM-assisted plan created" if plan.mode == PlanningMode.LLM_ASSISTED.value else "Grounded plan created"
@@ -1537,6 +1601,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
             raw_model_text=None,
             parse_error=None,
             directory_listing=None,
+            plan_mode=plan.mode,
         )
     with busy(get_status_message("ask"), console=console):
         snapshot = collect_context()

@@ -856,8 +856,8 @@ def test_repl_help_includes_agent_related_commands(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "- agent             Show the loaded agent summary." in proc.stdout
-    assert "- agent mode        Inspect or change agent runtime mode." in proc.stdout
+    assert "Agent summary." in proc.stdout
+    assert "Edit runtime mode." in proc.stdout
     assert "- init" in proc.stdout
     assert "- skills" in proc.stdout
     assert "- rules" in proc.stdout

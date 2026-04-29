@@ -153,6 +153,7 @@ class ActiveWorkflowSnapshot:
     context: WorkflowContext | None
     pending_question_data: dict[str, Any] | str | None = None
     pending_plan_data: dict[str, Any] | list[dict[str, Any]] | None = None
+    pending_plan_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,7 @@ class SessionState:
     last_result: str | None = None
     pending_question: Any | None = None
     pending_plan: Any | None = None
+    pending_plan_mode: str | None = None
     awaiting_confirmation: bool = False
     last_completed_goal: str | None = None
     last_cancelled_goal: str | None = None
@@ -223,6 +225,7 @@ class SessionState:
     def clear_pending(self) -> None:
         self.pending_question = None
         self.pending_plan = None
+        self.pending_plan_mode = None
         self.awaiting_confirmation = False
         self.pending_context = None
         self.sync_active_workflow()
@@ -232,6 +235,7 @@ class SessionState:
         self.active_goal = None
         self.pending_question = None
         self.pending_plan = None
+        self.pending_plan_mode = None
         self.awaiting_confirmation = False
         self.error_message = None
         self.pending_context = None
@@ -244,6 +248,7 @@ class SessionState:
         self.active_goal = None
         self.pending_question = None
         self.pending_plan = None
+        self.pending_plan_mode = None
         self.awaiting_confirmation = False
         self.pending_context = None
         self.workflow_restored_from_memory = False
@@ -258,6 +263,7 @@ class SessionState:
             route=route,
             pending_question=None,
             pending_plan_summary=None,
+            pending_plan_mode=None,
             awaiting_confirmation=False,
             control_state="allowed",
             context=None,
@@ -281,7 +287,8 @@ class SessionState:
             goal=self.active_goal,
             route=self.last_route,
             pending_question=_pending_question_snapshot(self.pending_question),
-            pending_plan_summary=_pending_plan_summary(self.pending_plan),
+            pending_plan_summary=_pending_plan_summary(self.pending_plan, self.pending_plan_mode),
+            pending_plan_mode=self.pending_plan_mode,
             awaiting_confirmation=self.awaiting_confirmation,
             control_state=_control_state_from_snapshot(self),
             context=self.pending_context,
@@ -300,6 +307,7 @@ class SessionState:
         self.last_route = snapshot.route
         self.pending_question = _restore_pending_question(snapshot)
         self.pending_plan = _restore_pending_plan(snapshot)
+        self.pending_plan_mode = snapshot.pending_plan_mode
         self.awaiting_confirmation = snapshot.awaiting_confirmation
         self.pending_context = snapshot.context
         self.error_message = None
@@ -328,14 +336,16 @@ def _pending_question_data(question: Any | None) -> dict[str, Any] | str | None:
     return None
 
 
-def _pending_plan_summary(plan: Any | None) -> str | None:
+def _pending_plan_summary(plan: Any | None, mode: str | None = None) -> str | None:
     if plan is None:
         return None
     if hasattr(plan, "ops"):
         ops = getattr(plan, "ops", ())
         return f"filesystem plan with {len(ops)} op(s)"
     if isinstance(plan, list):
-        return f"agent plan with {len(plan)} step(s)"
+        if mode in {"deterministic", "llm_assisted"}:
+            return f"{mode} plan with {len(plan)} step(s)"
+        return f"plan with {len(plan)} step(s)"
     return str(plan)
 
 
@@ -475,6 +485,7 @@ def _serialize_workflow_snapshot(snapshot: ActiveWorkflowSnapshot) -> dict[str, 
         "route": snapshot.route,
         "pending_question": snapshot.pending_question,
         "pending_plan_summary": snapshot.pending_plan_summary,
+        "pending_plan_mode": snapshot.pending_plan_mode,
         "awaiting_confirmation": snapshot.awaiting_confirmation,
         "control_state": snapshot.control_state,
         "context": asdict(snapshot.context) if snapshot.context is not None else None,
@@ -503,6 +514,9 @@ def _deserialize_workflow_snapshot(raw_snapshot: Any) -> ActiveWorkflowSnapshot:
     pending_plan_summary = raw_snapshot.get("pending_plan_summary")
     if pending_plan_summary is not None and not isinstance(pending_plan_summary, str):
         raise ValueError("pending_plan_summary must be a string when present")
+    pending_plan_mode = raw_snapshot.get("pending_plan_mode")
+    if pending_plan_mode is not None and not isinstance(pending_plan_mode, str):
+        raise ValueError("pending_plan_mode must be a string when present")
 
     awaiting_confirmation = raw_snapshot.get("awaiting_confirmation")
     if not isinstance(awaiting_confirmation, bool):
@@ -519,6 +533,7 @@ def _deserialize_workflow_snapshot(raw_snapshot: Any) -> ActiveWorkflowSnapshot:
         route=_coerce_optional_string(raw_snapshot.get("route"), field_name="route"),
         pending_question=pending_question,
         pending_plan_summary=pending_plan_summary,
+        pending_plan_mode=pending_plan_mode,
         awaiting_confirmation=awaiting_confirmation,
         control_state=_coerce_optional_string(raw_snapshot.get("control_state"), field_name="control_state"),
         context=context,

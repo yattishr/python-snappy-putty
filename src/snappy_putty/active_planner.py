@@ -131,6 +131,30 @@ _SENSITIVE_PATH_NAMES = {
 }
 
 _RISK_ORDER = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+_PROJECT_RELATED_TERMS = (
+    "code",
+    "file",
+    "folder",
+    "directory",
+    "test",
+    "bug",
+    "fix",
+    "refactor",
+    "function",
+    "class",
+    "module",
+    "cli",
+    "command",
+    "route",
+    "package",
+    "dependency",
+    "readme",
+    "docs",
+    "logging",
+    "config",
+    "implementation",
+    "project",
+)
 
 
 def classify_planning_mode(user_input: str) -> PlanningMode:
@@ -142,6 +166,35 @@ def classify_planning_mode(user_input: str) -> PlanningMode:
     if any(trigger in lowered for trigger in _LLM_ASSISTED_TRIGGERS):
         return PlanningMode.LLM_ASSISTED
     return PlanningMode.DETERMINISTIC
+
+
+def assess_project_relevance(goal: str, snapshot: ProjectSnapshot) -> tuple[bool, str]:
+    lowered = goal.strip().lower()
+    if not lowered:
+        return False, "goal_not_project_related"
+
+    if any(term in lowered for term in _PROJECT_RELATED_TERMS):
+        return True, "project_terms_matched"
+
+    goal_tokens = {token.strip(".,:;!?()[]{}\"'") for token in re.split(r"\s+", lowered) if token}
+    known_paths = {
+        *snapshot.sampled_files,
+        *snapshot.config_files,
+        *snapshot.docs,
+        *snapshot.test_files,
+        *snapshot.source_files,
+        *snapshot.entry_points,
+    }
+    for path in known_paths:
+        normalized = path.lower().replace("\\", "/")
+        basename = Path(normalized).name
+        if normalized in lowered or basename in goal_tokens:
+            return True, "snapshot_reference_matched"
+
+    if any(token in lowered for token in ("inspect ", "explain ", "improve ", "update ", "modify ", "add ", "refactor ")):
+        return True, "project_action_matched"
+
+    return False, "goal_not_project_related"
 
 
 def build_grounded_plan(

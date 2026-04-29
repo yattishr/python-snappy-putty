@@ -656,15 +656,24 @@ def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch)
     output = buffer.getvalue()
     assert "Quick commands" in output
     assert "Ask follow-up questions when a request needs clarification." in output
-    assert "agent             Show the loaded agent summary." in output
-    assert "agent mode        Inspect or change agent runtime mode." in output
-    assert "after             Show the next expected input or step." in output
-    assert "status            Show diagnostic session and agent status." in output
-    assert "cancel            Clear pending workflow state." in output
-    assert "skills            List loaded .snappy skills." in output
-    assert "rules             List loaded .snappy rules." in output
-    assert "init              Scaffold a .snappy/ agent directory." in output
-    assert "exit / quit       Leave the interactive shell." in output
+    assert "agent" in output
+    assert "Agent summary." in output
+    assert "agent mode" in output
+    assert "Edit runtime mode." in output
+    assert "after" in output
+    assert "Next input or step." in output
+    assert "status" in output
+    assert "Session status." in output
+    assert "cancel" in output
+    assert "Clear workflow." in output
+    assert "skills" in output
+    assert "Skills list." in output
+    assert "rules" in output
+    assert "Rules list." in output
+    assert "init" in output
+    assert "Scaffold .snappy/." in output
+    assert "exit / quit" in output
+    assert "Leave shell." in output
     assert "Workflow tips" in output
     assert "Use 'after' to see the next expected input." in output
     assert '"copy README.md"' in output

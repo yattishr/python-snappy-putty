@@ -56,6 +56,7 @@ def _is_supported_ask_intent(text: str) -> bool:
 
     ask_prefixes = (
         "deploy",
+        "summarize",
         "what ",
         "how ",
         "why ",
