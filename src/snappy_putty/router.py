@@ -23,12 +23,21 @@ ROUTE_INSPECT_STRUCTURE = "inspect_structure"
 ROUTE_INSPECT_FILE = "inspect_file"
 ROUTE_SHOW_SNAPSHOT = "show_snapshot"
 ROUTE_SHOW_PLAN = "show_plan"
+ROUTE_WHY_PLAN = "why_plan"
+ROUTE_EXPLAIN_STEP = "explain_step"
+ROUTE_REFINE_PLAN = "refine_plan"
 ROUTE_REFRESH_SNAPSHOT = "refresh_snapshot"
 ROUTE_ASK = "ask"
 ROUTE_OUT_OF_SCOPE = "out_of_scope"
 ROUTE_UNKNOWN = "unknown"
 
 _EXPLAIN_PATTERN = re.compile(r"^\s*explain(?:\s+(?P<command>.+))?\s*$", flags=re.IGNORECASE | re.DOTALL)
+_EXPLAIN_STEP_PATTERN = re.compile(r"^\s*explain\s+step\s+(?P<step>\d+)\s*$", flags=re.IGNORECASE)
+_REFINE_STEP_PATTERN = re.compile(
+    r"^\s*refine\s+step\s+(?P<step>\d+)(?:\s+(?P<change>.+))?\s*$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_REFINE_PLAN_PATTERN = re.compile(r"^\s*refine\s+plan(?:\s+(?P<change>.+))?\s*$", flags=re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -230,6 +239,25 @@ def classify_input(text: str) -> RouteDecision:
         return RouteDecision(route=ROUTE_SHOW_SNAPSHOT, payload={"text": stripped})
     if lowered == "show plan":
         return RouteDecision(route=ROUTE_SHOW_PLAN, payload={"text": stripped})
+    if lowered == "why this plan":
+        return RouteDecision(route=ROUTE_WHY_PLAN, payload={"text": stripped})
+    explain_step_match = _EXPLAIN_STEP_PATTERN.match(stripped)
+    if explain_step_match:
+        return RouteDecision(route=ROUTE_EXPLAIN_STEP, payload={"text": stripped, "step": explain_step_match.group("step")})
+    refine_plan_match = _REFINE_PLAN_PATTERN.match(stripped)
+    if refine_plan_match:
+        payload = {"text": stripped, "scope": "plan"}
+        change = (refine_plan_match.group("change") or "").strip()
+        if change:
+            payload["change"] = change
+        return RouteDecision(route=ROUTE_REFINE_PLAN, payload=payload)
+    refine_step_match = _REFINE_STEP_PATTERN.match(stripped)
+    if refine_step_match:
+        payload = {"text": stripped, "scope": "step", "step": refine_step_match.group("step")}
+        change = (refine_step_match.group("change") or "").strip()
+        if change:
+            payload["change"] = change
+        return RouteDecision(route=ROUTE_REFINE_PLAN, payload=payload)
     if lowered == "refresh snapshot":
         return RouteDecision(route=ROUTE_REFRESH_SNAPSHOT, payload={"text": stripped})
 

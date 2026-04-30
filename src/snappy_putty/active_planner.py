@@ -51,6 +51,14 @@ class GroundedPlan:
     assumptions: list[str]
     status: str
     summary: str | None = None
+    refinements: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    valid: bool
+    errors: list[str]
+    warnings: list[str]
 
 
 class LLMPlannerClient(Protocol):
@@ -155,6 +163,9 @@ _PROJECT_RELATED_TERMS = (
     "implementation",
     "project",
 )
+_PATH_MENTION_PATTERN = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![\w.-])[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+")
+_EXPANSION_TERMS = ("also", "add", "include", "expand", "extend", "new", "another")
+_CONFIG_SCOPE_TERMS = ("config", "configuration", "pyproject", "package")
 
 
 def classify_planning_mode(user_input: str) -> PlanningMode:
@@ -226,6 +237,7 @@ def build_grounded_plan(
         assumptions=assumptions,
         status="awaiting_confirmation",
         summary=f"Deterministic grounded plan for: {goal.strip()}",
+        refinements=[],
     )
 
 
@@ -323,8 +335,60 @@ def validate_llm_plan(
         assumptions=assumptions,
         status="awaiting_confirmation",
         summary=summary,
+        refinements=[],
     )
     return grounded_plan
+
+
+def validate_plan_integrity(
+    plan: GroundedPlan,
+    snapshot: ProjectSnapshot,
+    *,
+    original_plan: GroundedPlan | None = None,
+    refinement_text: str | None = None,
+) -> ValidationResult:
+    snapshot_files = set(_known_snapshot_paths(snapshot))
+    original_files = set(_plan_referenced_files(original_plan or plan))
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    referenced_files = _plan_referenced_files(plan)
+    missing_files = sorted(path for path in referenced_files if path not in snapshot_files)
+    if missing_files:
+        errors.append("introduces files not present in project snapshot")
+
+    proposed_files = set(_plan_proposed_files(plan))
+    original_proposed_files = set(_plan_proposed_files(original_plan)) if original_plan is not None else set()
+    if proposed_files - original_proposed_files:
+        errors.append("introduces new files or directories")
+
+    if original_plan is not None:
+        expanded_files = sorted(path for path in referenced_files if path not in original_files)
+        if expanded_files:
+            errors.append("expands beyond original plan scope")
+
+    mentioned_paths = _extract_path_mentions(refinement_text or "", snapshot.root_path)
+    non_snapshot_mentions = sorted(path for path in mentioned_paths if path not in snapshot_files)
+    if non_snapshot_mentions:
+        errors.append("introduces files not present in project snapshot")
+    if original_plan is not None:
+        expanded_mentions = sorted(path for path in mentioned_paths if path in snapshot_files and path not in original_files)
+        if expanded_mentions:
+            errors.append("expands beyond original plan scope")
+
+    if original_plan is not None and refinement_text:
+        expansion_error = _scope_expansion_error(refinement_text, snapshot, original_files)
+        if expansion_error is not None:
+            errors.append(expansion_error)
+
+    if any(not step.description.strip() for step in plan.steps):
+        warnings.append("refinement may have introduced inconsistencies")
+    if not plan.steps:
+        warnings.append("refinement may have introduced inconsistencies")
+    if len(plan.refinements) >= 3:
+        warnings.append("plan may no longer be coherent after multiple refinements")
+
+    return ValidationResult(valid=not errors, errors=_dedupe_list(errors), warnings=_dedupe_list(warnings))
 
 
 def grounded_plan_to_lines(plan: GroundedPlan) -> list[str]:
@@ -370,6 +434,9 @@ def grounded_plan_to_lines(plan: GroundedPlan) -> list[str]:
         lines.append("- (none)")
 
     lines.extend(["", f"Status: {plan.status}", "No changes have been applied."])
+    if plan.refinements:
+        lines.extend(["", "Refinements:"])
+        lines.extend(f"- {item.get('change', '(unspecified)')}" for item in plan.refinements)
     return lines
 
 
@@ -387,6 +454,7 @@ def plan_from_payload(payload: Any) -> GroundedPlan:
     summary = _optional_str(payload, "summary")
     files_inspected = _require_str_list(payload, "files_inspected", required=False)
     assumptions = _require_str_list(payload, "assumptions", required=False)
+    refinements = _require_refinements(payload.get("refinements", []))
     risks = _require_str_list(payload, "risks", required=False)
     raw_steps = payload.get("steps")
     if not isinstance(raw_steps, list):
@@ -405,6 +473,7 @@ def plan_from_payload(payload: Any) -> GroundedPlan:
         assumptions=assumptions,
         status=_require_str(payload, "status"),
         summary=summary,
+        refinements=refinements,
     )
 
 
@@ -421,6 +490,7 @@ def invalidate_plan(plan: GroundedPlan, *, reason: str | None = None) -> Grounde
         assumptions=list(plan.assumptions),
         status="invalidated",
         summary=plan.summary,
+        refinements=list(plan.refinements),
     )
 
 
@@ -465,10 +535,11 @@ def default_llm_planner_client() -> LLMPlannerClient | None:
 
 def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[str]:
     candidates = list(snapshot.sampled_files)
+    known_paths = set(_known_snapshot_paths(snapshot))
     goal_lower = goal.lower()
     if any(token in goal_lower for token in ("cli", "logging", "workflow")):
-        _append_if_missing(candidates, "src/snappy_putty/cli.py")
-        _append_if_missing(candidates, "src/snappy_putty/session.py")
+        _append_known_if_missing(candidates, "src/snappy_putty/cli.py", known_paths)
+        _append_known_if_missing(candidates, "src/snappy_putty/session.py", known_paths)
     if any(token in goal_lower for token in ("test", "coverage", "regression")):
         for item in snapshot.test_files[:3]:
             _append_if_missing(candidates, item)
@@ -580,6 +651,23 @@ def _require_str_list(payload: dict[str, Any], field_name: str, *, required: boo
             raise LLMPlanValidationError(f"{field_name} must contain strings only")
         result.append(item)
     return result
+
+
+def _require_refinements(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise LLMPlanValidationError("refinements must be a list")
+    refinements: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise LLMPlanValidationError("refinements must contain objects only")
+        timestamp = item.get("timestamp")
+        change = item.get("change")
+        if not isinstance(timestamp, str) or not isinstance(change, str):
+            raise LLMPlanValidationError("refinement entries require string timestamp and change")
+        refinements.append({"timestamp": timestamp, "change": change})
+    return refinements
 
 
 def _normalize_risk(value: Any) -> str:
@@ -713,9 +801,59 @@ def _known_snapshot_paths(snapshot: ProjectSnapshot) -> list[str]:
     )
 
 
+def _plan_referenced_files(plan: GroundedPlan | None) -> list[str]:
+    if plan is None:
+        return []
+    paths: list[str] = list(plan.files_inspected)
+    for step in plan.steps:
+        paths.extend(step.files)
+    return _dedupe_list(paths)
+
+
+def _plan_proposed_files(plan: GroundedPlan | None) -> list[str]:
+    if plan is None:
+        return []
+    paths: list[str] = []
+    for step in plan.steps:
+        paths.extend(step.proposed_new_files)
+    return _dedupe_list(paths)
+
+
+def _extract_path_mentions(text: str, snapshot_root: str) -> list[str]:
+    root = Path(snapshot_root).resolve()
+    paths: list[str] = []
+    for match in _PATH_MENTION_PATTERN.finditer(text):
+        value = match.group(0).strip(".,;:()[]{}'\"")
+        candidate = Path(value)
+        if candidate.is_absolute():
+            try:
+                value = str(candidate.resolve().relative_to(root))
+            except ValueError:
+                paths.append(value)
+                continue
+        paths.append(value.replace("\\", "/"))
+    return _dedupe_list(paths)
+
+
+def _scope_expansion_error(refinement_text: str, snapshot: ProjectSnapshot, original_files: set[str]) -> str | None:
+    lowered = refinement_text.lower()
+    if not any(term in lowered for term in _EXPANSION_TERMS):
+        return None
+    if any(term in lowered for term in _CONFIG_SCOPE_TERMS):
+        config_files = set(snapshot.config_files)
+        if config_files and not config_files.issubset(original_files):
+            return "expands beyond original plan scope"
+    return None
+
+
 def _append_if_missing(items: list[str], value: str) -> None:
     if value not in items:
         items.append(value)
+
+
+def _append_known_if_missing(items: list[str], value: str, known_paths: set[str]) -> None:
+    if value in known_paths:
+        _append_if_missing(items, value)
 
 
 def _dedupe_list(items: list[str]) -> list[str]:

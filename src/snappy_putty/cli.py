@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from snappy_putty.active_planner import (
     classify_planning_mode,
     create_llm_assisted_plan,
     grounded_plan_to_lines,
+    validate_plan_integrity,
 )
 from snappy_putty.agent_init import init_agent_project
 from snappy_putty.context import collect_context
@@ -90,6 +92,9 @@ from snappy_putty.router import (
     ROUTE_SAFE_INSPECT,
     ROUTE_SHOW_PLAN,
     ROUTE_SHOW_SNAPSHOT,
+    ROUTE_WHY_PLAN,
+    ROUTE_EXPLAIN_STEP,
+    ROUTE_REFINE_PLAN,
     ROUTE_UNKNOWN,
     classify_input,
 )
@@ -133,6 +138,9 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_INSPECT_FILE,
     ROUTE_SHOW_SNAPSHOT,
     ROUTE_SHOW_PLAN,
+    ROUTE_WHY_PLAN,
+    ROUTE_EXPLAIN_STEP,
+    ROUTE_REFINE_PLAN,
     ROUTE_REFRESH_SNAPSHOT,
 }
 _AGENT_MODE_PATTERN = re.compile(r"^\s*agent\s+mode(?:\s+(?P<mode>\S+))?\s*$", flags=re.IGNORECASE)
@@ -1088,6 +1096,47 @@ def _render_grounded_plan_report(plan: GroundedPlan, *, title: str = "Grounded P
     console.print(Panel.fit("\n".join(grounded_plan_to_lines(plan)), title=title, border_style="bright_blue"))
 
 
+def _plan_interaction_lines(plan: GroundedPlan) -> list[str]:
+    lines = [
+        f"Goal: {plan.goal}",
+        f"Mode: {plan.mode}",
+        f"Snapshot ID: {plan.based_on_snapshot_id}",
+        "",
+        "Steps:",
+    ]
+    if plan.steps:
+        for index, step in enumerate(plan.steps, start=1):
+            lines.append(f"{index}. {step.description}")
+            lines.append(f"   Files: {', '.join(step.files) if step.files else '(none)'}")
+            if step.proposed_new_files:
+                lines.append(f"   Proposed new files: {', '.join(step.proposed_new_files)}")
+            lines.append(f"   Risk: {step.risk}")
+    else:
+        lines.append("1. (none)")
+    lines.extend(
+        [
+            "",
+            "Files:",
+            *(f"- {item}" for item in plan.files_inspected or ["(none)"]),
+            "",
+            "Risks:",
+            *(f"- {item}" for item in plan.risks or ["(none)"]),
+            "",
+            "Assumptions:",
+            *(f"- {item}" for item in plan.assumptions or ["(none)"]),
+        ]
+    )
+    if plan.refinements:
+        lines.extend(["", "Refinements:"])
+        lines.extend(f"- {item.get('timestamp', '(unknown)')}: {item.get('change', '(unspecified)')}" for item in plan.refinements)
+    lines.extend(["", f"Status: {plan.status}", "No changes have been applied."])
+    return lines
+
+
+def _render_plan_interaction_report(plan: GroundedPlan, *, title: str = "Plan") -> None:
+    console.print(Panel.fit("\n".join(_plan_interaction_lines(plan)), title=title, border_style="bright_blue"))
+
+
 def _grounded_plan_to_agent_steps(plan: GroundedPlan) -> list[AgentPlanStep]:
     return [
         AgentPlanStep(
@@ -1167,20 +1216,180 @@ def _show_current_snapshot(root: Path) -> ProjectSnapshot:
 
 
 def _show_current_plan(root: Path) -> GroundedPlan | None:
-    snapshot = _load_snapshot_for_display(root)
     plan = load_grounded_plan(root)
     if plan is None:
-        console.print("No grounded plan is currently stored.")
+        console.print("No active plan to display.")
         return None
+    snapshot = load_current_snapshot_metadata(root)
+    if snapshot is None:
+        if project_snapshot_path(root).is_file():
+            plan = invalidate_grounded_plan(root, plan, "Project snapshot changed")
+            console.print("Stored plan was based on an outdated project snapshot and was invalidated.")
+        append_history_event(root, "Plan displayed", {"Plan ID": plan.plan_id, "Status": plan.status, "Snapshot status": "missing"})
+        _render_plan_interaction_report(plan, title="Plan")
+        return plan
     if snapshot_is_stale(root, snapshot) or plan.based_on_snapshot_id != snapshot.snapshot_id:
         reason = "Project snapshot changed"
         plan = invalidate_grounded_plan(root, plan, reason)
         console.print("Stored plan was based on an outdated project snapshot and was invalidated.")
-        _render_grounded_plan_report(plan, title="Grounded Plan")
+        _render_plan_interaction_report(plan, title="Plan")
         return plan
-    append_history_event(root, "grounded plan shown", {"Plan ID": plan.plan_id, "Status": plan.status})
-    _render_grounded_plan_report(plan, title="Grounded Plan")
+    append_history_event(root, "Plan displayed", {"Plan ID": plan.plan_id, "Status": plan.status})
+    _render_plan_interaction_report(plan, title="Plan")
     return plan
+
+
+def _why_current_plan(root: Path) -> GroundedPlan | None:
+    plan = load_grounded_plan(root)
+    if plan is None:
+        console.print("No active plan to display.")
+        return None
+    lines = [
+        f"Goal: {plan.goal}",
+        f"Planning mode: {plan.mode}",
+        f"Snapshot ID: {plan.based_on_snapshot_id}",
+        "",
+        "Why files were selected:",
+    ]
+    if plan.files_inspected:
+        lines.extend(f"- {item}: referenced by the stored plan as project context for this goal." for item in plan.files_inspected)
+    else:
+        lines.append("- (none)")
+    lines.extend(["", "Why steps exist:"])
+    if plan.steps:
+        for index, step in enumerate(plan.steps, start=1):
+            touched = ", ".join(step.files) if step.files else "(none)"
+            lines.append(f"{index}. {step.description}")
+            lines.append(f"   Reason: stored step for progressing toward the goal; files={touched}; risk={step.risk}.")
+    else:
+        lines.append("1. (none)")
+    lines.extend(["", "Assumptions:", *(f"- {item}" for item in plan.assumptions or ["(none)"])])
+    append_history_event(root, "Plan explained", {"Plan ID": plan.plan_id, "Mode": plan.mode})
+    console.print(Panel.fit("\n".join(lines), title="Why This Plan", border_style="bright_blue"))
+    return plan
+
+
+def _explain_plan_step(root: Path, raw_step: str) -> GroundedPlan | None:
+    plan = load_grounded_plan(root)
+    if plan is None:
+        console.print("No active plan to display.")
+        return None
+    try:
+        step_index = int(raw_step)
+    except ValueError:
+        console.print("Usage: explain step <n>")
+        return plan
+    if step_index < 1 or step_index > len(plan.steps):
+        console.print(f"Step {step_index} does not exist.")
+        return plan
+    step = plan.steps[step_index - 1]
+    lines = [
+        f"Step: {step_index}",
+        f"What it does: {step.description}",
+        f"Why it exists: It is part of the stored plan for goal: {plan.goal}",
+        f"Files touched: {', '.join(step.files) if step.files else '(none)'}",
+    ]
+    if step.proposed_new_files:
+        lines.append(f"Proposed new files: {', '.join(step.proposed_new_files)}")
+    lines.append(f"Risk level: {step.risk}")
+    append_history_event(root, "Step explained", {"Plan ID": plan.plan_id, "Step": step_index})
+    console.print(Panel.fit("\n".join(lines), title="Step Explanation", border_style="bright_blue"))
+    return plan
+
+
+def _prompt_for_refinement(session: object | None) -> str:
+    prompt = "refinement> "
+    if session is not None and hasattr(session, "prompt"):
+        return str(session.prompt(prompt)).strip()
+    return input(prompt).strip()
+
+
+def _refine_current_plan(root: Path, *, scope: str, step_text: str | None, change: str | None, session: object | None) -> GroundedPlan | None:
+    plan = load_grounded_plan(root)
+    if plan is None:
+        console.print("No active plan to display.")
+        return None
+    if plan.status == "invalidated":
+        console.print("Cannot refine an invalidated plan.")
+        return plan
+    refinement = (change or "").strip()
+    if not refinement:
+        refinement = _prompt_for_refinement(session)
+    if not refinement:
+        console.print("Refinement was empty; plan unchanged.")
+        return plan
+    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    description = "plan refined"
+    updated_steps = list(plan.steps)
+    updated_summary = plan.summary
+    updated_assumptions = list(plan.assumptions)
+    if scope == "step":
+        if step_text is None:
+            console.print("Usage: refine step <n>")
+            return plan
+        try:
+            step_index = int(step_text)
+        except ValueError:
+            console.print("Usage: refine step <n>")
+            return plan
+        if step_index < 1 or step_index > len(updated_steps):
+            console.print(f"Step {step_index} does not exist.")
+            return plan
+        original = updated_steps[step_index - 1]
+        updated_steps[step_index - 1] = replace(original, description=f"{original.description} Refinement: {refinement}")
+        description = f"step {step_index} refined"
+    else:
+        updated_summary = f"{plan.summary or plan.goal} Refinement: {refinement}"
+        updated_assumptions.append(f"User refinement: {refinement}")
+    updated_refinements = [*plan.refinements, {"timestamp": timestamp, "change": description}]
+    updated_plan = replace(
+        plan,
+        steps=updated_steps,
+        assumptions=updated_assumptions,
+        summary=updated_summary,
+        status="awaiting_confirmation",
+        refinements=updated_refinements,
+    )
+    snapshot = load_current_snapshot_metadata(root)
+    if snapshot is None:
+        append_history_event(
+            root,
+            "Plan refinement rejected",
+            {"Plan ID": plan.plan_id, "Reason": "missing_or_invalid_snapshot", "Validation": "failed"},
+        )
+        console.print("Refinement rejected.")
+        console.print("")
+        console.print("Reason:")
+        console.print("- missing or invalid project snapshot")
+        console.print("")
+        console.print("No changes were applied to the plan.")
+        return plan
+    validation = validate_plan_integrity(updated_plan, snapshot, original_plan=plan, refinement_text=refinement)
+    if not validation.valid:
+        reason = validation.errors[0] if validation.errors else "plan integrity validation failed"
+        append_history_event(
+            root,
+            "Plan refinement rejected",
+            {"Plan ID": plan.plan_id, "Reason": reason, "Validation": "failed"},
+        )
+        console.print("Refinement rejected.")
+        console.print("")
+        console.print("Reason:")
+        for error in validation.errors:
+            console.print(f"- {error}")
+        console.print("")
+        console.print("No changes were applied to the plan.")
+        return plan
+    save_grounded_plan(root, updated_plan)
+    append_history_event(root, "Plan refined", {"Plan ID": plan.plan_id, "Change": f"{description}: {refinement}", "Validation": "passed"})
+    console.print(f"Plan refined: {description}.")
+    if validation.warnings:
+        console.print("Warning:")
+        for warning in validation.warnings:
+            console.print(f"- {warning}")
+        console.print("You can continue refining or revert.")
+    console.print("No changes have been applied.")
+    return updated_plan
 
 
 def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> tuple[str | None, str | None]:
@@ -1335,6 +1544,21 @@ def run_shell() -> None:
             continue
         if route == ROUTE_SHOW_PLAN:
             _show_current_plan(workspace_root)
+            continue
+        if route == ROUTE_WHY_PLAN:
+            _why_current_plan(workspace_root)
+            continue
+        if route == ROUTE_EXPLAIN_STEP:
+            _explain_plan_step(workspace_root, decision.payload.get("step", ""))
+            continue
+        if route == ROUTE_REFINE_PLAN:
+            _refine_current_plan(
+                workspace_root,
+                scope=decision.payload.get("scope", "plan"),
+                step_text=decision.payload.get("step"),
+                change=decision.payload.get("change"),
+                session=session,
+            )
             continue
         if route == ROUTE_REFRESH_SNAPSHOT:
             _render_snapshot_report(ensure_project_snapshot(workspace_root, force_refresh=True), title="Refreshed Snapshot")
