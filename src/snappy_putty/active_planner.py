@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -10,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any, Protocol
 
+from snappy_putty.agent import DEFAULT_OPENAI_MODEL
+from snappy_putty.agent_discovery import get_agent_mode
 from snappy_putty.project_inspector import ProjectSnapshot, is_project_snapshot_valid
 
 
@@ -588,7 +591,56 @@ def default_llm_planner_client() -> LLMPlannerClient | None:
         return _FailingLLMPlannerClient()
     if os.getenv("SNAPPY_PUTTY_MOCK_LLM_PLAN") == "1":
         return _MockLLMPlannerClient()
-    return None
+    if get_agent_mode() != "active":
+        return None
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    try:
+        from agents import Agent, Runner
+    except Exception:
+        return None
+    try:
+        return _AgentsLLMPlannerClient(Agent=Agent, Runner=Runner)
+    except Exception:
+        return None
+
+
+class _AgentsLLMPlannerClient:
+    def __init__(self, *, Agent: Any, Runner: Any) -> None:
+        self._runner = Runner
+        self._agent = Agent(
+            name="Snappy PuTTy Grounded Planner",
+            instructions=(
+                "Create grounded implementation plans from the supplied project snapshot. "
+                "Return raw JSON only and never claim changes were made."
+            ),
+            model=os.getenv("SNAPPY_PUTTY_MODEL", DEFAULT_OPENAI_MODEL),
+        )
+
+    def create_plan(self, prompt: str) -> dict[str, Any]:
+        try:
+            result = asyncio.run(self._runner.run(self._agent, prompt))
+        except Exception as exc:
+            raise LLMPlannerUnavailableError("LLM-assisted planning is unavailable.") from exc
+        final_output = str(result.final_output)
+        try:
+            return json.loads(_extract_json(final_output))
+        except json.JSONDecodeError as exc:
+            raise LLMPlanValidationError("LLM planner returned invalid JSON.") from exc
+
+
+def _extract_json(text: str) -> str:
+    fenced_json = re.search(r"```json\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced_json:
+        return fenced_json.group(1).strip()
+    fenced_any = re.search(r"```[a-zA-Z0-9_-]*\s*(.*?)\s*```", text, flags=re.DOTALL)
+    if fenced_any:
+        return fenced_any.group(1).strip()
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        return text[first : last + 1]
+    return text
 
 
 class _FailingLLMPlannerClient:

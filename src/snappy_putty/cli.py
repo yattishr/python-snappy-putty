@@ -1651,7 +1651,7 @@ def run_shell() -> None:
             if not command:
                 console.print("Usage: explain <command>")
                 continue
-            result = handle_explain(command=command)
+            result = handle_explain(command=command, session_mode=state.agent_mode)
             pending_context = {"type": "ask_followup", "base_intent": command} if result.output.question else {}
             _record_agent_planning_result(state, route=route, goal=command, result=result, pending_context=pending_context)
             continue
@@ -1997,10 +1997,10 @@ def explain(command: str = typer.Argument(..., help="Command to explain.")) -> N
     handle_explain(command)
 
 
-def handle_explain(command: str) -> AgentRunResult:
+def handle_explain(command: str, session_mode: str | None = None) -> AgentRunResult:
     """Run explain flow and render output."""
     with busy(get_status_message("explain"), console=console):
-        result = plan_with_agent(mode="explain", user_text=command, snapshot=None)
+        result = plan_with_agent(mode="explain", user_text=command, snapshot=None, session_mode=session_mode)
     if result.parse_error:
         render_agent_parse_error(console=console, parse_error=result.parse_error, raw_model_text=result.raw_model_text)
     render_agent_output(console=console, output=result.output, title="explain")

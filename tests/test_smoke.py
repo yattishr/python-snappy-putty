@@ -8,10 +8,16 @@ from typer.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tests.agent_fixtures import load_agent_fixture
 import snappy_putty.agent as agent_module
+import snappy_putty.cli as cli_module
 from snappy_putty.cli import app
+from snappy_putty.models import AgentOutput
 
 
 runner = CliRunner()
+
+
+def test_default_openai_model_is_current() -> None:
+    assert agent_module.DEFAULT_OPENAI_MODEL == "gpt-5.4-mini"
 
 
 def _shell_env() -> dict[str, str]:
@@ -339,7 +345,8 @@ def test_shell_agent_doctor_command_runs() -> None:
 
 
 def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:
-    monkeypatch.setenv("SNAPPY_PUTTY_ENABLE_SDK", "1")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+    monkeypatch.setattr(agent_module, "is_llm_available", lambda session_mode=None: True)
 
     async def fake_run_with_sdk(mode: str, user_text: str, snapshot) -> str:
         return """```json
@@ -354,10 +361,47 @@ def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:
 ```"""
 
     monkeypatch.setattr(agent_module, "_run_with_sdk", fake_run_with_sdk)
-    result = runner.invoke(app, ["ask", "how do I check disk usage in a shell?"])
+    result = runner.invoke(app, ["explain", "du -sh ."])
     assert result.exit_code == 0
     assert "Fenced Goal" in result.stdout
     assert "Commands" in result.stdout
+
+
+def test_explain_active_mode_reports_unavailable_llm(monkeypatch) -> None:
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+    monkeypatch.setattr(agent_module, "is_llm_available", lambda session_mode=None: False)
+
+    result = runner.invoke(app, ["explain", "git diff"])
+
+    assert result.exit_code == 0
+    assert "This command requires LLM support, but the LLM is unavailable." in result.stdout
+    assert "No explanation was generated." in result.stdout
+    assert "OpenAI Agents SDK could not be reached" not in result.stdout
+
+
+def test_handle_explain_passes_session_mode(monkeypatch) -> None:
+    seen: dict[str, str | None] = {}
+
+    def fake_plan_with_agent(*, mode, user_text, snapshot, session_mode=None):
+        seen["mode"] = mode
+        seen["user_text"] = user_text
+        seen["session_mode"] = session_mode
+        return agent_module.AgentRunResult(
+            output=AgentOutput(
+                goal=user_text,
+                assumptions=[],
+                question=None,
+                plan=[],
+                commands=[],
+                warnings=[],
+            )
+        )
+
+    monkeypatch.setattr(cli_module, "plan_with_agent", fake_plan_with_agent)
+
+    cli_module.handle_explain("git diff", session_mode="active")
+
+    assert seen == {"mode": "explain", "user_text": "git diff", "session_mode": "active"}
 
 
 def test_ask_unknown_command_stays_local_and_does_not_call_agent(monkeypatch) -> None:

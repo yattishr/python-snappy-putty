@@ -16,6 +16,7 @@ from snappy_putty.models import AgentOutput, PlanStep, Snippet, SuggestedCommand
 from snappy_putty.security import sanitize_user_prompt
 from snappy_putty.safety import attach_risk_tags
 from snappy_putty.status import busy, get_status_message
+from snappy_putty.agent_discovery import get_agent_mode
 
 try:
     from agents import Agent, Runner
@@ -49,6 +50,9 @@ or provides error output.
 Never execute shell commands. Never claim a command was executed.
 Return raw JSON only, with no markdown fences.
 Keep responses concise and actionable."""
+
+
+DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 
 
 @dataclass(frozen=True)
@@ -381,6 +385,21 @@ def _fallback_output(mode: str, user_text: str, snapshot: ContextSnapshot) -> Ag
     )
 
 
+def _llm_unavailable_output(user_text: str) -> AgentOutput:
+    return AgentOutput(
+        goal=user_text,
+        assumptions=[],
+        question=None,
+        plan=[],
+        commands=[],
+        warnings=[
+            "This command requires LLM support, but the LLM is unavailable.",
+            "No explanation was generated.",
+        ],
+        snippets=[],
+    )
+
+
 def _git_worktree_output(user_text: str, snapshot: ContextSnapshot) -> AgentRunResult:
     if not snapshot.in_git_repo:
         output = AgentOutput(
@@ -446,7 +465,7 @@ def _apply_safety(output: AgentOutput) -> AgentOutput:
 async def _run_with_sdk(mode: str, user_text: str, snapshot: ContextSnapshot | None) -> str:
     if Agent is None or Runner is None:
         raise RuntimeError("openai-agents is not installed")
-    model = os.getenv("SNAPPY_PUTTY_MODEL", "gpt-4.1-mini")
+    model = os.getenv("SNAPPY_PUTTY_MODEL", DEFAULT_OPENAI_MODEL)
     instructions = EXPLAIN_INSTRUCTIONS if mode == "explain" else ASK_INSTRUCTIONS
     planner = Agent(
         name="Snappy PuTTy Planner",
@@ -457,7 +476,7 @@ async def _run_with_sdk(mode: str, user_text: str, snapshot: ContextSnapshot | N
     return str(result.final_output)
 
 
-def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None = None) -> AgentRunResult:
+def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None = None, session_mode: str | None = None) -> AgentRunResult:
     if mode == "ask" and snapshot is None:
         raise ValueError("AskMode requires context snapshot.")
 
@@ -485,7 +504,10 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
         output = _apply_safety(_cloud_deploy_cli_branch_output(effective_text))
         return AgentRunResult(output=output)
 
-    if not _sdk_planning_enabled():
+    agent_mode = get_agent_mode(session_mode)
+    if not is_llm_available(session_mode=session_mode):
+        if agent_mode == "active":
+            return AgentRunResult(output=_llm_unavailable_output(effective_text), skip_reason="llm_required_but_unavailable")
         fallback_snapshot = snapshot if snapshot is not None else ContextSnapshot(
             os_name="unknown",
             platform_info="unknown",
@@ -504,6 +526,13 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
         parsed = parse_agent_output(raw_text)
         return AgentRunResult(output=_apply_safety(parsed))
     except (ValidationError, ValueError) as err:
+        if agent_mode == "active":
+            return AgentRunResult(
+                output=_llm_unavailable_output(effective_text),
+                raw_model_text=locals().get("raw_text"),
+                parse_error=str(err),
+                skip_reason="llm_required_but_unavailable",
+            )
         fallback_snapshot = snapshot if snapshot is not None else ContextSnapshot(
             os_name="unknown",
             platform_info="unknown",
@@ -517,6 +546,8 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
         fallback = _apply_safety(_fallback_output(mode=mode, user_text=effective_text, snapshot=fallback_snapshot))
         return AgentRunResult(output=fallback, raw_model_text=locals().get("raw_text"), parse_error=str(err))
     except Exception:
+        if agent_mode == "active":
+            return AgentRunResult(output=_llm_unavailable_output(effective_text), skip_reason="llm_required_but_unavailable")
         fallback_snapshot = snapshot if snapshot is not None else ContextSnapshot(
             os_name="unknown",
             platform_info="unknown",
@@ -531,5 +562,15 @@ def plan_with_agent(mode: str, user_text: str, snapshot: ContextSnapshot | None 
         return AgentRunResult(output=fallback)
 
 
-def _sdk_planning_enabled() -> bool:
-    return os.getenv("SNAPPY_PUTTY_ENABLE_SDK") == "1"
+def is_llm_available(session_mode: str | None = None) -> bool:
+    if get_agent_mode(session_mode) != "active":
+        return False
+    if not os.getenv("OPENAI_API_KEY"):
+        return False
+    if Agent is None or Runner is None:
+        return False
+    try:
+        Agent(name="Snappy PuTTy Capability Check", instructions="Return valid JSON only.", model=os.getenv("SNAPPY_PUTTY_MODEL", DEFAULT_OPENAI_MODEL))
+    except Exception:
+        return False
+    return True

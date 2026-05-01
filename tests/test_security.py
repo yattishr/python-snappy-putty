@@ -37,7 +37,7 @@ def test_sanitize_user_prompt_detects_and_removes_injection(caplog: pytest.LogCa
 
 def test_plan_with_agent_sends_sanitized_prompt_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, str] = {}
-    monkeypatch.setenv("SNAPPY_PUTTY_ENABLE_SDK", "1")
+    monkeypatch.setattr(agent_module, "is_llm_available", lambda session_mode=None: True)
 
     async def fake_run_with_sdk(mode: str, user_text: str, snapshot) -> str:
         seen["mode"] = mode

@@ -16,6 +16,7 @@ def _env() -> dict[str, str]:
     env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
     env["SNAPPY_PUTTY_NO_SPINNER"] = "1"
     env["SNAPPY_AGENT_MODE"] = "active"
+    env.pop("OPENAI_API_KEY", None)
     return env
 
 
@@ -31,11 +32,11 @@ def _llm_failure_env() -> dict[str, str]:
     return env
 
 
-def _sdk_enabled_without_planner_env() -> dict[str, str]:
+def _llm_unavailable_env() -> dict[str, str]:
     env = _env()
-    env["SNAPPY_PUTTY_ENABLE_SDK"] = "1"
     env.pop("SNAPPY_PUTTY_MOCK_LLM_PLAN", None)
     env.pop("SNAPPY_PUTTY_MOCK_LLM_FAILURE", None)
+    env.pop("OPENAI_API_KEY", None)
     return env
 
 
@@ -183,7 +184,7 @@ def test_broad_developer_goal_with_llm_unavailable_does_not_create_deterministic
     assert "last_plan" not in session
 
 
-def test_sdk_enable_flag_alone_does_not_make_llm_planner_available(tmp_path: Path) -> None:
+def test_active_mode_without_llm_capability_does_not_create_llm_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
         encoding="utf-8",
@@ -199,7 +200,7 @@ def test_sdk_enable_flag_alone_does_not_make_llm_planner_available(tmp_path: Pat
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_sdk_enabled_without_planner_env(),
+        env=_llm_unavailable_env(),
         timeout=20,
     )
 
