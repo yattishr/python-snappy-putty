@@ -18,6 +18,16 @@ class PlanningMode(str, Enum):
     LLM_ASSISTED = "llm_assisted"
 
 
+class PlanningIntent(str, Enum):
+    STRUCTURED_PROJECT_INTENT = "structured_project_intent"
+    PROJECT_DEVELOPER_GOAL = "project_developer_goal"
+    PROJECT_INSPECTION = "project_inspection"
+    GENERAL_KNOWLEDGE_QUESTION = "general_knowledge_question"
+    CURRENT_INFO_QUESTION = "current_info_question"
+    UNRELATED_NON_PROJECT_REQUEST = "unrelated_non_project_request"
+    UNSUPPORTED_EXTERNAL_TOOL_REQUEST = "unsupported_external_tool_request"
+
+
 @dataclass(frozen=True)
 class PlanStep:
     step_id: str
@@ -166,6 +176,33 @@ _PROJECT_RELATED_TERMS = (
 _PATH_MENTION_PATTERN = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![\w.-])[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+")
 _EXPANSION_TERMS = ("also", "add", "include", "expand", "extend", "new", "another")
 _CONFIG_SCOPE_TERMS = ("config", "configuration", "pyproject", "package")
+_CURRENT_INFO_TERMS = (
+    "today",
+    "current",
+    "latest",
+    "live",
+    "price",
+    "weather",
+    "forecast",
+    "score",
+    "scores",
+    "stock",
+    "bitcoin",
+    "crypto",
+    "market",
+    "news",
+    "this weekend",
+)
+_GENERAL_QUESTION_TERMS = (
+    "movie",
+    "film",
+    "poem",
+    "story",
+    "fitness routine",
+    "holiday",
+    "vacation",
+    "recipe",
+)
 
 
 def classify_planning_mode(user_input: str) -> PlanningMode:
@@ -177,6 +214,23 @@ def classify_planning_mode(user_input: str) -> PlanningMode:
     if any(trigger in lowered for trigger in _LLM_ASSISTED_TRIGGERS):
         return PlanningMode.LLM_ASSISTED
     return PlanningMode.DETERMINISTIC
+
+
+def classify_planning_intent(user_input: str) -> PlanningIntent:
+    lowered = user_input.strip().lower()
+    if not lowered:
+        return PlanningIntent.UNRELATED_NON_PROJECT_REQUEST
+    if lowered.startswith(_DETERMINISTIC_PREFIXES) or lowered.startswith(("summarize ", "explain file ", "why this plan", "explain step ")):
+        return PlanningIntent.STRUCTURED_PROJECT_INTENT
+    if any(term in lowered for term in _CURRENT_INFO_TERMS):
+        return PlanningIntent.CURRENT_INFO_QUESTION
+    if any(term in lowered for term in _GENERAL_QUESTION_TERMS):
+        return PlanningIntent.GENERAL_KNOWLEDGE_QUESTION
+    if any(trigger in lowered for trigger in _LLM_ASSISTED_TRIGGERS):
+        return PlanningIntent.PROJECT_DEVELOPER_GOAL
+    if "?" in lowered:
+        return PlanningIntent.GENERAL_KNOWLEDGE_QUESTION
+    return PlanningIntent.STRUCTURED_PROJECT_INTENT
 
 
 def assess_project_relevance(goal: str, snapshot: ProjectSnapshot) -> tuple[bool, str]:
@@ -530,7 +584,54 @@ def build_llm_prompt(goal: str, snapshot: ProjectSnapshot) -> str:
 
 
 def default_llm_planner_client() -> LLMPlannerClient | None:
+    if os.getenv("SNAPPY_PUTTY_MOCK_LLM_FAILURE") == "1":
+        return _FailingLLMPlannerClient()
+    if os.getenv("SNAPPY_PUTTY_ENABLE_SDK") == "1" and os.getenv("SNAPPY_PUTTY_MOCK_LLM_PLAN") == "1":
+        return _MockLLMPlannerClient()
     return None
+
+
+class _FailingLLMPlannerClient:
+    def create_plan(self, prompt: str) -> dict[str, Any]:
+        raise LLMPlannerUnavailableError("LLM-assisted planning is unavailable.")
+
+
+class _MockLLMPlannerClient:
+    def create_plan(self, prompt: str) -> dict[str, Any]:
+        goal_match = re.search(r"User goal:\n(?P<goal>.*?)\n\nProject snapshot id:", prompt, flags=re.DOTALL)
+        snapshot_match = re.search(r"Project snapshot id:\n(?P<snapshot>\S+)", prompt)
+        files_match = re.search(r"Relevant files:\n(?P<files>.*?)\n\nReturn JSON", prompt, flags=re.DOTALL)
+        goal = goal_match.group("goal").strip() if goal_match else "Improve the project"
+        snapshot_id = snapshot_match.group("snapshot").strip() if snapshot_match else ""
+        files_text = files_match.group("files").strip() if files_match else ""
+        files = [item.strip() for item in files_text.split(",") if item.strip() and item.strip() != "(none)"]
+        if not files:
+            files = ["README.md"]
+        primary_files = files[:3]
+        return {
+            "goal": goal,
+            "summary": f"Grounded LLM-assisted plan for: {goal}",
+            "based_on_snapshot_id": snapshot_id,
+            "files_inspected": primary_files,
+            "steps": [
+                {
+                    "description": f"Review the current implementation relevant to {goal}.",
+                    "files": primary_files,
+                    "proposed_new_files": [],
+                    "risk": "LOW",
+                    "requires_confirmation": True,
+                },
+                {
+                    "description": f"Make a focused change for {goal} using only the inspected files.",
+                    "files": primary_files,
+                    "proposed_new_files": [],
+                    "risk": "MEDIUM",
+                    "requires_confirmation": True,
+                },
+            ],
+            "risks": ["Mock LLM plan is limited to the selected project context."],
+            "assumptions": ["Only files provided in the planning context are in scope."],
+        }
 
 
 def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[str]:

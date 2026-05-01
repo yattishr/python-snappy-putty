@@ -59,6 +59,7 @@ class AgentRunResult:
     directory_listing: str | None = None
     plan_mode: str | None = None
     blocked_reason: str | None = None
+    skip_reason: str | None = None
 
 
 def parse_agent_output(value: Any) -> AgentOutput:

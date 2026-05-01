@@ -152,6 +152,26 @@ def save_session_payload(root: Path, updates: dict[str, Any]) -> None:
     _write_json(session_path(root), payload)
 
 
+def load_session_payload(root: Path) -> dict[str, Any]:
+    return _session_payload(root)
+
+
+def save_planning_skipped(
+    root: Path,
+    *,
+    goal: str,
+    reason: str,
+    snapshot: ProjectSnapshot | None = None,
+) -> None:
+    payload = _session_payload(root)
+    payload.pop("current_plan", None)
+    payload["last_skipped_goal"] = goal
+    payload["last_skip_reason"] = reason
+    if snapshot is not None:
+        payload["project_snapshot"] = snapshot_to_payload(snapshot)
+    _write_json(session_path(root), payload)
+
+
 def _session_payload(root: Path) -> dict[str, Any]:
     path = session_path(root)
     if not path.is_file():

@@ -27,10 +27,12 @@ from snappy_putty.active_planner import (
     LLMPlannerUnavailableError,
     LLMPlanValidationError,
     PlanStep as GroundedPlanStep,
+    PlanningIntent,
     PlanningMode,
     assess_project_relevance,
     build_grounded_plan,
     build_llm_prompt,
+    classify_planning_intent,
     classify_planning_mode,
     create_llm_assisted_plan,
     grounded_plan_to_lines,
@@ -50,8 +52,10 @@ from snappy_putty.memory import (
     load_project_snapshot,
     load_current_snapshot_metadata,
     load_or_refresh_snapshot,
+    load_session_payload,
     project_snapshot_path,
     save_grounded_plan,
+    save_planning_skipped,
     save_session_payload,
     snapshot_is_stale,
 )
@@ -157,6 +161,62 @@ _COMMAND_SHAPED_PREFIXES = (
     "create",
     "make",
 )
+
+
+def _non_project_skip_reason(intent: str) -> str:
+    planning_intent = classify_planning_intent(intent)
+    if planning_intent == PlanningIntent.CURRENT_INFO_QUESTION:
+        return "unsupported_current_info_question"
+    if planning_intent == PlanningIntent.UNRELATED_NON_PROJECT_REQUEST:
+        return "goal_not_project_related"
+    return "non_project_question"
+
+
+def _record_planning_skipped_memory(
+    root: Path,
+    *,
+    goal: str,
+    reason: str,
+    snapshot: ProjectSnapshot | None = None,
+) -> None:
+    save_planning_skipped(root, goal=goal, reason=reason, snapshot=snapshot)
+    details: dict[str, object] = {
+        "Goal": goal,
+        "Reason": reason,
+        "Result": "no_plan_created",
+        "Workflow state": "reset_to_idle",
+    }
+    if snapshot is not None:
+        details["Snapshot ID"] = snapshot.snapshot_id
+    append_history_event(root, "Planning skipped", details)
+
+
+def _render_non_project_skip(intent: str, *, root: Path | None = None, state: SessionState | None = None) -> AgentRunResult:
+    workspace_root = root or Path.cwd().resolve()
+    reason = _non_project_skip_reason(intent)
+    if reason == "unsupported_current_info_question":
+        console.print("This looks like a current information request, not a project task.")
+        console.print("Snappy cannot answer live market data or other current information unless current-info tools are enabled.")
+    else:
+        console.print("This looks like a general question, not a project task.")
+    console.print(OUT_OF_SCOPE_MESSAGE)
+    console.print(OUT_OF_SCOPE_HINT_MESSAGE)
+    console.print("No project plan was created.")
+    _record_planning_skipped_memory(workspace_root, goal=intent, reason=reason)
+    if state is not None:
+        state.skip_planning(goal=intent, reason=reason, route=ROUTE_OUT_OF_SCOPE)
+    return AgentRunResult(
+        output=AgentOutput(
+            goal=intent,
+            assumptions=[],
+            question=None,
+            plan=[],
+            commands=[],
+            warnings=["No project plan was created."],
+            snippets=[],
+        ),
+        skip_reason=reason,
+    )
 
 
 def looks_like_new_command(text: str) -> bool:
@@ -588,8 +648,11 @@ def _record_agent_planning_result(
     pending_context: dict[str, object] | None = None,
 ) -> None:
     if not result.output.plan and result.output.question is None and result.plan_mode is None:
-        state.reset_to_idle_preserving_history()
         state.last_result = result.output.goal
+        if result.skip_reason:
+            state.skip_planning(goal=goal, reason=result.skip_reason, route=route)
+            return
+        state.reset_to_idle_preserving_history()
         if result.blocked_reason:
             state.last_blocked_goal = goal
             state.error_message = result.blocked_reason
@@ -1580,12 +1643,7 @@ def run_shell() -> None:
             state.reset_to_idle_preserving_history()
             continue
         if route == ROUTE_OUT_OF_SCOPE:
-            state.last_route = ROUTE_OUT_OF_SCOPE
-            state.last_failed_goal = text
-            state.error_message = "Out of scope"
-            console.print(OUT_OF_SCOPE_MESSAGE)
-            console.print(OUT_OF_SCOPE_HINT_MESSAGE)
-            state.reset_to_idle_preserving_history()
+            _render_non_project_skip(decision.payload.get("intent", text), root=workspace_root, state=state)
             continue
         if route == ROUTE_EXPLAIN:
             command = decision.payload.get("command", "").strip()
@@ -1726,8 +1784,7 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
         console.print(UNKNOWN_COMMAND_MESSAGE)
         return
     if route == ROUTE_OUT_OF_SCOPE:
-        console.print(OUT_OF_SCOPE_MESSAGE)
-        console.print(OUT_OF_SCOPE_HINT_MESSAGE)
+        _render_non_project_skip(decision.payload.get("intent", intent), root=Path.cwd().resolve())
         return
     if route == ROUTE_FS_MUTATION:
         _handle_fs_intent(
@@ -1747,24 +1804,50 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
     if get_agent_mode(session_mode) == "active":
         root = Path.cwd().resolve()
         snapshot = ensure_project_snapshot(root)
+        planning_intent = classify_planning_intent(intent)
         planning_mode = classify_planning_mode(intent)
         related, relevance_reason = assess_project_relevance(intent, snapshot)
         console.print("Inspecting project context...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
+        if planning_intent in {
+            PlanningIntent.GENERAL_KNOWLEDGE_QUESTION,
+            PlanningIntent.CURRENT_INFO_QUESTION,
+            PlanningIntent.UNRELATED_NON_PROJECT_REQUEST,
+            PlanningIntent.UNSUPPORTED_EXTERNAL_TOOL_REQUEST,
+        }:
+            reason = (
+                "unsupported_current_info_question"
+                if planning_intent == PlanningIntent.CURRENT_INFO_QUESTION
+                else ("goal_not_project_related" if planning_intent == PlanningIntent.UNRELATED_NON_PROJECT_REQUEST else "non_project_question")
+            )
+            if reason == "unsupported_current_info_question":
+                console.print("This looks like a current information request, not a project task.")
+                console.print("Snappy cannot answer live market data or other current information unless current-info tools are enabled.")
+            else:
+                console.print("This looks like a general question, not a project task.")
+            console.print("No project plan was created.")
+            _record_planning_skipped_memory(root, goal=intent, reason=reason, snapshot=snapshot)
+            return AgentRunResult(
+                output=AgentOutput(
+                    goal=intent,
+                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
+                    question=None,
+                    plan=[],
+                    commands=[],
+                    warnings=["No project plan was created."],
+                    snippets=[],
+                ),
+                raw_model_text=None,
+                parse_error=None,
+                directory_listing=None,
+                plan_mode=None,
+                skip_reason=reason,
+            )
         if not related:
             console.print("This request does not appear to be related to the current project.")
             console.print("I did not create a grounded project plan because there is no clear connection between the request and the inspected workspace.")
-            console.print("No grounded plan was created.")
-            append_history_event(
-                root,
-                "Grounded planning skipped",
-                {
-                    "Goal": intent,
-                    "Reason": relevance_reason,
-                    "Snapshot ID": snapshot.snapshot_id,
-                    "Result": "no_plan_created",
-                },
-            )
+            console.print("No project plan was created.")
+            _record_planning_skipped_memory(root, goal=intent, reason=relevance_reason, snapshot=snapshot)
             return AgentRunResult(
                 output=AgentOutput(
                     goal=intent,
@@ -1779,29 +1862,60 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 parse_error=None,
                 directory_listing=None,
                 plan_mode=None,
-                blocked_reason=relevance_reason,
+                skip_reason=relevance_reason,
             )
         try:
             if planning_mode == PlanningMode.LLM_ASSISTED:
+                console.print("Generating LLM-assisted grounded plan...")
                 plan = create_llm_assisted_plan(intent, snapshot)
             else:
                 plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
         except LLMPlannerUnavailableError as exc:
             console.print(str(exc))
-            plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
+            console.print("")
+            console.print("I inspected the project, but I did not create a plan because this request requires contextual developer planning.")
+            console.print("")
+            console.print("You can still use inspection commands such as:")
+            console.print("- inspect project")
+            console.print("- inspect files")
+            console.print("- show plan")
+            _record_planning_skipped_memory(root, goal=intent, reason="llm_required_but_unavailable", snapshot=snapshot)
+            return AgentRunResult(
+                output=AgentOutput(
+                    goal=intent,
+                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
+                    question=None,
+                    plan=[],
+                    commands=[],
+                    warnings=["No project plan was created."],
+                    snippets=[],
+                ),
+                raw_model_text=None,
+                parse_error=None,
+                directory_listing=None,
+                plan_mode=None,
+                skip_reason="llm_required_but_unavailable",
+            )
         except LLMPlanValidationError as exc:
             console.print("LLM-assisted plan was rejected by validation.")
             console.print(f"Reason: {exc}")
-            append_history_event(
-                root,
-                "LLM-assisted plan rejected",
-                {
-                    "Goal": intent,
-                    "Reason": str(exc),
-                    "Status": "rejected",
-                },
+            _record_planning_skipped_memory(root, goal=intent, reason="llm_required_but_unavailable", snapshot=snapshot)
+            return AgentRunResult(
+                output=AgentOutput(
+                    goal=intent,
+                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
+                    question=None,
+                    plan=[],
+                    commands=[],
+                    warnings=["No project plan was created."],
+                    snippets=[],
+                ),
+                raw_model_text=None,
+                parse_error=None,
+                directory_listing=None,
+                plan_mode=None,
+                skip_reason="llm_required_but_unavailable",
             )
-            plan = None
         if plan is None:
             return AgentRunResult(
                 output=AgentOutput(
@@ -2193,6 +2307,9 @@ def _handle_status(state: SessionState) -> None:
     last_cancelled_goal = state.last_cancelled_goal or "(none)"
     last_failed_goal = state.last_failed_goal or "(none)"
     last_blocked_goal = state.last_blocked_goal or "(none)"
+    session_payload = load_session_payload(root)
+    last_skipped_goal = state.last_skipped_goal or session_payload.get("last_skipped_goal") or "(none)"
+    last_skip_reason = state.last_skip_reason or session_payload.get("last_skip_reason") or "(none)"
     error_message = state.error_message or "(none)"
     control_state = _workflow_control_state(state)
     lines = [
@@ -2214,6 +2331,8 @@ def _handle_status(state: SessionState) -> None:
             f"Last cancelled goal: {last_cancelled_goal}",
             f"Last failed goal: {last_failed_goal}",
             f"Last blocked goal: {last_blocked_goal}",
+            f"Last skipped goal: {last_skipped_goal}",
+            f"Last skip reason: {last_skip_reason}",
             f"Error message: {error_message}",
         ]
     )

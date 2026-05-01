@@ -21,6 +21,7 @@ class LifecycleState(str, Enum):
     IDLE = "IDLE"
     INTENT_RECEIVED = "INTENT_RECEIVED"
     PLANNING = "PLANNING"
+    PLANNING_SKIPPED = "PLANNING_SKIPPED"
     CLARIFICATION = "CLARIFICATION"
     CONFIRMATION = "CONFIRMATION"
     EXECUTING = "EXECUTING"
@@ -48,6 +49,7 @@ _ALLOWED_LIFECYCLE_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
         LifecycleState.BLOCKED,
     },
     LifecycleState.PLANNING: {
+        LifecycleState.PLANNING_SKIPPED,
         LifecycleState.CLARIFICATION,
         LifecycleState.CONFIRMATION,
         LifecycleState.EXECUTING,
@@ -79,6 +81,7 @@ _ALLOWED_LIFECYCLE_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
     LifecycleState.FAILED: {LifecycleState.IDLE},
     LifecycleState.CANCELLED: {LifecycleState.IDLE},
     LifecycleState.BLOCKED: {LifecycleState.IDLE},
+    LifecycleState.PLANNING_SKIPPED: {LifecycleState.IDLE},
 }
 
 
@@ -178,6 +181,8 @@ class SessionState:
     last_cancelled_goal: str | None = None
     last_failed_goal: str | None = None
     last_blocked_goal: str | None = None
+    last_skipped_goal: str | None = None
+    last_skip_reason: str | None = None
     error_message: str | None = None
     pending_context: WorkflowContext | None = None
     last_execution_result: ExecutionResult | None = None
@@ -254,6 +259,23 @@ class SessionState:
         self.workflow_restored_from_memory = False
         self.restore_source = None
         self.clear_active_workflow()
+
+    def skip_planning(self, *, goal: str, reason: str, route: str | None = None) -> None:
+        self.current_state = LifecycleState.PLANNING_SKIPPED
+        self.active_goal = None
+        self.last_route = route
+        self.pending_question = None
+        self.pending_plan = None
+        self.pending_plan_mode = None
+        self.awaiting_confirmation = False
+        self.pending_context = None
+        self.last_skipped_goal = goal
+        self.last_skip_reason = reason
+        self.error_message = None
+        self.workflow_restored_from_memory = False
+        self.restore_source = None
+        self.clear_active_workflow()
+        self.current_state = LifecycleState.IDLE
 
     def begin_workflow(self, *, goal: str, route: str) -> None:
         self.active_workflow = ActiveWorkflowSnapshot(

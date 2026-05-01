@@ -19,6 +19,20 @@ def _env() -> dict[str, str]:
     return env
 
 
+def _llm_env() -> dict[str, str]:
+    env = _env()
+    env["SNAPPY_PUTTY_ENABLE_SDK"] = "1"
+    env["SNAPPY_PUTTY_MOCK_LLM_PLAN"] = "1"
+    return env
+
+
+def _llm_failure_env() -> dict[str, str]:
+    env = _env()
+    env["SNAPPY_PUTTY_ENABLE_SDK"] = "1"
+    env["SNAPPY_PUTTY_MOCK_LLM_FAILURE"] = "1"
+    return env
+
+
 def test_inspect_project_creates_project_snapshot_and_history(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
@@ -65,7 +79,7 @@ def test_active_mode_plan_is_invalidated_when_snapshot_changes(tmp_path: Path) -
     first = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "ask", "help me add logging to the CLI"],
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         text=True,
         capture_output=True,
         timeout=20,
@@ -112,11 +126,90 @@ def test_active_mode_rejects_irrelevant_goal_without_creating_plan(tmp_path: Pat
 
     assert proc.returncode == 0
     assert "does not appear to be related to the current project" in proc.stdout
-    assert "No grounded plan was created." in proc.stdout
+    assert "No project plan was created." in proc.stdout
     session_path = tmp_path / ".snappy" / "memory" / "session.json"
-    assert not session_path.exists()
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert "current_plan" not in session
+    assert session["last_skipped_goal"] == "help me build a rocketship"
+    assert session["last_skip_reason"] == "goal_not_project_related"
     history_path = tmp_path / ".snappy" / "memory" / "history.md"
-    assert "Grounded planning skipped" in history_path.read_text(encoding="utf-8")
+    assert "Planning skipped" in history_path.read_text(encoding="utf-8")
+
+
+def test_broad_developer_goal_with_llm_unavailable_does_not_create_deterministic_plan(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "LLM-assisted planning is unavailable" in proc.stdout
+    assert "I inspected the project, but I did not create a plan" in proc.stdout
+    assert "Apply the smallest project change" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Awaiting confirmation: no" in proc.stdout
+    assert "Last skipped goal: help me improve this CLI" in proc.stdout
+    assert "Last skip reason: llm_required_but_unavailable" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "current_plan" not in session
+    assert "last_plan" not in session
+
+
+def test_non_project_general_question_exits_cleanly(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="what is the movie Interstellar about?\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "This looks like a general question, not a project task." in proc.stdout
+    assert "No project plan was created." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last skip reason: non_project_question" in proc.stdout
+
+
+def test_current_info_question_exits_cleanly(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="what is the price of bitcoin?\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "This looks like a current information request, not a project task." in proc.stdout
+    assert "current-info tools are enabled" in proc.stdout
+    assert "No project plan was created." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last skip reason: unsupported_current_info_question" in proc.stdout
 
 
 def test_rejected_grounded_planning_resets_workflow_state(tmp_path: Path) -> None:
@@ -143,8 +236,10 @@ def test_rejected_grounded_planning_resets_workflow_state(tmp_path: Path) -> Non
     assert "Active goal: (none)" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
     assert "Awaiting confirmation: no" in proc.stdout
-    assert "Last blocked goal: help me build a rocketship" in proc.stdout
-    assert "Error message: goal_not_project_related" in proc.stdout
+    assert "Last blocked goal: (none)" in proc.stdout
+    assert "Last skipped goal: help me build a rocketship" in proc.stdout
+    assert "Last skip reason: goal_not_project_related" in proc.stdout
+    assert "Error message: (none)" in proc.stdout
 
 
 def test_second_rejected_request_does_not_crash(tmp_path: Path) -> None:
@@ -188,7 +283,7 @@ def test_valid_project_request_still_works_after_rejection(tmp_path: Path) -> No
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
     )
 
@@ -380,7 +475,7 @@ def test_status_reports_plan_provenance(tmp_path: Path, capsys) -> None:
     subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "ask", "help me add logging to the CLI"],
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         text=True,
         capture_output=True,
         timeout=20,
@@ -401,7 +496,7 @@ def test_status_reports_plan_provenance(tmp_path: Path, capsys) -> None:
     captured = capsys.readouterr()
     assert "Snapshot valid: yes" in captured.out
     assert "Last plan: present" in captured.out
-    assert "Last plan mode: deterministic" in captured.out
+    assert "Last plan mode: llm_assisted" in captured.out
     assert "Last plan status: awaiting_confirmation" in captured.out
 
 
@@ -418,12 +513,12 @@ def test_active_shell_status_uses_grounded_plan_label(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
     )
 
     assert proc.returncode == 0
-    assert "Pending plan: deterministic plan with" in proc.stdout
+    assert "Pending plan: llm_assisted plan with" in proc.stdout
     assert "agent plan" not in proc.stdout.lower()
 
 
@@ -443,7 +538,7 @@ def test_plan_interaction_show_why_and_explain_step(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
     )
 
@@ -460,6 +555,98 @@ def test_plan_interaction_show_why_and_explain_step(tmp_path: Path) -> None:
     assert "Event: Plan displayed" in history
     assert "Event: Plan explained" in history
     assert "Event: Step explained" in history
+
+
+def test_llm_available_creates_llm_assisted_plan(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Generating LLM-assisted grounded plan" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["last_plan"]["mode"] == PlanningMode.LLM_ASSISTED.value
+    assert session["last_plan"]["status"] == "awaiting_confirmation"
+    assert "src/snappy_putty/cli.py" in session["last_plan"]["files_inspected"]
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: LLM-assisted plan created" in history
+
+
+def test_no_deterministic_fallback_after_llm_failure(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_failure_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "LLM-assisted planning is unavailable" in proc.stdout
+    assert "Apply the smallest project change" not in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last skip reason: llm_required_but_unavailable" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "current_plan" not in session
+    assert "last_plan" not in session
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Planning skipped" in history
+
+
+def test_previous_valid_plan_not_confused_with_skipped_request(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nwhat is the weather in San Francisco today?\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Last skipped goal: what is the weather in San Francisco today?" in proc.stdout
+    assert "Last skip reason: unsupported_current_info_question" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["last_plan"]["goal"] == "help me improve this CLI"
+    assert "current_plan" not in session
+    assert session["last_skipped_goal"] == "what is the weather in San Francisco today?"
 
 
 def test_plan_interaction_no_plan_and_invalid_step(tmp_path: Path) -> None:
@@ -509,7 +696,7 @@ def test_refine_step_updates_session_and_history_without_execution(tmp_path: Pat
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
     )
 
@@ -562,7 +749,7 @@ def test_refine_step_rejects_new_file_and_leaves_plan_unchanged(tmp_path: Path) 
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
         check=True,
     )
@@ -606,7 +793,7 @@ def test_refine_step_allows_narrowing_scope(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
     )
 
@@ -631,7 +818,7 @@ def test_refine_plan_rejects_expansion_to_existing_out_of_scope_file(tmp_path: P
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
         check=True,
     )
@@ -679,7 +866,7 @@ def test_multiple_refinements_emit_coherence_warning(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_env(),
+        env=_llm_env(),
         timeout=20,
     )
 
