@@ -460,7 +460,6 @@ def _build_listing_choice_question() -> dict[str, object]:
 def _build_agent_mode_choice_question(*, current_mode: str, source: str) -> dict[str, object]:
     options = [
         {"label": "off", "value": "off"},
-        {"label": "passive", "value": "passive"},
         {"label": "active", "value": "active"},
     ]
     selected_index = next((index for index, option in enumerate(options) if option["value"] == current_mode), 0)
@@ -1021,6 +1020,8 @@ def _handle_agent_doctor(session_mode: str | None = None) -> None:
 def _set_agent_mode(state: SessionState, mode: str) -> None:
     state.agent_mode = mode
     console.print(f"Agent mode set to: {mode} (session)")
+    if mode == "active":
+        console.print("Beast mode ON")
 
 
 def _show_agent_mode(current_mode: str, source: str) -> None:
@@ -1052,9 +1053,9 @@ def _handle_agent_mode_command(raw_text: str, state: SessionState, session=None)
         current_mode = get_agent_mode(state.agent_mode)
         source = get_agent_mode_source(state.agent_mode)
         choice = _prompt_for_agent_mode(session, current_mode=current_mode, source=source)
-        selected = {"1": "off", "2": "passive", "3": "active"}.get(choice, normalize_agent_mode(choice))
+        selected = {"1": "off", "2": "active"}.get(choice, normalize_agent_mode(choice))
         if selected is None:
-            console.print("Invalid mode. Choose: off, passive, active")
+            console.print("Invalid mode. Choose: off, active")
             return True
         registry = load_agent_rule_registry(Path.cwd(), session_mode=state.agent_mode)
         blocked_message = before_agent_mode_change(target_mode=selected, rule_registry=registry)
@@ -1066,7 +1067,7 @@ def _handle_agent_mode_command(raw_text: str, state: SessionState, session=None)
 
     normalized = normalize_agent_mode(mode_arg)
     if normalized is None:
-        console.print("Invalid mode. Choose: off, passive, active")
+        console.print("Invalid mode. Choose: off, active")
         return True
 
     registry = load_agent_rule_registry(Path.cwd(), session_mode=state.agent_mode)
@@ -1801,10 +1802,27 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
 
 def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
     """Run ask flow and render output."""
-    if get_agent_mode(session_mode) == "active":
+    agent_mode = get_agent_mode(session_mode)
+    planning_intent = classify_planning_intent(intent)
+    if agent_mode == "off" and planning_intent == PlanningIntent.PROJECT_DEVELOPER_GOAL:
+        console.print("Active planning is off.")
+        console.print("Broad developer goals require active LLM-assisted planning.")
+        console.print("No project plan was created.")
+        return AgentRunResult(
+            output=AgentOutput(
+                goal=intent,
+                assumptions=[],
+                question=None,
+                plan=[],
+                commands=[],
+                warnings=["No project plan was created."],
+                snippets=[],
+            ),
+            skip_reason="llm_required_but_unavailable",
+        )
+    if agent_mode == "active":
         root = Path.cwd().resolve()
         snapshot = ensure_project_snapshot(root)
-        planning_intent = classify_planning_intent(intent)
         planning_mode = classify_planning_mode(intent)
         related, relevance_reason = assess_project_relevance(intent, snapshot)
         console.print("Inspecting project context...")
@@ -2017,7 +2035,7 @@ def init(force: bool = typer.Option(False, "--force", help="Overwrite scaffold f
 
 @app.command()
 def skills(agent_mode_override: str | None = None) -> None:
-    """List passive skills loaded from .snappy/skills/*.md."""
+    """List skills loaded from .snappy/skills/*.md."""
     registry = load_agent_skill_registry(Path.cwd(), session_mode=agent_mode_override)
     if not registry.skills:
         console.print("No skills loaded.")
@@ -2031,7 +2049,7 @@ def skills(agent_mode_override: str | None = None) -> None:
 
 @app.command()
 def rules(agent_mode_override: str | None = None) -> None:
-    """List passive rules loaded from .snappy/rules/*.md."""
+    """List rules loaded from .snappy/rules/*.md."""
     registry = load_agent_rule_registry(Path.cwd(), session_mode=agent_mode_override)
     if not registry.rules:
         console.print("No rules loaded.")

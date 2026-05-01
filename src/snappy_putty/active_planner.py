@@ -586,7 +586,7 @@ def build_llm_prompt(goal: str, snapshot: ProjectSnapshot) -> str:
 def default_llm_planner_client() -> LLMPlannerClient | None:
     if os.getenv("SNAPPY_PUTTY_MOCK_LLM_FAILURE") == "1":
         return _FailingLLMPlannerClient()
-    if os.getenv("SNAPPY_PUTTY_ENABLE_SDK") == "1" and os.getenv("SNAPPY_PUTTY_MOCK_LLM_PLAN") == "1":
+    if os.getenv("SNAPPY_PUTTY_MOCK_LLM_PLAN") == "1":
         return _MockLLMPlannerClient()
     return None
 

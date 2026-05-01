@@ -639,7 +639,7 @@ def test_repl_skills_command_shows_skill_registry(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -664,7 +664,7 @@ def test_repl_rules_command_shows_rule_registry(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -690,7 +690,7 @@ def test_repl_protect_project_root_blocks_workspace_escape_with_rule_message(tmp
     )
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -728,7 +728,7 @@ def test_repl_block_rule_outranks_confirm_rule_when_both_are_loaded(tmp_path: Pa
     )
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -763,7 +763,7 @@ def test_repl_confirm_rule_and_info_rule_require_confirmation_without_block(tmp_
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     (tmp_path / "tests").mkdir()
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -792,7 +792,7 @@ def test_repl_info_rule_only_does_not_change_safe_copy_behavior(tmp_path: Path) 
     )
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -936,7 +936,7 @@ def test_repl_agent_mode_shows_default_non_interactively(tmp_path: Path) -> None
 
 def test_repl_agent_mode_respects_environment(tmp_path: Path) -> None:
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
         input="agent mode\nexit\n",
@@ -948,7 +948,7 @@ def test_repl_agent_mode_respects_environment(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "Current: passive" in proc.stdout
+    assert "Current: active" in proc.stdout
     assert "Source: environment" in proc.stdout
     assert "Select mode:" not in proc.stdout
     assert "Agent mode set to:" not in proc.stdout
@@ -977,9 +977,7 @@ def test_repl_agent_mode_select_opens_menu(tmp_path: Path) -> None:
     ("command", "expected"),
     [
         ("agent mode off\nstatus\nexit\n", "Agent mode set to: off (session)"),
-        ("agent mode passive\nstatus\nexit\n", "Agent mode set to: passive (session)"),
         ("agent mode active\nstatus\nexit\n", "Agent mode set to: active (session)"),
-        ("agent mode PASSIVE\nstatus\nexit\n", "Agent mode set to: passive (session)"),
     ],
 )
 def test_repl_agent_mode_direct_setters(command: str, expected: str, tmp_path: Path) -> None:
@@ -995,6 +993,10 @@ def test_repl_agent_mode_direct_setters(command: str, expected: str, tmp_path: P
 
     assert proc.returncode == 0
     assert expected in proc.stdout
+    if "agent mode active" in command:
+        assert "Beast mode ON" in proc.stdout
+    else:
+        assert "Beast mode ON" not in proc.stdout
 
 
 def test_repl_agent_mode_invalid_value_is_handled(tmp_path: Path) -> None:
@@ -1009,7 +1011,7 @@ def test_repl_agent_mode_invalid_value_is_handled(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "Invalid mode. Choose: off, passive, active" in proc.stdout
+    assert "Invalid mode. Choose: off, active" in proc.stdout
 
 
 def test_repl_agent_mode_active_is_blocked_by_loaded_rule(tmp_path: Path) -> None:
@@ -1020,7 +1022,7 @@ def test_repl_agent_mode_active_is_blocked_by_loaded_rule(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
         input="agent mode active\nstatus\nexit\n",
@@ -1033,7 +1035,7 @@ def test_repl_agent_mode_active_is_blocked_by_loaded_rule(tmp_path: Path) -> Non
 
     assert proc.returncode == 0
     assert "Active mode is disabled by the loaded agent rules." in proc.stdout
-    assert "Agent feature mode: passive" in proc.stdout
+    assert "Agent feature mode: active" in proc.stdout
 
 
 def test_repl_agent_mode_block_does_not_fall_through_to_selector(tmp_path: Path) -> None:
@@ -1044,7 +1046,7 @@ def test_repl_agent_mode_block_does_not_fall_through_to_selector(tmp_path: Path)
         encoding="utf-8",
     )
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
         input="agent mode active\nagent mode\nexit\n",
@@ -1057,11 +1059,11 @@ def test_repl_agent_mode_block_does_not_fall_through_to_selector(tmp_path: Path)
 
     assert proc.returncode == 0
     assert "Active mode is disabled by the loaded agent rules." in proc.stdout
-    assert "Current: passive" in proc.stdout
+    assert "Current: active" in proc.stdout
     assert "Source: environment" in proc.stdout
     assert "Select mode:" not in proc.stdout
     assert "Enter choice >" not in proc.stdout
-    assert "Invalid mode. Choose: off, passive, active" not in proc.stdout
+    assert "Invalid mode. Choose: off, active" not in proc.stdout
 
 
 def test_repl_agent_mode_status_reflects_session_override(tmp_path: Path) -> None:
@@ -1069,7 +1071,7 @@ def test_repl_agent_mode_status_reflects_session_override(tmp_path: Path) -> Non
     env["SNAPPY_AGENT_MODE"] = "active"
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
-        input="agent mode passive\nstatus\nexit\n",
+        input="agent mode off\nstatus\nexit\n",
         text=True,
         capture_output=True,
         cwd=tmp_path,
@@ -1078,15 +1080,15 @@ def test_repl_agent_mode_status_reflects_session_override(tmp_path: Path) -> Non
     )
 
     assert proc.returncode == 0
-    assert "Agent mode set to: passive (session)" in proc.stdout
-    assert "Agent feature mode: passive" in proc.stdout
+    assert "Agent mode set to: off (session)" in proc.stdout
+    assert "Agent feature mode: off" in proc.stdout
     assert "Agent mode source: session" in proc.stdout
 
 
 def test_repl_status_shows_agent_metadata_when_present(tmp_path: Path) -> None:
     load_agent_fixture("valid_agent", tmp_path)
     env = _repl_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -1100,7 +1102,7 @@ def test_repl_status_shows_agent_metadata_when_present(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert "Session Status" in proc.stdout
-    assert "Agent feature mode: passive" in proc.stdout
+    assert "Agent feature mode: active" in proc.stdout
     assert "Agent name: Fixture Agent" in proc.stdout
     assert "Agent version: 1" in proc.stdout
     assert "Loaded skills: 1" in proc.stdout

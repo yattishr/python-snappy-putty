@@ -37,7 +37,7 @@ def test_doctor_runs() -> None:
 
 def test_agent_command_runs(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         load_agent_fixture("valid_agent", Path.cwd())
 
         result = runner.invoke(app, ["agent"])
@@ -55,7 +55,7 @@ def test_agent_command_runs(monkeypatch) -> None:
 
 def test_agent_doctor_command_runs(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         load_agent_fixture("valid_agent", Path.cwd())
 
         result = runner.invoke(app, ["agent-doctor"])
@@ -119,7 +119,7 @@ def test_init_force_overwrites_scaffold_files() -> None:
 
 def test_skills_lists_loaded_skill_names(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         skills_dir = Path(".snappy/skills")
         skills_dir.mkdir(parents=True)
         (skills_dir / "docker.md").write_text(
@@ -146,7 +146,7 @@ def test_skills_lists_loaded_skill_names(monkeypatch) -> None:
 
 def test_skills_skips_invalid_skill_files_with_warning(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         skills_dir = Path(".snappy/skills")
         skills_dir.mkdir(parents=True)
         (skills_dir / "broken.md").write_text(
@@ -167,7 +167,7 @@ def test_skills_skips_invalid_skill_files_with_warning(monkeypatch) -> None:
 
 def test_skills_reports_missing_or_malformed_risk_value(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         skills_dir = Path(".snappy/skills")
         skills_dir.mkdir(parents=True)
         (skills_dir / "copy.md").write_text(
@@ -199,7 +199,7 @@ def test_skills_reports_missing_or_malformed_risk_value(monkeypatch) -> None:
 
 def test_rules_lists_loaded_rule_names(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         rules_dir = Path(".snappy/rules")
         rules_dir.mkdir(parents=True)
         (rules_dir / "safety.md").write_text(
@@ -216,7 +216,7 @@ def test_rules_lists_loaded_rule_names(monkeypatch) -> None:
 
 def test_rules_handles_empty_rules_directory(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         Path(".snappy/rules").mkdir(parents=True)
 
         result = runner.invoke(app, ["rules"])
@@ -227,7 +227,7 @@ def test_rules_handles_empty_rules_directory(monkeypatch) -> None:
 
 def test_rules_skips_malformed_markdown_with_warning(monkeypatch) -> None:
     with runner.isolated_filesystem():
-        monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+        monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
         rules_dir = Path(".snappy/rules")
         rules_dir.mkdir(parents=True)
         (rules_dir / "broken.md").write_text("Rule without heading\n", encoding="utf-8")
@@ -300,7 +300,7 @@ def test_shell_starts_and_exits_with_exit_input() -> None:
 
 def test_shell_agent_command_runs() -> None:
     env = _shell_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
     with runner.isolated_filesystem():
         load_agent_fixture("valid_agent", Path.cwd())
 
@@ -320,7 +320,7 @@ def test_shell_agent_command_runs() -> None:
 
 def test_shell_agent_doctor_command_runs() -> None:
     env = _shell_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
     with runner.isolated_filesystem():
         load_agent_fixture("valid_agent", Path.cwd())
 
@@ -354,7 +354,7 @@ def test_ask_parses_fenced_json_and_renders(monkeypatch) -> None:
 ```"""
 
     monkeypatch.setattr(agent_module, "_run_with_sdk", fake_run_with_sdk)
-    result = runner.invoke(app, ["ask", "help me add logging to the CLI"])
+    result = runner.invoke(app, ["ask", "how do I check disk usage in a shell?"])
     assert result.exit_code == 0
     assert "Fenced Goal" in result.stdout
     assert "Commands" in result.stdout
@@ -431,7 +431,7 @@ def test_shell_workflow_ux_smoke_blocked_rule_is_prominent(tmp_path: Path) -> No
     )
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     env = _shell_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -462,7 +462,7 @@ def test_shell_workflow_ux_smoke_combined_block_and_confirm_stays_blocked(tmp_pa
     )
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     env = _shell_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
@@ -495,7 +495,7 @@ def test_shell_workflow_ux_smoke_confirm_and_info_show_policy_without_block(tmp_
     )
     (tmp_path / "README.md").write_text("demo", encoding="utf-8")
     env = _shell_env()
-    env["SNAPPY_AGENT_MODE"] = "passive"
+    env["SNAPPY_AGENT_MODE"] = "active"
 
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],

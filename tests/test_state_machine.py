@@ -534,9 +534,9 @@ def test_single_goal_loop_blocked_flow_returns_to_idle(monkeypatch, tmp_path: Pa
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    state = SessionState(agent_mode="passive")
+    state = SessionState(agent_mode="active")
 
     handled = cli._handle_fs_intent_repl("copy README.md to /", tmp_path, state)
 
@@ -681,24 +681,24 @@ def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch)
 
 
 def test_agent_mode_choice_question_defaults_to_current_selection() -> None:
-    question = cli._build_agent_mode_choice_question(current_mode="passive", source="session")
+    question = cli._build_agent_mode_choice_question(current_mode="active", source="session")
 
     assert question["selected_index"] == 1
-    assert "Current: passive" in str(question["message"])
+    assert "Current: active" in str(question["message"])
     assert question["footer"] == "(Use ↑/↓ to navigate, ENTER to select)"
 
 
 def test_agent_mode_without_argument_is_display_only(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
-    state = SessionState(agent_mode="passive")
+    state = SessionState(agent_mode="active")
 
     handled = cli._handle_agent_mode_command("agent mode", state)
 
     assert handled is True
-    assert state.agent_mode == "passive"
+    assert state.agent_mode == "active"
     output = buffer.getvalue()
     assert "Agent Mode" in output
-    assert "Current: passive" in output
+    assert "Current: active" in output
     assert "Source: session" in output
     assert "Select mode:" not in output
 
@@ -706,14 +706,15 @@ def test_agent_mode_without_argument_is_display_only(monkeypatch) -> None:
 def test_agent_mode_select_opens_menu_and_applies_choice(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState()
-    monkeypatch.setattr(cli, "_prompt_for_agent_mode", lambda session, current_mode, source: "passive")
+    monkeypatch.setattr(cli, "_prompt_for_agent_mode", lambda session, current_mode, source: "active")
 
     handled = cli._handle_agent_mode_command("agent mode select", state)
 
     assert handled is True
-    assert state.agent_mode == "passive"
+    assert state.agent_mode == "active"
     output = buffer.getvalue()
-    assert "Agent mode set to: passive (session)" in output
+    assert "Agent mode set to: active (session)" in output
+    assert "Beast mode ON" in output
 
 
 def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:
@@ -743,7 +744,7 @@ def test_status_displays_agent_metadata_when_manifest_is_valid(monkeypatch, tmp_
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
@@ -757,7 +758,7 @@ def test_status_displays_agent_warning_when_manifest_is_invalid(monkeypatch, tmp
     buffer = _capture_console(monkeypatch)
     load_agent_fixture("malformed_manifest", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
@@ -768,12 +769,12 @@ def test_status_displays_agent_warning_when_manifest_is_invalid(monkeypatch, tmp
 def test_status_displays_agent_section_with_no_agent(monkeypatch, tmp_path: Path) -> None:
     buffer = _capture_console(monkeypatch)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
     output = buffer.getvalue()
-    assert "Agent feature mode: passive" in output
+    assert "Agent feature mode: active" in output
     assert "Agent mode source: environment" in output
     assert "Agent: (none loaded)" in output
 
@@ -782,12 +783,12 @@ def test_status_reflects_runtime_session_agent_mode(monkeypatch, tmp_path: Path)
     buffer = _capture_console(monkeypatch)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
-    state = SessionState(agent_mode="passive")
+    state = SessionState(agent_mode="active")
 
     cli._handle_status(state)
 
     output = buffer.getvalue()
-    assert "Agent feature mode: passive" in output
+    assert "Agent feature mode: active" in output
     assert "Agent mode source: session" in output
 
 
@@ -795,15 +796,15 @@ def test_status_displays_agent_section_with_valid_agent_details(monkeypatch, tmp
     buffer = _capture_console(monkeypatch)
     load_agent_fixture("valid_agent", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
     output = buffer.getvalue()
-    assert "Agent feature mode: passive" in output
+    assert "Agent feature mode: active" in output
     assert "Agent name: Fixture Agent" in output
     assert "Agent version: 1" in output
-    assert "Agent mode: passive" in output
+    assert "Agent mode: active" in output
     assert "Loaded skills: 1" in output
     assert "Loaded rules: 1" in output
     assert "Enforceable rules: 0" in output
@@ -818,7 +819,7 @@ def test_status_displays_agent_section_with_partial_metadata(monkeypatch, tmp_pa
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Partial Agent\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
@@ -837,7 +838,7 @@ def test_status_displays_agent_memory_metadata(monkeypatch, tmp_path: Path) -> N
     memory_dir.mkdir(parents=True)
     (memory_dir / "session.json").write_text('{"last_goal": "inspect logs"}\n', encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
@@ -850,7 +851,7 @@ def test_status_displays_agent_memory_warning(monkeypatch, tmp_path: Path) -> No
     buffer = _capture_console(monkeypatch)
     load_agent_fixture("malformed_memory", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
@@ -876,18 +877,18 @@ def test_status_displays_agent_feature_mode_off(monkeypatch, tmp_path: Path) -> 
     assert "Agent memory:" not in output
 
 
-def test_status_displays_agent_feature_mode_passive(monkeypatch, tmp_path: Path) -> None:
+def test_status_displays_agent_feature_mode_active(monkeypatch, tmp_path: Path) -> None:
     buffer = _capture_console(monkeypatch)
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Passive Agent\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
     output = buffer.getvalue()
-    assert "Agent feature mode: passive" in output
+    assert "Agent feature mode: active" in output
     assert "Agent name: Passive Agent" in output
 
 
@@ -900,7 +901,7 @@ def test_status_displays_policy_tier_summary(monkeypatch, tmp_path: Path) -> Non
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     cli._handle_status(SessionState())
 
@@ -914,11 +915,11 @@ def test_status_displays_policy_tier_summary(monkeypatch, tmp_path: Path) -> Non
 
 def test_agent_summary_displays_no_agent_loaded(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_summary_lines()
 
-    assert "Agent feature mode: passive" in lines
+    assert "Agent feature mode: active" in lines
     assert "Agent loaded: no" in lines
     assert "No .snappy agent is currently loaded." in lines
 
@@ -926,18 +927,18 @@ def test_agent_summary_displays_no_agent_loaded(monkeypatch, tmp_path: Path) -> 
 def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) -> None:
     load_agent_fixture("valid_agent", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_summary_lines()
 
-    assert "Agent feature mode: passive" in lines
+    assert "Agent feature mode: active" in lines
     assert "Agent loaded: yes" in lines
     assert "Manifest present: yes" in lines
     assert "Control layer: centralized pre-execution policy gate" in lines
     assert "Policy hierarchy: BLOCK > CONFIRM > WARN > INFO" in lines
     assert "Agent name: Fixture Agent" in lines
     assert "Version: 1" in lines
-    assert "Agent mode: passive" in lines
+    assert "Agent mode: active" in lines
     assert "Loaded skills: 1" in lines
     assert "Loaded rules: 1" in lines
     assert "Enforceable rules: 0" in lines
@@ -952,11 +953,11 @@ def test_agent_summary_displays_valid_loaded_agent(monkeypatch, tmp_path: Path) 
 
 def test_agent_doctor_reports_no_agent_directory(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_doctor_lines()
 
-    assert "Agent feature mode: passive" in lines
+    assert "Agent feature mode: active" in lines
     assert ".snappy directory: absent" in lines
     assert "Manifest file: absent" in lines
     assert "Skills directory: absent" in lines
@@ -968,7 +969,7 @@ def test_agent_doctor_reports_no_agent_directory(monkeypatch, tmp_path: Path) ->
 def test_agent_doctor_reports_valid_full_agent_setup(monkeypatch, tmp_path: Path) -> None:
     load_agent_fixture("valid_agent", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_doctor_lines()
 
@@ -999,13 +1000,13 @@ def test_agent_mode_change_is_blocked_by_no_active_mode_rule(monkeypatch, tmp_pa
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
-    state = SessionState(agent_mode="passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+    state = SessionState(agent_mode="active")
 
     handled = cli._handle_agent_mode_command("agent mode active", state)
 
     assert handled is True
-    assert state.agent_mode == "passive"
+    assert state.agent_mode == "active"
     assert "Active mode is disabled by the loaded agent rules." in buffer.getvalue()
 
 
@@ -1022,13 +1023,13 @@ def test_agent_mode_change_is_blocked_when_no_active_mode_and_info_rule_are_load
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
-    state = SessionState(agent_mode="passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+    state = SessionState(agent_mode="active")
 
     handled = cli._handle_agent_mode_command("agent mode active", state)
 
     assert handled is True
-    assert state.agent_mode == "passive"
+    assert state.agent_mode == "active"
     assert "Active mode is disabled by the loaded agent rules." in buffer.getvalue()
 
 
@@ -1041,9 +1042,9 @@ def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_blocked(mo
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     state = SessionState(
-        agent_mode="passive",
+        agent_mode="active",
         current_state=LifecycleState.CONFIRMATION,
         active_goal="make a folder called .",
         pending_plan=FsPlan(
@@ -1082,7 +1083,7 @@ def test_confirmation_blocked_by_protect_project_root_rule_marks_goal_blocked(mo
 def test_agent_doctor_reports_malformed_manifest(monkeypatch, tmp_path: Path) -> None:
     load_agent_fixture("malformed_manifest", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_doctor_lines()
 
@@ -1094,7 +1095,7 @@ def test_agent_doctor_reports_malformed_manifest(monkeypatch, tmp_path: Path) ->
 def test_agent_doctor_reports_malformed_memory_file(monkeypatch, tmp_path: Path) -> None:
     load_agent_fixture("malformed_memory", tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_doctor_lines()
 
@@ -1110,7 +1111,7 @@ def test_agent_doctor_reports_malformed_skill_and_rule_files(monkeypatch, tmp_pa
     rules_dir.mkdir(parents=True)
     (rules_dir / "broken.md").write_text("Rule without heading\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     lines = cli._build_agent_doctor_lines()
 

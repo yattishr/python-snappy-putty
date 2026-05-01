@@ -21,15 +21,27 @@ def _env() -> dict[str, str]:
 
 def _llm_env() -> dict[str, str]:
     env = _env()
-    env["SNAPPY_PUTTY_ENABLE_SDK"] = "1"
     env["SNAPPY_PUTTY_MOCK_LLM_PLAN"] = "1"
     return env
 
 
 def _llm_failure_env() -> dict[str, str]:
     env = _env()
-    env["SNAPPY_PUTTY_ENABLE_SDK"] = "1"
     env["SNAPPY_PUTTY_MOCK_LLM_FAILURE"] = "1"
+    return env
+
+
+def _sdk_enabled_without_planner_env() -> dict[str, str]:
+    env = _env()
+    env["SNAPPY_PUTTY_ENABLE_SDK"] = "1"
+    env.pop("SNAPPY_PUTTY_MOCK_LLM_PLAN", None)
+    env.pop("SNAPPY_PUTTY_MOCK_LLM_FAILURE", None)
+    return env
+
+
+def _off_env() -> dict[str, str]:
+    env = _env()
+    env["SNAPPY_AGENT_MODE"] = "off"
     return env
 
 
@@ -169,6 +181,52 @@ def test_broad_developer_goal_with_llm_unavailable_does_not_create_deterministic
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert "current_plan" not in session
     assert "last_plan" not in session
+
+
+def test_sdk_enable_flag_alone_does_not_make_llm_planner_available(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_sdk_enabled_without_planner_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "LLM-assisted planning is unavailable" in proc.stdout
+    assert "Apply the smallest project change" not in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last skip reason: llm_required_but_unavailable" in proc.stdout
+
+
+def test_agent_mode_off_broad_developer_goal_does_not_trigger_planning(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_off_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Active planning is off." in proc.stdout
+    assert "Broad developer goals require active LLM-assisted planning." in proc.stdout
+    assert "No project plan was created." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
 
 
 def test_non_project_general_question_exits_cleanly(tmp_path: Path) -> None:

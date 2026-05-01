@@ -119,7 +119,7 @@ _KNOWN_FIELDS: dict[str, type | tuple[type, ...]] = {
     "memory": bool,
 }
 
-_ALLOWED_AGENT_MODES = {"off", "passive", "active"}
+_ALLOWED_AGENT_MODES = {"off", "active"}
 _SUPPORTED_RULE_IDENTIFIERS = frozenset({"require_confirm", "protect_project_root", "no_active_mode"})
 _BLOCK_RULE_IDENTIFIERS = frozenset({"protect_project_root", "no_active_mode"})
 _CONFIRM_RULE_IDENTIFIERS = frozenset({"require_confirm"})

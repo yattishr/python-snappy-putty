@@ -28,7 +28,7 @@ def test_discover_agent_project_without_snappy_dir(tmp_path: Path) -> None:
 
 def test_discover_agent_project_with_snappy_dir_without_manifest(monkeypatch, tmp_path: Path) -> None:
     agent_root = load_agent_fixture("missing_manifest", tmp_path)
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     result = discover_agent_project(tmp_path)
 
@@ -42,7 +42,7 @@ def test_discover_agent_project_with_manifest(monkeypatch, tmp_path: Path) -> No
     agent_root.mkdir()
     manifest_path = agent_root / "snappy.yaml"
     manifest_path.write_text("version: 1\n", encoding="utf-8")
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     result = discover_agent_project(tmp_path)
 
@@ -75,7 +75,7 @@ def test_load_agent_project_config_parses_valid_manifest(monkeypatch, tmp_path: 
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     result = load_agent_project_config(tmp_path)
 
     assert result.warning is None
@@ -96,7 +96,7 @@ def test_load_agent_project_config_allows_missing_optional_fields(monkeypatch, t
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Minimal Agent\n", encoding="utf-8")
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     result = load_agent_project_config(tmp_path)
 
     assert result.warning is None
@@ -108,7 +108,7 @@ def test_load_agent_project_config_reports_malformed_yaml(monkeypatch, tmp_path:
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Snappy: Dev Agent\n", encoding="utf-8")
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     result = load_agent_project_config(tmp_path)
 
     assert result.manifest is None
@@ -121,7 +121,7 @@ def test_load_agent_project_config_reports_wrong_field_types(monkeypatch, tmp_pa
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("version: one\nskills: true\n", encoding="utf-8")
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     result = load_agent_project_config(tmp_path)
 
     assert result.manifest is None
@@ -148,7 +148,7 @@ def test_load_agent_skill_registry_parses_valid_skill_file(monkeypatch, tmp_path
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_skill_registry(tmp_path)
 
     assert registry.warnings == []
@@ -167,7 +167,7 @@ def test_load_agent_skill_registry_skips_invalid_skill_files(monkeypatch, tmp_pa
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_skill_registry(tmp_path)
 
     assert registry.skills == []
@@ -197,7 +197,7 @@ def test_load_agent_skill_registry_reports_missing_or_malformed_risk_value(monke
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_skill_registry(tmp_path)
 
     assert registry.skills == []
@@ -214,7 +214,7 @@ def test_load_agent_rule_registry_parses_valid_rules(monkeypatch, tmp_path: Path
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.warnings == []
@@ -232,7 +232,7 @@ def test_load_agent_rule_registry_marks_supported_rule_enforceable(monkeypatch, 
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.warnings == []
@@ -252,7 +252,7 @@ def test_load_agent_rule_registry_keeps_unsupported_rule_informational(monkeypat
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.warnings == []
@@ -280,7 +280,7 @@ def test_load_agent_rule_registry_allows_empty_rules_directory(monkeypatch, tmp_
     rules_dir = tmp_path / ".snappy" / "rules"
     rules_dir.mkdir(parents=True)
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.rules == []
@@ -292,7 +292,7 @@ def test_load_agent_rule_registry_skips_malformed_markdown(monkeypatch, tmp_path
     rules_dir.mkdir(parents=True)
     (rules_dir / "broken.md").write_text("Rule without heading\n", encoding="utf-8")
 
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     registry = load_agent_rule_registry(tmp_path)
 
     assert registry.rules == []
@@ -301,7 +301,7 @@ def test_load_agent_rule_registry_skips_malformed_markdown(monkeypatch, tmp_path
 
 
 def test_load_agent_memory_without_memory_folder(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
     memory = load_agent_memory(tmp_path)
 
     assert memory.memory_found is False
@@ -318,7 +318,7 @@ def test_load_agent_memory_parses_valid_session_json(monkeypatch, tmp_path: Path
         '{"last_goal": "inspect logs", "notes": ["safe", "read-only"]}\n',
         encoding="utf-8",
     )
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     memory = load_agent_memory(tmp_path)
 
@@ -333,7 +333,7 @@ def test_load_agent_memory_reports_malformed_session_json(monkeypatch, tmp_path:
     memory_dir = tmp_path / ".snappy" / "memory"
     memory_dir.mkdir(parents=True)
     (memory_dir / "session.json").write_text('{"last_goal": invalid}\n', encoding="utf-8")
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     memory = load_agent_memory(tmp_path)
 
@@ -351,9 +351,9 @@ def test_agent_mode_defaults_to_off(monkeypatch) -> None:
 
 
 def test_agent_mode_respects_environment(monkeypatch) -> None:
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
-    assert resolve_agent_mode() == ("passive", "environment")
+    assert resolve_agent_mode() == ("active", "environment")
 
 
 def test_agent_mode_session_override_beats_environment(monkeypatch) -> None:
@@ -376,11 +376,11 @@ def test_agent_mode_off_ignores_snappy_project(monkeypatch, tmp_path: Path) -> N
     assert config.warning is None
 
 
-def test_agent_mode_passive_loads_agent_metadata(monkeypatch, tmp_path: Path) -> None:
+def test_agent_mode_active_loads_agent_metadata(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Visible Agent\nmode: supervised\n", encoding="utf-8")
-    monkeypatch.setenv("SNAPPY_AGENT_MODE", "passive")
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
 
     discovery = discover_agent_project(tmp_path)
     config = load_agent_project_config(tmp_path)
@@ -389,7 +389,7 @@ def test_agent_mode_passive_loads_agent_metadata(monkeypatch, tmp_path: Path) ->
     assert config.manifest == AgentManifest(name="Visible Agent", mode="supervised")
 
 
-def test_agent_mode_active_currently_uses_passive_loading(monkeypatch, tmp_path: Path) -> None:
+def test_agent_mode_active_loads_agent_metadata_for_active_mode(monkeypatch, tmp_path: Path) -> None:
     agent_root = tmp_path / ".snappy"
     agent_root.mkdir()
     (agent_root / "snappy.yaml").write_text("name: Active Agent\n", encoding="utf-8")

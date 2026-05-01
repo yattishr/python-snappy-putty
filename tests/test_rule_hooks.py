@@ -120,7 +120,7 @@ def test_filesystem_policy_confirm_applies_when_no_block_exists() -> None:
 def test_agent_mode_policy_info_does_not_change_outcome() -> None:
     registry = AgentRuleRegistry(rules=[_rule("custom_note", enforceable=False)])
 
-    decision = evaluate_agent_mode_policy(target_mode="passive", rule_registry=registry)
+    decision = evaluate_agent_mode_policy(target_mode="active", rule_registry=registry)
 
     assert decision.outcome == "allow"
     assert decision.control_layer == "agent_mode"
