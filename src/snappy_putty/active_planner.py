@@ -206,6 +206,52 @@ _GENERAL_QUESTION_TERMS = (
     "vacation",
     "recipe",
 )
+_CLI_GOAL_TERMS = (
+    "cli",
+    "command",
+    "commands",
+    "terminal",
+    "arg",
+    "args",
+    "input validation",
+)
+_CLI_ENTRYPOINT_PROFILES = {
+    "python": {
+        "package_managers": {"pip"},
+        "frameworks": {"typer", "click"},
+        "suffixes": {".py"},
+        "names": {"main.py", "cli.py", "app.py", "commands.py"},
+        "markers": {"sys.argv", "argparse", "typer", "click", "def main(", 'if __name__ == "__main__"', "if __name__ == '__main__'"},
+    },
+    "javascript": {
+        "package_managers": {"npm"},
+        "frameworks": set(),
+        "suffixes": {".js", ".mjs", ".cjs"},
+        "names": {"index.js", "main.js", "cli.js", "app.js", "commands.js"},
+        "markers": {"#!/usr/bin/env node", "process.argv", "commander", "yargs", "meow", "cac("},
+    },
+    "typescript": {
+        "package_managers": {"npm"},
+        "frameworks": set(),
+        "suffixes": {".ts", ".mts", ".cts"},
+        "names": {"index.ts", "main.ts", "cli.ts", "app.ts", "commands.ts"},
+        "markers": {"#!/usr/bin/env node", "process.argv", "commander", "yargs", "meow", "cac("},
+    },
+    "go": {
+        "package_managers": {"go"},
+        "frameworks": set(),
+        "suffixes": {".go"},
+        "names": {"main.go"},
+        "markers": {"package main", "func main(", "flag.", "cobra.", "urfave/cli"},
+    },
+    "rust": {
+        "package_managers": {"cargo"},
+        "frameworks": set(),
+        "suffixes": {".rs"},
+        "names": {"main.rs", "cli.rs", "commands.rs"},
+        "markers": {"fn main(", "clap::", "structopt", "std::env::args"},
+    },
+}
 
 
 def classify_planning_mode(user_input: str) -> PlanningMode:
@@ -303,8 +349,9 @@ def create_llm_assisted_plan(
     snapshot: ProjectSnapshot,
     *,
     client: LLMPlannerClient | None = None,
+    session_mode: str | None = None,
 ) -> GroundedPlan:
-    planner_client = client or default_llm_planner_client()
+    planner_client = client or default_llm_planner_client(session_mode=session_mode)
     if planner_client is None:
         raise LLMPlannerUnavailableError(
             "LLM-assisted planning is unavailable. Deterministic planning and inspection remain available."
@@ -586,23 +633,23 @@ def build_llm_prompt(goal: str, snapshot: ProjectSnapshot) -> str:
     )
 
 
-def default_llm_planner_client() -> LLMPlannerClient | None:
+def default_llm_planner_client(session_mode: str | None = None) -> LLMPlannerClient | None:
     if os.getenv("SNAPPY_PUTTY_MOCK_LLM_FAILURE") == "1":
         return _FailingLLMPlannerClient()
     if os.getenv("SNAPPY_PUTTY_MOCK_LLM_PLAN") == "1":
         return _MockLLMPlannerClient()
-    if get_agent_mode() != "active":
+    if get_agent_mode(session_mode) != "active":
         return None
-    if not os.getenv("OPENAI_API_KEY"):
+    from snappy_putty import agent as agent_module
+
+    if not agent_module.is_llm_available(session_mode=session_mode):
+        return None
+    if agent_module.Agent is None or agent_module.Runner is None:
         return None
     try:
-        from agents import Agent, Runner
-    except Exception:
-        return None
-    try:
-        return _AgentsLLMPlannerClient(Agent=Agent, Runner=Runner)
-    except Exception:
-        return None
+        return _AgentsLLMPlannerClient(Agent=agent_module.Agent, Runner=agent_module.Runner)
+    except Exception as exc:
+        raise LLMPlannerUnavailableError(f"LLM-assisted planner could not initialize: {exc}") from exc
 
 
 class _AgentsLLMPlannerClient:
@@ -687,7 +734,10 @@ class _MockLLMPlannerClient:
 
 
 def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[str]:
-    candidates = list(snapshot.sampled_files)
+    if _is_cli_goal(goal):
+        candidates = _select_cli_context_files(snapshot)
+    else:
+        candidates = list(snapshot.sampled_files)
     known_paths = set(_known_snapshot_paths(snapshot))
     goal_lower = goal.lower()
     if any(token in goal_lower for token in ("cli", "logging", "workflow")):
@@ -700,6 +750,161 @@ def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[st
         for item in snapshot.docs[:3]:
             _append_if_missing(candidates, item)
     return _dedupe_list(candidates)[:6]
+
+
+def _is_cli_goal(goal: str) -> bool:
+    lowered = goal.lower()
+    if "input validation" in lowered:
+        return True
+    tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+    return bool(tokens.intersection(set(_CLI_GOAL_TERMS) - {"input validation"}))
+
+
+def _select_cli_context_files(snapshot: ProjectSnapshot) -> list[str]:
+    known_paths = set(_known_snapshot_paths(snapshot))
+    root = Path(snapshot.root_path)
+    profiles = _cli_profiles_for_snapshot(snapshot)
+    selected: list[str] = []
+
+    entrypoint_candidates = [
+        path
+        for path in sorted(known_paths)
+        if _source_file_can_be_entrypoint(path, profiles) and not _is_low_signal_module(path, profiles)
+    ]
+    scored_sources = sorted(
+        (
+            (-_cli_file_score(path, root, profiles), path)
+            for path in entrypoint_candidates
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    for score, path in scored_sources:
+        if score < 0:
+            _append_if_missing(selected, path)
+
+    primary_dirs = {str(Path(path).parent) for path in selected if _is_profile_entrypoint_name(path, profiles)}
+    related_sibling_names = _cli_related_sibling_names(selected, snapshot, root, profiles)
+    for path in entrypoint_candidates:
+        if path in selected or path not in known_paths or _is_low_signal_module(path, profiles):
+            continue
+        if str(Path(path).parent) in primary_dirs and Path(path).name in related_sibling_names:
+            _append_if_missing(selected, path)
+
+    for path in snapshot.test_files:
+        _append_if_missing(selected, path)
+
+    for path in snapshot.docs:
+        _append_if_missing(selected, path)
+
+    for path in snapshot.sampled_files:
+        _append_if_missing(selected, path)
+
+    return selected
+
+
+def _cli_profiles_for_snapshot(snapshot: ProjectSnapshot) -> list[dict[str, set[str]]]:
+    languages = set(snapshot.languages)
+    package_managers = set(snapshot.package_managers)
+    frameworks = set(snapshot.frameworks)
+    profiles: list[dict[str, set[str]]] = []
+    for language, profile in _CLI_ENTRYPOINT_PROFILES.items():
+        if (
+            language in languages
+            or package_managers.intersection(profile["package_managers"])
+            or frameworks.intersection(profile["frameworks"])
+        ):
+            profiles.append(profile)
+    return profiles or list(_CLI_ENTRYPOINT_PROFILES.values())
+
+
+def _source_file_can_be_entrypoint(path: str, profiles: list[dict[str, set[str]]]) -> bool:
+    suffix = Path(path).suffix.lower()
+    return any(suffix in profile["suffixes"] for profile in profiles)
+
+
+def _is_low_signal_module(path: str, profiles: list[dict[str, set[str]]]) -> bool:
+    name = Path(path).name
+    if name == "__init__.py":
+        return True
+    if name == "mod.rs" and any(".rs" in profile["suffixes"] for profile in profiles):
+        return True
+    return False
+
+
+def _is_profile_entrypoint_name(path: str, profiles: list[dict[str, set[str]]]) -> bool:
+    name = Path(path).name
+    return any(name in profile["names"] for profile in profiles)
+
+
+def _cli_file_score(path: str, root: Path, profiles: list[dict[str, set[str]]]) -> int:
+    score = 0
+    name = Path(path).name
+    if _is_profile_entrypoint_name(path, profiles):
+        score += 100
+    if "cli" in path.lower() or "command" in path.lower():
+        score += 30
+    try:
+        text = (root / path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        text = ""
+    lowered = text.lower()
+    for profile in profiles:
+        for marker in profile["markers"]:
+            if marker.lower() in lowered:
+                score += 40
+    return score
+
+
+def _cli_related_sibling_names(
+    entrypoint_paths: list[str],
+    snapshot: ProjectSnapshot,
+    root: Path,
+    profiles: list[dict[str, set[str]]],
+) -> set[str]:
+    names: set[str] = set()
+    for test_path in snapshot.test_files:
+        test_name = Path(test_path).name
+        if test_name.startswith("test_") and test_name.endswith(".py"):
+            names.add(f"{test_name.removeprefix('test_')}")
+        if test_name.endswith(".test.js"):
+            names.add(test_name.removesuffix(".test.js") + ".js")
+        if test_name.endswith(".test.ts"):
+            names.add(test_name.removesuffix(".test.ts") + ".ts")
+        if test_name.endswith("_test.go"):
+            names.add(test_name.removesuffix("_test.go") + ".go")
+    for entrypoint in entrypoint_paths:
+        if not _is_profile_entrypoint_name(entrypoint, profiles):
+            continue
+        try:
+            text = (root / entrypoint).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name in _language_aware_import_sibling_names(text, entrypoint, profiles):
+            names.add(name)
+    return names
+
+
+def _language_aware_import_sibling_names(text: str, entrypoint: str, profiles: list[dict[str, set[str]]]) -> set[str]:
+    suffix = Path(entrypoint).suffix.lower()
+    names: set[str] = set()
+    if suffix == ".py":
+        for match in re.finditer(r"from\s+\.(?P<module>[A-Za-z_][A-Za-z0-9_]*)\s+import|import\s+\.(?P<import_module>[A-Za-z_][A-Za-z0-9_]*)", text):
+            module = match.group("module") or match.group("import_module")
+            names.add(f"{module}.py")
+    elif suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
+        for match in re.finditer(r"""(?:from\s+|require\()\s*["']\./(?P<module>[A-Za-z0-9_-]+)(?:\.[A-Za-z0-9]+)?["']""", text):
+            module = match.group("module")
+            for profile in profiles:
+                for candidate_suffix in profile["suffixes"]:
+                    if candidate_suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
+                        names.add(f"{module}{candidate_suffix}")
+    elif suffix == ".go":
+        for match in re.finditer(r'"(?P<package>[^"]+)"', text):
+            names.add(f"{Path(match.group('package')).name}.go")
+    elif suffix == ".rs":
+        for match in re.finditer(r"\bmod\s+(?P<module>[A-Za-z_][A-Za-z0-9_]*)\s*;", text):
+            names.add(f"{match.group('module')}.rs")
+    return names
 
 
 def _deterministic_steps(goal: str, files_inspected: list[str], snapshot: ProjectSnapshot) -> list[PlanStep]:

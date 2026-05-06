@@ -28,6 +28,10 @@ MODE_STATUS_LINES: dict[str, list[str]] = {
         "🧠 Breaking that command down...",
         "🔬 Inspecting command semantics...",
     ],
+    "plan": [
+        "🧭 Planning grounded project changes...",
+        "🛠️ Building a supervised project plan...",
+    ],
     "fs": [
         "🔎 Scanning directories safely...",
         "📁 Reading local paths carefully...",

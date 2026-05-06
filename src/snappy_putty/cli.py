@@ -664,6 +664,8 @@ def _record_agent_planning_result(
     state.pending_plan_mode = result.plan_mode
     state.pending_question = result.output.question
     state.awaiting_confirmation = False
+    if result.output.plan:
+        state.clear_skip_metadata()
     if pending_context:
         state.update_workflow_context(
             ClarificationContext(
@@ -677,9 +679,12 @@ def _record_agent_planning_result(
         )
     else:
         state.update_workflow_context(None)
-    state.sync_active_workflow()
-    if result.output.question:
+    if result.output.question is not None:
         _set_state(state, LifecycleState.CLARIFICATION)
+    elif result.plan_mode in {PlanningMode.DETERMINISTIC.value, PlanningMode.LLM_ASSISTED.value}:
+        _set_state(state, LifecycleState.CONFIRMATION)
+    else:
+        state.sync_active_workflow()
 
 
 def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goal: bool = True) -> bool:
@@ -784,6 +789,15 @@ def _execution_result(
 def _cancel_active_goal(state: SessionState, *, message: str) -> None:
     result = _execution_result(state=state, status="cancelled", message=message)
     _reflect_execution_result(state, result)
+
+
+def _has_cancellable_workflow(state: SessionState) -> bool:
+    return (
+        state.has_active_goal
+        or state.pending_question is not None
+        or state.pending_plan is not None
+        or state.awaiting_confirmation
+    )
 
 
 def _fail_active_goal(state: SessionState, *, message: str) -> None:
@@ -1570,6 +1584,10 @@ def run_shell() -> None:
             continue
         if route == ROUTE_BUILTIN_CANCEL:
             state.last_route = route
+            if not _has_cancellable_workflow(state):
+                state.reset_to_idle_preserving_history()
+                console.print("Nothing to cancel.")
+                continue
             _cancel_active_goal(state, message="Cancelled active task state.")
             console.print("Cleared pending question/plan state.")
             continue
@@ -1883,37 +1901,17 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 skip_reason=relevance_reason,
             )
         try:
-            if planning_mode == PlanningMode.LLM_ASSISTED:
-                console.print("Generating LLM-assisted grounded plan...")
-                plan = create_llm_assisted_plan(intent, snapshot)
-            else:
-                plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
+            with busy(get_status_message("plan"), console=console):
+                if planning_mode == PlanningMode.LLM_ASSISTED:
+                    plan = create_llm_assisted_plan(intent, snapshot, session_mode=session_mode)
+                    console.print("Generating LLM-assisted grounded plan...")
+                else:
+                    plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
         except LLMPlannerUnavailableError as exc:
-            console.print(str(exc))
-            console.print("")
-            console.print("I inspected the project, but I did not create a plan because this request requires contextual developer planning.")
-            console.print("")
-            console.print("You can still use inspection commands such as:")
-            console.print("- inspect project")
-            console.print("- inspect files")
-            console.print("- show plan")
-            _record_planning_skipped_memory(root, goal=intent, reason="llm_required_but_unavailable", snapshot=snapshot)
-            return AgentRunResult(
-                output=AgentOutput(
-                    goal=intent,
-                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
-                    question=None,
-                    plan=[],
-                    commands=[],
-                    warnings=["No project plan was created."],
-                    snippets=[],
-                ),
-                raw_model_text=None,
-                parse_error=None,
-                directory_listing=None,
-                plan_mode=None,
-                skip_reason="llm_required_but_unavailable",
-            )
+            _debug(str(exc))
+            console.print("Generating deterministic grounded plan from inspected project context...")
+            with busy(get_status_message("plan"), console=console):
+                plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
         except LLMPlanValidationError as exc:
             console.print("LLM-assisted plan was rejected by validation.")
             console.print(f"Reason: {exc}")

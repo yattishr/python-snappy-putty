@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from snappy_putty import active_planner, agent as agent_module
 from snappy_putty.active_planner import LLMPlanValidationError, PlanningMode, validate_llm_plan
 from snappy_putty.project_inspector import inspect_project
 
@@ -44,6 +45,145 @@ def _off_env() -> dict[str, str]:
     env = _env()
     env["SNAPPY_AGENT_MODE"] = "off"
     return env
+
+
+def test_grounded_llm_planner_uses_same_session_mode_capability_check(monkeypatch) -> None:
+    seen_session_modes: list[str | None] = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    class FakeRunner:
+        pass
+
+    monkeypatch.setattr(
+        agent_module,
+        "is_llm_available",
+        lambda session_mode=None: seen_session_modes.append(session_mode) or True,
+    )
+    monkeypatch.setattr(agent_module, "Agent", FakeAgent)
+    monkeypatch.setattr(agent_module, "Runner", FakeRunner)
+
+    client = active_planner.default_llm_planner_client(session_mode="active")
+
+    assert client is not None
+    assert seen_session_modes == ["active"]
+
+
+def test_cli_goal_context_selection_prioritizes_actual_entrypoint(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'taskcli'\n[project.scripts]\ntaskcli = 'taskcli.main:main'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "taskcli"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "main.py").write_text(
+        "import typer\nfrom .tasks import list_tasks\n\napp = typer.Typer()\n\n"
+        "def main():\n    app()\n\nif __name__ == \"__main__\":\n    main()\n",
+        encoding="utf-8",
+    )
+    (src_dir / "tasks.py").write_text("def list_tasks():\n    return []\n", encoding="utf-8")
+    (src_dir / "storage.py").write_text("def load_tasks():\n    return []\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_tasks.py").write_text("def test_tasks():\n    assert True\n", encoding="utf-8")
+    (tests_dir / "test_storage.py").write_text("def test_storage():\n    assert True\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Task CLI\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+    selected = active_planner._select_deterministic_files("help me improve this CLI", snapshot)
+
+    assert selected[0] == "src/taskcli/main.py"
+    assert "src/taskcli/tasks.py" in selected
+    assert "src/taskcli/storage.py" in selected
+    assert "tests/test_tasks.py" in selected
+    assert "tests/test_storage.py" in selected
+    assert "README.md" in selected
+    assert "pyproject.toml" not in selected
+
+
+def test_cli_goal_context_selection_supports_node_entrypoint(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"bin": {"taskcli": "./src/cli.js"}}\n', encoding="utf-8")
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "cli.js").write_text(
+        "#!/usr/bin/env node\nconst commands = require('./commands')\ncommands.run(process.argv.slice(2))\n",
+        encoding="utf-8",
+    )
+    (src_dir / "commands.js").write_text("exports.run = function run(args) { return args }\n", encoding="utf-8")
+    (src_dir / "store.js").write_text("exports.load = function load() { return [] }\n", encoding="utf-8")
+    (tmp_path / "commands.test.js").write_text("test('commands', () => {})\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Task CLI\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+    selected = active_planner._select_deterministic_files("help me improve this CLI", snapshot)
+
+    assert selected[0] == "src/cli.js"
+    assert "src/commands.js" in selected
+    assert "package.json" not in selected[:2]
+
+
+def test_cli_goal_context_selection_supports_go_entrypoint(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/taskcli\n", encoding="utf-8")
+    cmd_dir = tmp_path / "cmd" / "taskcli"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "main.go").write_text(
+        'package main\n\nimport "flag"\n\nfunc main() {\n    flag.Parse()\n}\n',
+        encoding="utf-8",
+    )
+    (cmd_dir / "commands.go").write_text("package main\n\nfunc runCommand() {}\n", encoding="utf-8")
+    (tmp_path / "commands_test.go").write_text("package main\n\nfunc TestCommands(t *testing.T) {}\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Task CLI\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+    selected = active_planner._select_deterministic_files("help me improve this terminal command", snapshot)
+
+    assert selected[0] == "cmd/taskcli/main.go"
+    assert "cmd/taskcli/commands.go" in selected
+    assert "go.mod" not in selected[:2]
+
+
+def test_llm_plan_for_cli_goal_references_actual_entrypoint(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'taskcli'\n[project.scripts]\ntaskcli = 'taskcli.main:main'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "taskcli"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "main.py").write_text(
+        "import typer\nfrom .tasks import list_tasks\n\napp = typer.Typer()\n\n"
+        "def main():\n    app()\n\nif __name__ == \"__main__\":\n    main()\n",
+        encoding="utf-8",
+    )
+    (src_dir / "tasks.py").write_text("def list_tasks():\n    return []\n", encoding="utf-8")
+    (src_dir / "storage.py").write_text("def load_tasks():\n    return []\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_tasks.py").write_text("def test_tasks():\n    assert True\n", encoding="utf-8")
+    (tests_dir / "test_storage.py").write_text("def test_storage():\n    assert True\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Task CLI\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nstatus\nshow plan\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Current state: CONFIRMATION" in proc.stdout
+    assert "Pending plan: llm_assisted plan with" in proc.stdout
+    assert "Last plan status: awaiting_confirmation" in proc.stdout
+    assert "src/taskcli/main.py" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "src/taskcli/main.py" in session["current_plan"]["files_inspected"]
+    assert "src/taskcli/main.py" in session["current_plan"]["steps"][0]["files"]
 
 
 def test_inspect_project_creates_project_snapshot_and_history(tmp_path: Path) -> None:
@@ -149,7 +289,7 @@ def test_active_mode_rejects_irrelevant_goal_without_creating_plan(tmp_path: Pat
     assert "Planning skipped" in history_path.read_text(encoding="utf-8")
 
 
-def test_broad_developer_goal_with_llm_unavailable_does_not_create_deterministic_plan(tmp_path: Path) -> None:
+def test_broad_developer_goal_with_llm_unavailable_creates_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
         encoding="utf-8",
@@ -170,21 +310,24 @@ def test_broad_developer_goal_with_llm_unavailable_does_not_create_deterministic
     )
 
     assert proc.returncode == 0
-    assert "LLM-assisted planning is unavailable" in proc.stdout
-    assert "I inspected the project, but I did not create a plan" in proc.stdout
-    assert "Apply the smallest project change" not in proc.stdout
-    assert "Current state: IDLE" in proc.stdout
-    assert "Active goal: (none)" in proc.stdout
-    assert "Pending plan: (none)" in proc.stdout
+    assert "Generating deterministic grounded plan from inspected project context" in proc.stdout
+    assert "LLM-assisted planning is unavailable" not in proc.stdout
+    assert "Apply the smallest project change" in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
+    assert "Active goal: help me improve this CLI" in proc.stdout
+    assert "Pending plan: deterministic plan with" in proc.stdout
     assert "Awaiting confirmation: no" in proc.stdout
-    assert "Last skipped goal: help me improve this CLI" in proc.stdout
-    assert "Last skip reason: llm_required_but_unavailable" in proc.stdout
+    assert "Last skipped goal: (none)" in proc.stdout
+    assert "Last skip reason: (none)" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
-    assert "current_plan" not in session
-    assert "last_plan" not in session
+    assert session["current_plan"]["goal"] == "help me improve this CLI"
+    assert session["current_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
+    assert session["last_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
+    assert "last_skipped_goal" not in session
+    assert "last_skip_reason" not in session
 
 
-def test_active_mode_without_llm_capability_does_not_create_llm_plan(tmp_path: Path) -> None:
+def test_active_mode_without_llm_capability_creates_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
         encoding="utf-8",
@@ -205,10 +348,10 @@ def test_active_mode_without_llm_capability_does_not_create_llm_plan(tmp_path: P
     )
 
     assert proc.returncode == 0
-    assert "LLM-assisted planning is unavailable" in proc.stdout
-    assert "Apply the smallest project change" not in proc.stdout
-    assert "Pending plan: (none)" in proc.stdout
-    assert "Last skip reason: llm_required_but_unavailable" in proc.stdout
+    assert "LLM-assisted planning is unavailable" not in proc.stdout
+    assert "Apply the smallest project change" in proc.stdout
+    assert "Pending plan: deterministic plan with" in proc.stdout
+    assert "Last skip reason: (none)" in proc.stdout
 
 
 def test_agent_mode_off_broad_developer_goal_does_not_trigger_planning(tmp_path: Path) -> None:
@@ -349,7 +492,9 @@ def test_valid_project_request_still_works_after_rejection(tmp_path: Path) -> No
     assert proc.returncode == 0
     assert "This request does not appear to be related to the current project." in proc.stdout
     assert "Grounded Plan" in proc.stdout
-    assert "Current state: PLANNING" in proc.stdout or "Current state: CONFIRMATION" in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
+    assert "Last skipped goal: (none)" in proc.stdout
+    assert "Last skip reason: (none)" in proc.stdout
     assert "Last plan status: awaiting_confirmation" in proc.stdout
 
 
@@ -578,6 +723,8 @@ def test_active_shell_status_uses_grounded_plan_label(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert "Pending plan: llm_assisted plan with" in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
+    assert "Last plan status: awaiting_confirmation" in proc.stdout
     assert "agent plan" not in proc.stdout.lower()
 
 
@@ -645,7 +792,7 @@ def test_llm_available_creates_llm_assisted_plan(tmp_path: Path) -> None:
     assert "Event: LLM-assisted plan created" in history
 
 
-def test_no_deterministic_fallback_after_llm_failure(tmp_path: Path) -> None:
+def test_llm_failure_falls_back_to_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
         encoding="utf-8",
@@ -666,15 +813,17 @@ def test_no_deterministic_fallback_after_llm_failure(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "LLM-assisted planning is unavailable" in proc.stdout
-    assert "Apply the smallest project change" not in proc.stdout
-    assert "Pending plan: (none)" in proc.stdout
-    assert "Last skip reason: llm_required_but_unavailable" in proc.stdout
+    assert "LLM-assisted planning is unavailable" not in proc.stdout
+    assert "Generating deterministic grounded plan from inspected project context" in proc.stdout
+    assert "Apply the smallest project change" in proc.stdout
+    assert "Pending plan: deterministic plan with" in proc.stdout
+    assert "Last skip reason: (none)" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
-    assert "current_plan" not in session
-    assert "last_plan" not in session
+    assert session["current_plan"]["goal"] == "help me improve this CLI"
+    assert session["current_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
+    assert session["last_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
     history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
-    assert "Event: Planning skipped" in history
+    assert "Event: Grounded plan created" in history
 
 
 def test_previous_valid_plan_not_confused_with_skipped_request(tmp_path: Path) -> None:
@@ -762,7 +911,7 @@ def test_refine_step_updates_session_and_history_without_execution(tmp_path: Pat
     assert proc.returncode == 0
     assert "Plan refined: step 2 refined." in proc.stdout
     assert "No changes have been applied." in proc.stdout
-    assert "Current state: PLANNING" in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert "focus only on CLI logging" in session["last_plan"]["steps"][1]["description"]
     assert session["last_plan"]["status"] == "awaiting_confirmation"

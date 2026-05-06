@@ -54,6 +54,24 @@ def test_repl_out_of_scope_request_is_declined_without_planning(tmp_path: Path) 
     assert "Type YES to apply, or NO to cancel." not in proc.stdout
 
 
+def test_repl_cancel_without_pending_workflow_returns_to_prompt(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="cancel\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stderr == ""
+    assert "Nothing to cancel." in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "snappy> " in proc.stdout
+
+
 def test_repl_restores_clarification_and_reprompts_without_replanning(tmp_path: Path) -> None:
     session_path = tmp_path / ".snappy" / "memory" / "session.json"
     session_path.parent.mkdir(parents=True)

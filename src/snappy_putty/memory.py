@@ -99,6 +99,8 @@ def save_grounded_plan(root: Path, plan: GroundedPlan, snapshot: ProjectSnapshot
     payload = _session_payload(root)
     payload["current_plan"] = plan_to_payload(plan)
     payload["last_plan"] = plan_to_payload(plan)
+    payload.pop("last_skipped_goal", None)
+    payload.pop("last_skip_reason", None)
     if snapshot is not None:
         payload["project_snapshot"] = snapshot_to_payload(snapshot)
     _write_json(session_path(root), payload)

@@ -19,6 +19,18 @@ def test_get_status_message_uses_mode_pool(monkeypatch) -> None:
     assert any(line in captured["values"] for line in status.MODE_STATUS_LINES["ask"])
 
 
+def test_get_status_message_supports_plan_mode(monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_choice(values: list[str]) -> str:
+        captured["values"] = values
+        return values[0]
+
+    monkeypatch.setattr(status.random, "choice", fake_choice)
+    status.get_status_message("plan")
+    assert any(line in captured["values"] for line in status.MODE_STATUS_LINES["plan"])
+
+
 def test_busy_respects_no_spinner_env(monkeypatch) -> None:
     class _ShouldNotRun:
         def __init__(self, *args, **kwargs) -> None:

@@ -260,6 +260,10 @@ class SessionState:
         self.restore_source = None
         self.clear_active_workflow()
 
+    def clear_skip_metadata(self) -> None:
+        self.last_skipped_goal = None
+        self.last_skip_reason = None
+
     def skip_planning(self, *, goal: str, reason: str, route: str | None = None) -> None:
         self.current_state = LifecycleState.PLANNING_SKIPPED
         self.active_goal = None
