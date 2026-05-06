@@ -34,6 +34,28 @@ def test_cli_help_runs() -> None:
     assert "Snappy PuTTy CLI" in result.stdout
 
 
+def test_cli_help_command_shows_repl_commands() -> None:
+    result = runner.invoke(app, ["help"])
+    assert result.exit_code == 0
+    assert "Workflow" in result.stdout
+    assert "show plan" in result.stdout
+    assert "Display current stored plan" in result.stdout
+    assert "why this plan" in result.stdout
+    assert "Explain current plan" in result.stdout
+    assert "explain step N" in result.stdout
+    assert "Explain one plan step" in result.stdout
+    assert "refine step N" in result.stdout
+    assert "Refine one plan step" in result.stdout
+    assert "show pending" in result.stdout
+    assert "Show parked goal" in result.stdout
+    assert "resume pending" in result.stdout
+    assert "Resume parked goal when IDLE" in result.stdout
+    assert "clear pending" in result.stdout
+    assert "Remove parked goal" in result.stdout
+    assert "cancel" in result.stdout
+    assert "Cancel active workflow" in result.stdout
+
+
 def test_doctor_runs() -> None:
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0

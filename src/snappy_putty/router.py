@@ -23,6 +23,10 @@ ROUTE_INSPECT_STRUCTURE = "inspect_structure"
 ROUTE_INSPECT_FILE = "inspect_file"
 ROUTE_SHOW_SNAPSHOT = "show_snapshot"
 ROUTE_SHOW_PLAN = "show_plan"
+ROUTE_SHOW_PENDING = "show_pending"
+ROUTE_RESUME_PENDING = "resume_pending"
+ROUTE_CLEAR_PENDING = "clear_pending"
+ROUTE_PARK_PENDING = "park_pending"
 ROUTE_WHY_PLAN = "why_plan"
 ROUTE_EXPLAIN_STEP = "explain_step"
 ROUTE_REFINE_PLAN = "refine_plan"
@@ -239,6 +243,14 @@ def classify_input(text: str) -> RouteDecision:
         return RouteDecision(route=ROUTE_SHOW_SNAPSHOT, payload={"text": stripped})
     if lowered == "show plan":
         return RouteDecision(route=ROUTE_SHOW_PLAN, payload={"text": stripped})
+    if lowered == "show pending":
+        return RouteDecision(route=ROUTE_SHOW_PENDING, payload={"text": stripped})
+    if lowered == "resume pending":
+        return RouteDecision(route=ROUTE_RESUME_PENDING, payload={"text": stripped})
+    if lowered == "clear pending":
+        return RouteDecision(route=ROUTE_CLEAR_PENDING, payload={"text": stripped})
+    if lowered in {"park", "park this"}:
+        return RouteDecision(route=ROUTE_PARK_PENDING, payload={"text": stripped})
     if lowered == "why this plan":
         return RouteDecision(route=ROUTE_WHY_PLAN, payload={"text": stripped})
     explain_step_match = _EXPLAIN_STEP_PATTERN.match(stripped)

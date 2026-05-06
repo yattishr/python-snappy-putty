@@ -158,6 +158,40 @@ def load_session_payload(root: Path) -> dict[str, Any]:
     return _session_payload(root)
 
 
+def load_pending_goal(root: Path) -> dict[str, Any] | None:
+    raw = _session_payload(root).get("pending_goal")
+    if not isinstance(raw, dict):
+        return None
+    text = raw.get("text")
+    created_at = raw.get("created_at")
+    reason = raw.get("reason")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if not isinstance(created_at, str):
+        created_at = ""
+    if not isinstance(reason, str):
+        reason = ""
+    return {"text": text, "created_at": created_at, "reason": reason}
+
+
+def save_pending_goal(root: Path, *, text: str, created_at: str, reason: str) -> None:
+    payload = _session_payload(root)
+    payload["pending_goal"] = {
+        "text": text,
+        "created_at": created_at,
+        "reason": reason,
+    }
+    _write_json(session_path(root), payload)
+
+
+def clear_pending_goal(root: Path) -> dict[str, Any] | None:
+    payload = _session_payload(root)
+    pending_goal = load_pending_goal(root)
+    payload.pop("pending_goal", None)
+    _write_json(session_path(root), payload)
+    return pending_goal
+
+
 def save_planning_skipped(
     root: Path,
     *,

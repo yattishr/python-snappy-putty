@@ -1083,3 +1083,162 @@ def test_multiple_refinements_emit_coherence_warning(tmp_path: Path) -> None:
     assert "plan may no longer be coherent after multiple refinements" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert len(session["last_plan"]["refinements"]) == 3
+
+
+def test_new_goal_during_confirmation_does_not_crash_and_can_be_parked(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input=(
+            "help me improve this CLI\n"
+            "help me add logging\n"
+            "show pending\n"
+            "park this\n"
+            "show pending\n"
+            "resume pending\n"
+            "cancel\n"
+            "resume pending\n"
+            "status\n"
+            "exit\n"
+        ),
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "ActiveGoalConflictError" not in proc.stdout
+    assert "A goal is already active:" in proc.stdout
+    assert "I can't start a second goal yet." in proc.stdout
+    assert "Use: park this" in proc.stdout
+    assert "No pending goal." in proc.stdout
+    assert "Goal parked." in proc.stdout
+    assert "Pending goal:\nhelp me add logging" in proc.stdout
+    assert "Cannot resume pending goal while another goal is active." in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
+    assert "Active goal: help me add logging" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "pending_goal" not in session
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Goal conflict detected" in history
+    assert "Event: Goal parked" in history
+    assert "Event: Pending goal resumed" in history
+
+
+def test_new_goal_during_restored_planning_does_not_crash_or_change_state(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "workflow_id": "wf-planning",
+                    "state": "PLANNING",
+                    "goal": "help me improve this CLI",
+                    "route": "ask",
+                    "pending_question": None,
+                    "pending_plan_summary": "llm_assisted plan with 2 step(s)",
+                    "pending_plan_mode": "llm_assisted",
+                    "awaiting_confirmation": False,
+                    "control_state": "allowed",
+                    "context": None,
+                    "pending_question_data": None,
+                    "pending_plan_data": [{"step": 1, "action": "Review CLI", "why": "Existing active plan"}],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me add logging\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "ActiveGoalConflictError" not in proc.stdout
+    assert "A goal is already active:" in proc.stdout
+    assert "Current state: PLANNING" in proc.stdout
+    assert "Active goal: help me improve this CLI" in proc.stdout
+    assert "Pending plan: llm_assisted plan with 2 step(s)" in proc.stdout
+
+
+def test_existing_pending_goal_is_not_silently_overwritten(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input=(
+            "help me improve this CLI\n"
+            "help me add logging\n"
+            "park this\n"
+            "help me add tests\n"
+            "park this\n"
+            "no\n"
+            "show pending\n"
+            "exit\n"
+        ),
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "A pending goal already exists:" in proc.stdout
+    assert "Replace it? [yes/no]" in proc.stdout
+    assert "Pending goal unchanged." in proc.stdout
+    assert "Pending goal:\nhelp me add logging" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["pending_goal"]["text"] == "help me add logging"
+
+
+def test_clear_pending_removes_parked_goal(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nhelp me add logging\npark this\nclear pending\nshow pending\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Pending goal cleared." in proc.stdout
+    assert "No pending goal." in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "pending_goal" not in session

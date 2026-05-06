@@ -897,6 +897,23 @@ def test_repl_help_includes_agent_related_commands(tmp_path: Path) -> None:
     assert "- init" in proc.stdout
     assert "- skills" in proc.stdout
     assert "- rules" in proc.stdout
+    assert "Workflow" in proc.stdout
+    assert "show plan" in proc.stdout
+    assert "Display current stored plan" in proc.stdout
+    assert "why this plan" in proc.stdout
+    assert "Explain current plan" in proc.stdout
+    assert "explain step N" in proc.stdout
+    assert "Explain one plan step" in proc.stdout
+    assert "refine step N" in proc.stdout
+    assert "Refine one plan step" in proc.stdout
+    assert "show pending" in proc.stdout
+    assert "Show parked goal" in proc.stdout
+    assert "resume pending" in proc.stdout
+    assert "Resume parked goal when IDLE" in proc.stdout
+    assert "clear pending" in proc.stdout
+    assert "Remove parked goal" in proc.stdout
+    assert "cancel" in proc.stdout
+    assert "Cancel active workflow" in proc.stdout
 
 
 def test_repl_init_creates_snappy_directory(tmp_path: Path) -> None:

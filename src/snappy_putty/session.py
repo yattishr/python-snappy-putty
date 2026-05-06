@@ -189,6 +189,8 @@ class SessionState:
     active_workflow: ActiveWorkflowSnapshot | None = None
     workflow_restored_from_memory: bool = False
     restore_source: str | None = None
+    last_conflicting_goal: str | None = None
+    pending_goal_replace_candidate: str | None = None
 
     @property
     def has_active_goal(self) -> bool:

@@ -45,16 +45,19 @@ from snappy_putty.fs_models import FsPlan
 from snappy_putty.git_read import execute_git_read, parse_git_read_intent
 from snappy_putty.history import append_history_event
 from snappy_putty.memory import (
+    clear_pending_goal,
     ensure_project_snapshot,
     history_path,
     invalidate_grounded_plan,
     load_grounded_plan,
+    load_pending_goal,
     load_project_snapshot,
     load_current_snapshot_metadata,
     load_or_refresh_snapshot,
     load_session_payload,
     project_snapshot_path,
     save_grounded_plan,
+    save_pending_goal,
     save_planning_skipped,
     save_session_payload,
     snapshot_is_stale,
@@ -95,7 +98,11 @@ from snappy_putty.router import (
     ROUTE_REFRESH_SNAPSHOT,
     ROUTE_SAFE_INSPECT,
     ROUTE_SHOW_PLAN,
+    ROUTE_SHOW_PENDING,
     ROUTE_SHOW_SNAPSHOT,
+    ROUTE_RESUME_PENDING,
+    ROUTE_CLEAR_PENDING,
+    ROUTE_PARK_PENDING,
     ROUTE_WHY_PLAN,
     ROUTE_EXPLAIN_STEP,
     ROUTE_REFINE_PLAN,
@@ -800,6 +807,136 @@ def _has_cancellable_workflow(state: SessionState) -> bool:
     )
 
 
+def _route_starts_goal(route: str) -> bool:
+    return route in {
+        ROUTE_EXPLAIN,
+        ROUTE_FS_MUTATION,
+        ROUTE_GIT_READ,
+        ROUTE_SAFE_INSPECT,
+        ROUTE_ASK,
+    }
+
+
+def _active_goal_text(state: SessionState) -> str:
+    snapshot = _workflow_snapshot(state)
+    return (snapshot.goal if snapshot else state.active_goal) or "(unknown)"
+
+
+def _handle_active_goal_conflict(*, state: SessionState, workspace_root: Path, incoming_goal: str) -> bool:
+    if not state.has_active_goal or state.current_state == LifecycleState.IDLE:
+        return False
+    active_goal = _active_goal_text(state)
+    state.last_conflicting_goal = incoming_goal
+    append_history_event(
+        workspace_root,
+        "Goal conflict detected",
+        {
+            "Active goal": active_goal,
+            "Incoming goal": incoming_goal,
+            "Result": "not_started",
+        },
+    )
+    console.print(
+        "\n".join(
+            [
+                "A goal is already active:",
+                "",
+                active_goal,
+                "",
+                "I can't start a second goal yet.",
+                "",
+                "You can:",
+                "- finish the current goal",
+                "- cancel it",
+                "- park this new request for later",
+                "",
+                "Use: park this",
+            ]
+        )
+    )
+    return True
+
+
+def _pending_goal_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _park_goal_text(*, state: SessionState, workspace_root: Path, goal_text: str) -> None:
+    existing = load_pending_goal(workspace_root)
+    if existing is not None:
+        state.pending_goal_replace_candidate = goal_text
+        console.print(
+            "\n".join(
+                [
+                    "A pending goal already exists:",
+                    "",
+                    existing["text"],
+                    "",
+                    "Replace it? [yes/no]",
+                ]
+            ),
+            markup=False,
+        )
+        return
+    save_pending_goal(
+        workspace_root,
+        text=goal_text,
+        created_at=_pending_goal_timestamp(),
+        reason="active_goal_in_progress",
+    )
+    state.last_conflicting_goal = None
+    append_history_event(workspace_root, "Goal parked", {"Goal": goal_text, "Reason": "active_goal_in_progress"})
+    console.print("Goal parked.")
+
+
+def _handle_pending_goal_replacement_response(*, text: str, state: SessionState, workspace_root: Path) -> bool:
+    if state.pending_goal_replace_candidate is None:
+        return False
+    lowered = text.strip().lower()
+    if lowered not in {"yes", "y", "no", "n"}:
+        console.print("Replace pending goal? [yes/no]", markup=False)
+        return True
+    if lowered in {"no", "n"}:
+        state.pending_goal_replace_candidate = None
+        console.print("Pending goal unchanged.")
+        return True
+    goal_text = state.pending_goal_replace_candidate
+    state.pending_goal_replace_candidate = None
+    save_pending_goal(
+        workspace_root,
+        text=goal_text,
+        created_at=_pending_goal_timestamp(),
+        reason="active_goal_in_progress",
+    )
+    append_history_event(workspace_root, "Goal parked", {"Goal": goal_text, "Reason": "active_goal_in_progress"})
+    console.print("Pending goal replaced.")
+    return True
+
+
+def _show_pending_goal(workspace_root: Path) -> None:
+    pending_goal = load_pending_goal(workspace_root)
+    if pending_goal is None:
+        console.print("No pending goal.")
+        return
+    console.print(
+        "\n".join(
+            [
+                "Pending goal:",
+                pending_goal["text"],
+                f"Reason: {pending_goal['reason']}",
+                f"Created: {pending_goal['created_at']}",
+            ]
+        )
+    )
+
+
+def _clear_pending_goal_command(workspace_root: Path) -> None:
+    pending_goal = clear_pending_goal(workspace_root)
+    if pending_goal is not None:
+        append_history_event(workspace_root, "Pending goal cleared", {"Goal": pending_goal["text"]})
+    console.print("Pending goal cleared.")
+
+
 def _fail_active_goal(state: SessionState, *, message: str) -> None:
     result = _execution_result(state=state, status="failed", message=message, error=message)
     _reflect_execution_result(state, result)
@@ -834,16 +971,25 @@ def print_repl_cheatsheet() -> None:
         ("inspect structure", "Project structure."),
         ("inspect file <p>", "File excerpt."),
         ("show snapshot", "Cached snapshot."),
-        ("show plan", "Cached plan."),
         ("refresh snapshot", "Refresh snapshot."),
         ("explain <command>", "Explain command."),
         ("after", "Next input or step."),
         ("status", "Session status."),
-        ("cancel", "Clear workflow."),
         ("help", "Help panel."),
         ("exit / quit", "Leave shell."),
     ]
+    workflow_commands = [
+        ("show plan", "Display current stored plan"),
+        ("why this plan", "Explain current plan"),
+        ("explain step N", "Explain one plan step"),
+        ("refine step N", "Refine one plan step"),
+        ("show pending", "Show parked goal"),
+        ("resume pending", "Resume parked goal when IDLE"),
+        ("clear pending", "Remove parked goal"),
+        ("cancel", "Cancel active workflow"),
+    ]
     quick_commands_block = _render_compact_command_block(quick_commands, columns=2)
+    workflow_commands_block = _render_command_table(workflow_commands)
     content = "\n".join(
         [
             "[bold]Snappy PuTTy[/bold]",
@@ -857,6 +1003,9 @@ def print_repl_cheatsheet() -> None:
             "",
             "[bold]Quick commands[/bold]",
             quick_commands_block,
+            "",
+            "[bold]Workflow[/bold]",
+            workflow_commands_block,
             "",
             "[bold]Workflow tips[/bold]",
             "- If Snappy asks a question, answer it directly or type 'cancel'.",
@@ -907,6 +1056,11 @@ def _render_compact_command_block(commands: list[tuple[str, str]], *, columns: i
         rows.append("   ".join(top_line))
         rows.append("   ".join(bottom_line))
     return "\n".join(rows)
+
+
+def _render_command_table(commands: list[tuple[str, str]]) -> str:
+    command_width = max(len(name) for name, _ in commands)
+    return "\n".join(f"  {name:<{command_width}}   {description}" for name, description in commands)
 
 
 def _build_agent_summary_lines(cwd: Path | None = None, session_mode: str | None = None) -> list[str]:
@@ -1555,6 +1709,8 @@ def run_shell() -> None:
         if text == "agent":
             _handle_agent_summary(session_mode=state.agent_mode)
             continue
+        if _handle_pending_goal_replacement_response(text=text, state=state, workspace_root=workspace_root):
+            continue
 
         decision = classify_input(text)
         route = decision.route
@@ -1627,6 +1783,32 @@ def run_shell() -> None:
         if route == ROUTE_SHOW_PLAN:
             _show_current_plan(workspace_root)
             continue
+        if route == ROUTE_SHOW_PENDING:
+            _show_pending_goal(workspace_root)
+            continue
+        if route == ROUTE_CLEAR_PENDING:
+            _clear_pending_goal_command(workspace_root)
+            continue
+        if route == ROUTE_PARK_PENDING:
+            if state.last_conflicting_goal is None:
+                console.print("No conflicting goal to park.")
+            else:
+                _park_goal_text(state=state, workspace_root=workspace_root, goal_text=state.last_conflicting_goal)
+            continue
+        if route == ROUTE_RESUME_PENDING:
+            if state.current_state != LifecycleState.IDLE:
+                console.print("Cannot resume pending goal while another goal is active.")
+                continue
+            pending_goal = clear_pending_goal(workspace_root)
+            if pending_goal is None:
+                console.print("No pending goal.")
+                continue
+            append_history_event(workspace_root, "Pending goal resumed", {"Goal": pending_goal["text"]})
+            text = pending_goal["text"]
+            decision = classify_input(text)
+            route = decision.route
+            _debug(f"resumed pending goal input={text!r}")
+            _debug(f"classified route={route}")
         if route == ROUTE_WHY_PLAN:
             _why_current_plan(workspace_root)
             continue
@@ -1653,6 +1835,12 @@ def run_shell() -> None:
             continue
         if text == "rules":
             rules(agent_mode_override=state.agent_mode)
+            continue
+        if _route_starts_goal(route) and _handle_active_goal_conflict(
+            state=state,
+            workspace_root=workspace_root,
+            incoming_goal=decision.payload.get("intent") or decision.payload.get("command") or text,
+        ):
             continue
         if route == ROUTE_UNKNOWN:
             state.last_route = ROUTE_UNKNOWN
@@ -2064,6 +2252,12 @@ def rules(agent_mode_override: str | None = None) -> None:
 def shell() -> None:
     """Start interactive REPL mode."""
     run_shell()
+
+
+@app.command("help")
+def help_command() -> None:
+    """Show the interactive help panel."""
+    print_repl_cheatsheet()
 
 
 def _set_fs_confirmation_state(
