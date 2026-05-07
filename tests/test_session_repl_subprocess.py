@@ -72,6 +72,116 @@ def test_repl_cancel_without_pending_workflow_returns_to_prompt(tmp_path: Path) 
     assert "snappy> " in proc.stdout
 
 
+def test_repl_explain_does_not_create_active_workflow(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="show pending\nexplain git status\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "No pending goal." in proc.stdout
+    assert "A goal is already active:" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    if session_path.exists():
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert "workflow" not in session
+
+
+def test_repl_discards_legacy_restored_explain_workflow(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "workflow_id": "wf-explain",
+                    "state": "PLANNING",
+                    "goal": "git status",
+                    "route": "explain",
+                    "pending_question": None,
+                    "pending_plan_summary": "plan with 3 step(s)",
+                    "awaiting_confirmation": False,
+                    "control_state": "allowed",
+                    "context": None,
+                    "pending_question_data": None,
+                    "pending_plan_data": [{"step": 1, "action": "Explain git status", "why": "Legacy explain workflow"}],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="show pending\nexplain git status\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Discarded stored command explanation workflow; explanations are one-shot." in proc.stdout
+    assert "No pending goal." in proc.stdout
+    assert "A goal is already active:" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    if session_path.exists():
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert "workflow" not in session
+
+
+def test_repl_why_plan_without_plan_stays_idle(tmp_path: Path) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="why plan\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "No active plan to display." in proc.stdout
+    assert "Inspecting project context" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+
+
+def test_repl_status_does_not_warn_for_invalid_project_snapshot(tmp_path: Path) -> None:
+    snapshot_path = tmp_path / ".snappy" / "memory" / "project_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text("{invalid json}\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="status\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Stored project snapshot was invalid and was ignored." not in proc.stdout
+    assert "Stored project snapshot was invalid and was ignored." not in proc.stderr
+    assert "Project snapshot: present" in proc.stdout
+    assert "Snapshot valid: no" in proc.stdout
+
+
 def test_repl_restores_clarification_and_reprompts_without_replanning(tmp_path: Path) -> None:
     session_path = tmp_path / ".snappy" / "memory" / "session.json"
     session_path.parent.mkdir(parents=True)

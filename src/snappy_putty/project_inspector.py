@@ -12,6 +12,7 @@ from typing import Any
 
 _NOISY_DIRS = {
     ".git",
+    ".snappy",
     ".venv",
     "venv",
     "node_modules",
@@ -226,19 +227,36 @@ def _git_metadata(root: Path) -> tuple[str | None, str | None]:
         )
         if status.returncode != 0:
             return branch_name, "unknown"
-        return branch_name, "dirty" if status.stdout.strip() else "clean"
+        status_lines = _snapshot_relevant_git_status_lines(status.stdout)
+        return branch_name, "dirty" if status_lines else "clean"
     except OSError:
         return None, None
+
+
+def _snapshot_relevant_git_status_lines(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.strip() and not _git_status_line_is_snappy_only(line)]
+
+
+def _git_status_line_is_snappy_only(line: str) -> bool:
+    paths = _git_status_paths(line)
+    return bool(paths) and all(path == ".snappy" or path.startswith(".snappy/") for path in paths)
+
+
+def _git_status_paths(line: str) -> list[str]:
+    content = line[3:].strip() if len(line) > 3 else ""
+    if not content:
+        return []
+    if " -> " in content:
+        return [part.strip().strip('"') for part in content.split(" -> ") if part.strip()]
+    return [content.strip('"')]
 
 
 def _iter_project_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for current_root, dirnames, filenames in os.walk(root):
         current_path = Path(current_root)
-        dirnames[:] = [name for name in dirnames if name not in _NOISY_DIRS and not name.startswith(".snappy")]
+        dirnames[:] = [name for name in dirnames if name not in _NOISY_DIRS]
         for filename in filenames:
-            if current_path.name == ".snappy" or ".snappy" in current_path.parts:
-                continue
             path = current_path / filename
             if any(part in _NOISY_DIRS for part in path.parts):
                 continue

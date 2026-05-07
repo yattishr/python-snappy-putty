@@ -65,6 +65,7 @@ class GroundedPlan:
     status: str
     summary: str | None = None
     refinements: list[dict[str, str]] = field(default_factory=list)
+    invalidation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -341,6 +342,7 @@ def build_grounded_plan(
         status="awaiting_confirmation",
         summary=f"Deterministic grounded plan for: {goal.strip()}",
         refinements=[],
+        invalidation_reason=None,
     )
 
 
@@ -440,6 +442,7 @@ def validate_llm_plan(
         status="awaiting_confirmation",
         summary=summary,
         refinements=[],
+        invalidation_reason=None,
     )
     return grounded_plan
 
@@ -537,7 +540,10 @@ def grounded_plan_to_lines(plan: GroundedPlan) -> list[str]:
     else:
         lines.append("- (none)")
 
-    lines.extend(["", f"Status: {plan.status}", "No changes have been applied."])
+    lines.extend(["", f"Status: {plan.status}"])
+    if plan.invalidation_reason:
+        lines.append(f"Invalidation reason: {plan.invalidation_reason}")
+    lines.append("No changes have been applied.")
     if plan.refinements:
         lines.extend(["", "Refinements:"])
         lines.extend(f"- {item.get('change', '(unspecified)')}" for item in plan.refinements)
@@ -578,6 +584,7 @@ def plan_from_payload(payload: Any) -> GroundedPlan:
         status=_require_str(payload, "status"),
         summary=summary,
         refinements=refinements,
+        invalidation_reason=_optional_str(payload, "invalidation_reason"),
     )
 
 
@@ -595,6 +602,7 @@ def invalidate_plan(plan: GroundedPlan, *, reason: str | None = None) -> Grounde
         status="invalidated",
         summary=plan.summary,
         refinements=list(plan.refinements),
+        invalidation_reason=reason,
     )
 
 

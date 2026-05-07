@@ -256,9 +256,153 @@ def test_active_mode_plan_is_invalidated_when_snapshot_changes(tmp_path: Path) -
     )
 
     assert second.returncode == 0
-    assert "Stored plan was based on an outdated project snapshot and was invalidated." in second.stdout
+    assert "Plan invalidated: snapshot_changed" in second.stdout
     updated_session = json.loads(session_path.read_text(encoding="utf-8"))
     assert updated_session["current_plan"]["status"] == "invalidated"
+    assert updated_session["current_plan"]["invalidation_reason"] == "snapshot_changed"
+
+
+def test_history_logging_does_not_invalidate_active_plan_in_git_repo(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=tmp_path, text=True, capture_output=True, timeout=20, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, text=True, capture_output=True, timeout=20, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+
+    create = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        cwd=tmp_path,
+        env=_llm_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    assert create.returncode == 0
+
+    show = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "show", "plan"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert show.returncode == 0
+    assert "Plan invalidated:" not in show.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["current_plan"]["status"] == "awaiting_confirmation"
+
+
+def test_plan_validation_reports_missing_snapshot_reason(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "summarize README.md"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+    (tmp_path / ".snappy" / "memory" / "project_snapshot.json").unlink()
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "show", "plan"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Plan invalidated: missing_snapshot" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["current_plan"]["invalidation_reason"] == "missing_snapshot"
+
+
+def test_plan_validation_reports_snapshot_mismatch_reason(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "summarize README.md"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    session["current_plan"]["based_on_snapshot_id"] = "snap_mismatch"
+    session["last_plan"] = session["current_plan"]
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "show", "plan"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Plan invalidated: plan_snapshot_mismatch" in proc.stdout
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert session["current_plan"]["invalidation_reason"] == "plan_snapshot_mismatch"
+
+
+def test_plan_interaction_commands_share_invalidation_check(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    cli_path = src_dir / "cli.py"
+    cli_path.write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        cwd=tmp_path,
+        env=_llm_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+    cli_path.write_text("print('changed')\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="why this plan\nexplain step 1\nrefine plan keep scope tight\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.count("Plan invalidated: snapshot_changed") == 3
+    assert "Cannot refine an invalidated plan." in proc.stdout
 
 
 def test_active_mode_rejects_irrelevant_goal_without_creating_plan(tmp_path: Path) -> None:
@@ -1122,6 +1266,8 @@ def test_new_goal_during_confirmation_does_not_crash_and_can_be_parked(tmp_path:
     assert "I can't start a second goal yet." in proc.stdout
     assert "Use: park this" in proc.stdout
     assert "No pending goal." in proc.stdout
+    assert "Active goal:\nhelp me improve this CLI" in proc.stdout
+    assert "Unparked request:\nhelp me add logging" in proc.stdout
     assert "Goal parked." in proc.stdout
     assert "Pending goal:\nhelp me add logging" in proc.stdout
     assert "Cannot resume pending goal while another goal is active." in proc.stdout
@@ -1133,6 +1279,42 @@ def test_new_goal_during_confirmation_does_not_crash_and_can_be_parked(tmp_path:
     assert "Event: Goal conflict detected" in history
     assert "Event: Goal parked" in history
     assert "Event: Pending goal resumed" in history
+
+
+def test_show_pending_reports_active_goal_and_unparked_conflict(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input=(
+            "help me add a menu screen\n"
+            "help me delete all files on the filesystem\n"
+            "show pending\n"
+            "exit\n"
+        ),
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "A goal is already active:" in proc.stdout
+    assert "No pending goal." in proc.stdout
+    assert "Active goal:\nhelp me add a menu screen" in proc.stdout
+    assert "State: CONFIRMATION" in proc.stdout
+    assert "Unparked request:\nhelp me delete all files on the filesystem" in proc.stdout
+    assert "Use: park this" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "pending_goal" not in session
 
 
 def test_new_goal_during_restored_planning_does_not_crash_or_change_state(tmp_path: Path) -> None:

@@ -48,7 +48,6 @@ from snappy_putty.memory import (
     clear_pending_goal,
     ensure_project_snapshot,
     history_path,
-    invalidate_grounded_plan,
     load_grounded_plan,
     load_pending_goal,
     load_project_snapshot,
@@ -60,7 +59,7 @@ from snappy_putty.memory import (
     save_pending_goal,
     save_planning_skipped,
     save_session_payload,
-    snapshot_is_stale,
+    validate_active_grounded_plan,
 )
 from snappy_putty.render import (
     block_message_from_decision,
@@ -118,6 +117,7 @@ from snappy_putty.session import (
     ExecutionResult,
     InvalidLifecycleTransition,
     LifecycleState,
+    clear_workflow_snapshot,
     load_workflow_snapshot,
     restore_workflow_snapshot,
     SessionState,
@@ -809,7 +809,6 @@ def _has_cancellable_workflow(state: SessionState) -> bool:
 
 def _route_starts_goal(route: str) -> bool:
     return route in {
-        ROUTE_EXPLAIN,
         ROUTE_FS_MUTATION,
         ROUTE_GIT_READ,
         ROUTE_SAFE_INSPECT,
@@ -913,10 +912,37 @@ def _handle_pending_goal_replacement_response(*, text: str, state: SessionState,
     return True
 
 
-def _show_pending_goal(workspace_root: Path) -> None:
+def _show_pending_goal(workspace_root: Path, state: SessionState | None = None) -> None:
     pending_goal = load_pending_goal(workspace_root)
     if pending_goal is None:
-        console.print("No pending goal.")
+        lines = ["No pending goal."]
+        if state is not None and state.has_active_goal and state.current_state != LifecycleState.IDLE:
+            lines.extend(
+                [
+                    "",
+                    "Active goal:",
+                    _active_goal_text(state),
+                    f"State: {state.current_state.value}",
+                ]
+            )
+            pending_plan = _workflow_pending_plan_summary(state)
+            if pending_plan != "(none)":
+                lines.append(f"Pending plan: {pending_plan}")
+            pending_question = _workflow_pending_question(state)
+            if pending_question != "(none)":
+                lines.append(f"Pending question: {pending_question}")
+            if _workflow_awaiting_confirmation(state):
+                lines.append(f"Awaiting confirmation: {_confirmation_prompt_message(state)}")
+            if state.last_conflicting_goal:
+                lines.extend(
+                    [
+                        "",
+                        "Unparked request:",
+                        state.last_conflicting_goal,
+                        "Use: park this",
+                    ]
+                )
+        console.print("\n".join(lines))
         return
     console.print(
         "\n".join(
@@ -986,7 +1012,7 @@ def print_repl_cheatsheet() -> None:
         ("show pending", "Show parked goal"),
         ("resume pending", "Resume parked goal when IDLE"),
         ("clear pending", "Remove parked goal"),
-        ("cancel", "Cancel active workflow"),
+        ("cancel", "Cancel active workflow. Clear workflow."),
     ]
     quick_commands_block = _render_compact_command_block(quick_commands, columns=2)
     workflow_commands_block = _render_command_table(workflow_commands)
@@ -1361,12 +1387,30 @@ def _plan_interaction_lines(plan: GroundedPlan) -> list[str]:
     if plan.refinements:
         lines.extend(["", "Refinements:"])
         lines.extend(f"- {item.get('timestamp', '(unknown)')}: {item.get('change', '(unspecified)')}" for item in plan.refinements)
-    lines.extend(["", f"Status: {plan.status}", "No changes have been applied."])
+    lines.extend(["", f"Status: {plan.status}"])
+    if plan.invalidation_reason:
+        lines.append(f"Invalidation reason: {plan.invalidation_reason}")
+    lines.append("No changes have been applied.")
     return lines
 
 
 def _render_plan_interaction_report(plan: GroundedPlan, *, title: str = "Plan") -> None:
     console.print(Panel.fit("\n".join(_plan_interaction_lines(plan)), title=title, border_style="bright_blue"))
+
+
+def _plan_invalidated_message(reason: str | None) -> str:
+    return f"Plan invalidated: {reason or 'unknown'}"
+
+
+def _load_checked_grounded_plan(root: Path) -> GroundedPlan | None:
+    plan = load_grounded_plan(root)
+    if plan is None:
+        console.print("No active plan to display.")
+        return None
+    validity = validate_active_grounded_plan(root, plan)
+    if not validity.valid:
+        console.print(_plan_invalidated_message(validity.reason))
+    return validity.plan
 
 
 def _grounded_plan_to_agent_steps(plan: GroundedPlan) -> list[AgentPlanStep]:
@@ -1448,23 +1492,8 @@ def _show_current_snapshot(root: Path) -> ProjectSnapshot:
 
 
 def _show_current_plan(root: Path) -> GroundedPlan | None:
-    plan = load_grounded_plan(root)
+    plan = _load_checked_grounded_plan(root)
     if plan is None:
-        console.print("No active plan to display.")
-        return None
-    snapshot = load_current_snapshot_metadata(root)
-    if snapshot is None:
-        if project_snapshot_path(root).is_file():
-            plan = invalidate_grounded_plan(root, plan, "Project snapshot changed")
-            console.print("Stored plan was based on an outdated project snapshot and was invalidated.")
-        append_history_event(root, "Plan displayed", {"Plan ID": plan.plan_id, "Status": plan.status, "Snapshot status": "missing"})
-        _render_plan_interaction_report(plan, title="Plan")
-        return plan
-    if snapshot_is_stale(root, snapshot) or plan.based_on_snapshot_id != snapshot.snapshot_id:
-        reason = "Project snapshot changed"
-        plan = invalidate_grounded_plan(root, plan, reason)
-        console.print("Stored plan was based on an outdated project snapshot and was invalidated.")
-        _render_plan_interaction_report(plan, title="Plan")
         return plan
     append_history_event(root, "Plan displayed", {"Plan ID": plan.plan_id, "Status": plan.status})
     _render_plan_interaction_report(plan, title="Plan")
@@ -1472,9 +1501,10 @@ def _show_current_plan(root: Path) -> GroundedPlan | None:
 
 
 def _why_current_plan(root: Path) -> GroundedPlan | None:
-    plan = load_grounded_plan(root)
+    plan = _load_checked_grounded_plan(root)
     if plan is None:
-        console.print("No active plan to display.")
+        return None
+    if plan.status == "invalidated":
         return None
     lines = [
         f"Goal: {plan.goal}",
@@ -1502,9 +1532,10 @@ def _why_current_plan(root: Path) -> GroundedPlan | None:
 
 
 def _explain_plan_step(root: Path, raw_step: str) -> GroundedPlan | None:
-    plan = load_grounded_plan(root)
+    plan = _load_checked_grounded_plan(root)
     if plan is None:
-        console.print("No active plan to display.")
+        return None
+    if plan.status == "invalidated":
         return None
     try:
         step_index = int(raw_step)
@@ -1537,9 +1568,8 @@ def _prompt_for_refinement(session: object | None) -> str:
 
 
 def _refine_current_plan(root: Path, *, scope: str, step_text: str | None, change: str | None, session: object | None) -> GroundedPlan | None:
-    plan = load_grounded_plan(root)
+    plan = _load_checked_grounded_plan(root)
     if plan is None:
-        console.print("No active plan to display.")
         return None
     if plan.status == "invalidated":
         console.print("Cannot refine an invalidated plan.")
@@ -1630,6 +1660,10 @@ def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> tup
         return None, restore_result.warning
 
     snapshot = restore_result.snapshot
+    if snapshot.route == ROUTE_EXPLAIN:
+        clear_workflow_snapshot(workspace_root)
+        return "Discarded stored command explanation workflow; explanations are one-shot.", None
+
     state.restore_workflow(snapshot, source_path=restore_result.source_path)
     if snapshot.state in {"EXECUTING", "REFLECTING"}:
         message = f"Previous workflow was interrupted during {snapshot.state.lower()}. It has been marked failed."
@@ -1784,7 +1818,7 @@ def run_shell() -> None:
             _show_current_plan(workspace_root)
             continue
         if route == ROUTE_SHOW_PENDING:
-            _show_pending_goal(workspace_root)
+            _show_pending_goal(workspace_root, state=state)
             continue
         if route == ROUTE_CLEAR_PENDING:
             _clear_pending_goal_command(workspace_root)
@@ -1858,8 +1892,9 @@ def run_shell() -> None:
                 console.print("Usage: explain <command>")
                 continue
             result = handle_explain(command=command, session_mode=state.agent_mode)
-            pending_context = {"type": "ask_followup", "base_intent": command} if result.output.question else {}
-            _record_agent_planning_result(state, route=route, goal=command, result=result, pending_context=pending_context)
+            if state.current_state == LifecycleState.IDLE:
+                state.last_route = route
+                state.last_result = result.output.goal
             continue
 
         if route == ROUTE_FS_MUTATION:
@@ -2546,14 +2581,15 @@ def _handle_status(state: SessionState) -> None:
             f"Error message: {error_message}",
         ]
     )
-    project_snapshot = load_current_snapshot_metadata(root)
+    project_snapshot = load_project_snapshot(root, warn=False)
     snapshot_present = project_snapshot_path(root).is_file()
     snapshot_valid = project_snapshot is not None
     current_plan = load_grounded_plan(root)
-    if current_plan is not None and not snapshot_valid:
-        current_plan = invalidate_grounded_plan(root, current_plan, "Project snapshot changed")
-    if current_plan is not None and project_snapshot is not None and current_plan.based_on_snapshot_id != project_snapshot.snapshot_id:
-        current_plan = invalidate_grounded_plan(root, current_plan, "Project snapshot changed")
+    plan_invalidation_reason = None
+    if current_plan is not None:
+        validity = validate_active_grounded_plan(root, current_plan, warn_snapshot=False)
+        current_plan = validity.plan
+        plan_invalidation_reason = validity.reason
     lines.append(f"Agent mode: {get_agent_mode(state.agent_mode)}")
     lines.append(f"Project snapshot: {'present' if snapshot_present else 'absent'}")
     lines.append(f"Snapshot valid: {'yes' if snapshot_valid else 'no'}")
@@ -2574,6 +2610,8 @@ def _handle_status(state: SessionState) -> None:
         lines.append("Last plan: present")
         lines.append(f"Last plan mode: {current_plan.mode}")
         lines.append(f"Last plan status: {current_plan.status}")
+        if plan_invalidation_reason is not None:
+            lines.append(f"Last plan invalidation reason: {plan_invalidation_reason}")
         lines.append(f"Last plan based on snapshot: {current_plan.based_on_snapshot_id}")
         lines.append(f"Last plan id: {current_plan.plan_id}")
     else:

@@ -251,7 +251,7 @@ def classify_input(text: str) -> RouteDecision:
         return RouteDecision(route=ROUTE_CLEAR_PENDING, payload={"text": stripped})
     if lowered in {"park", "park this"}:
         return RouteDecision(route=ROUTE_PARK_PENDING, payload={"text": stripped})
-    if lowered == "why this plan":
+    if lowered in {"why this plan", "why plan"}:
         return RouteDecision(route=ROUTE_WHY_PLAN, payload={"text": stripped})
     explain_step_match = _EXPLAIN_STEP_PATTERN.match(stripped)
     if explain_step_match:

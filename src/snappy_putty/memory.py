@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
@@ -11,6 +12,18 @@ from snappy_putty.active_planner import GroundedPlan, invalidate_plan, plan_from
 
 
 logger = logging.getLogger(__name__)
+
+PLAN_INVALIDATION_SNAPSHOT_CHANGED = "snapshot_changed"
+PLAN_INVALIDATION_MISSING_SNAPSHOT = "missing_snapshot"
+PLAN_INVALIDATION_PLAN_SNAPSHOT_MISMATCH = "plan_snapshot_mismatch"
+
+
+@dataclass(frozen=True)
+class GroundedPlanValidity:
+    plan: GroundedPlan
+    snapshot: ProjectSnapshot | None
+    valid: bool
+    reason: str | None = None
 
 
 def memory_dir(root: Path) -> Path:
@@ -29,21 +42,24 @@ def history_path(root: Path) -> Path:
     return memory_dir(root) / "history.md"
 
 
-def load_project_snapshot(root: Path) -> ProjectSnapshot | None:
+def load_project_snapshot(root: Path, *, warn: bool = True) -> ProjectSnapshot | None:
     path = project_snapshot_path(root)
     if not path.is_file():
         return None
     payload = _read_json(path)
     if payload is None:
-        logger.warning("Stored project snapshot was invalid and was ignored.")
+        if warn:
+            logger.warning("Stored project snapshot was invalid and was ignored.")
         return None
     try:
         snapshot = snapshot_from_payload(payload)
     except ValueError as exc:
-        logger.warning("Stored project snapshot was invalid and was ignored: %s", exc)
+        if warn:
+            logger.warning("Stored project snapshot was invalid and was ignored: %s", exc)
         return None
     if not is_project_snapshot_valid(root, snapshot):
-        logger.warning("Stored project snapshot was invalid and was ignored.")
+        if warn:
+            logger.warning("Stored project snapshot was invalid and was ignored.")
         return None
     return snapshot
 
@@ -118,6 +134,25 @@ def invalidate_grounded_plan(root: Path, plan: GroundedPlan, reason: str) -> Gro
         },
     )
     return updated
+
+
+def validate_active_grounded_plan(root: Path, plan: GroundedPlan, *, warn_snapshot: bool = True) -> GroundedPlanValidity:
+    if plan.status == "invalidated":
+        return GroundedPlanValidity(plan=plan, snapshot=None, valid=False, reason=plan.invalidation_reason)
+
+    snapshot_path = project_snapshot_path(root)
+    snapshot = load_project_snapshot(root, warn=warn_snapshot)
+    if snapshot is None:
+        reason = PLAN_INVALIDATION_SNAPSHOT_CHANGED if snapshot_path.is_file() else PLAN_INVALIDATION_MISSING_SNAPSHOT
+        updated = invalidate_grounded_plan(root, plan, reason)
+        return GroundedPlanValidity(plan=updated, snapshot=None, valid=False, reason=reason)
+
+    if plan.based_on_snapshot_id != snapshot.snapshot_id:
+        reason = PLAN_INVALIDATION_PLAN_SNAPSHOT_MISMATCH
+        updated = invalidate_grounded_plan(root, plan, reason)
+        return GroundedPlanValidity(plan=updated, snapshot=snapshot, valid=False, reason=reason)
+
+    return GroundedPlanValidity(plan=plan, snapshot=snapshot, valid=True)
 
 
 def load_current_snapshot_metadata(root: Path) -> ProjectSnapshot | None:
