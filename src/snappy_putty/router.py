@@ -24,6 +24,8 @@ ROUTE_INSPECT_STRUCTURE = "inspect_structure"
 ROUTE_INSPECT_FILE = "inspect_file"
 ROUTE_SHOW_SNAPSHOT = "show_snapshot"
 ROUTE_SHOW_PLAN = "show_plan"
+ROUTE_SHOW_LAST_RUN = "show_last_run"
+ROUTE_SHOW_RUNS = "show_runs"
 ROUTE_SHOW_PENDING = "show_pending"
 ROUTE_RESUME_PENDING = "resume_pending"
 ROUTE_CLEAR_PENDING = "clear_pending"
@@ -309,6 +311,10 @@ def classify_input(text: str) -> RouteDecision:
         return RouteDecision(route=ROUTE_SHOW_SNAPSHOT, payload={"text": stripped})
     if lowered == "show plan":
         return RouteDecision(route=ROUTE_SHOW_PLAN, payload={"text": stripped})
+    if lowered == "show last run":
+        return RouteDecision(route=ROUTE_SHOW_LAST_RUN, payload={"text": stripped})
+    if lowered == "show runs":
+        return RouteDecision(route=ROUTE_SHOW_RUNS, payload={"text": stripped})
     if lowered == "show pending":
         return RouteDecision(route=ROUTE_SHOW_PENDING, payload={"text": stripped})
     if lowered == "resume pending":

@@ -17,6 +17,8 @@ from snappy_putty.router import classify_input
         ("status", "builtin_status"),
         ("cancel", "builtin_cancel"),
         ("show pending", "show_pending"),
+        ("show last run", "show_last_run"),
+        ("show runs", "show_runs"),
         ("why plan", "why_plan"),
         ("resume pending", "resume_pending"),
         ("clear pending", "clear_pending"),

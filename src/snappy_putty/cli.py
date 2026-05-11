@@ -78,6 +78,17 @@ from snappy_putty.render import (
 from snappy_putty.project_inspector import ProjectSnapshot, snapshot_from_payload, snapshot_to_payload
 from snappy_putty.rule_hooks import before_agent_mode_change, before_filesystem_mutation_plan_or_execute
 from snappy_putty.rule_hooks import POLICY_HIERARCHY
+from snappy_putty.run_harness import (
+    ActionEnvelope,
+    StepResult,
+    add_action,
+    complete_run,
+    list_runs,
+    load_last_run,
+    record_step,
+    run_path,
+    start_run,
+)
 from snappy_putty.router import (
     ROUTE_ASK,
     ROUTE_BUILTIN_AFTER,
@@ -98,7 +109,9 @@ from snappy_putty.router import (
     ROUTE_REFRESH_SNAPSHOT,
     ROUTE_SAFE_INSPECT,
     ROUTE_SHOW_PLAN,
+    ROUTE_SHOW_LAST_RUN,
     ROUTE_SHOW_PENDING,
+    ROUTE_SHOW_RUNS,
     ROUTE_SHOW_SNAPSHOT,
     ROUTE_RESUME_PENDING,
     ROUTE_CLEAR_PENDING,
@@ -150,6 +163,8 @@ RESERVED_CONTROL_ROUTES = {
     ROUTE_INSPECT_FILE,
     ROUTE_SHOW_SNAPSHOT,
     ROUTE_SHOW_PLAN,
+    ROUTE_SHOW_LAST_RUN,
+    ROUTE_SHOW_RUNS,
     ROUTE_WHY_PLAN,
     ROUTE_EXPLAIN_STEP,
     ROUTE_REFINE_PLAN,
@@ -742,6 +757,118 @@ def _handle_direct_safe_operation(intent: str, workspace_root: Path) -> bool:
     return _handle_direct_safe_read(intent, workspace_root) or _handle_direct_safe_listing(intent)
 
 
+def _direct_safe_action(intent: str) -> ActionEnvelope:
+    lowered = intent.strip().lower()
+    if lowered.startswith("read "):
+        target = intent.strip().split(maxsplit=1)[1].strip("\"'") if len(intent.strip().split(maxsplit=1)) > 1 else None
+        return ActionEnvelope(
+            action_id="action_001",
+            tool="read_file",
+            risk="LOW",
+            scope="read_only",
+            target=target,
+            requires_confirmation=False,
+        )
+    target = _listing_target_for_direct_safe_operation(intent)
+    return ActionEnvelope(
+        action_id="action_001",
+        tool="list_files",
+        risk="LOW",
+        scope="read_only",
+        target=target or ".",
+        requires_confirmation=False,
+    )
+
+
+def _print_run_completion_summary(root: Path, run, *, files_inspected: int = 0, files_modified: int = 0) -> None:
+    if run.result == "success":
+        console.print("")
+        console.print("Run completed.")
+        console.print("")
+        console.print(f"Goal: {run.goal}")
+        console.print("Result: success")
+        console.print(f"Steps executed: {len(run.steps)}")
+        console.print(f"Files inspected: {files_inspected}")
+        console.print(f"Files modified: {files_modified}")
+        console.print(f"Run log: {run_path(root, run.run_id)}")
+        return
+    if run.result == "cancelled":
+        console.print("")
+        console.print("Run cancelled.")
+        console.print("")
+        console.print(f"Goal: {run.goal}")
+        console.print(f"Steps completed before cancellation: {sum(1 for step in run.steps if step.status == 'success')}")
+        console.print(f"Run log: {run_path(root, run.run_id)}")
+        return
+    console.print("")
+    console.print("Run failed.")
+    console.print("")
+    console.print(f"Goal: {run.goal}")
+    failed_step = next((step for step in run.steps if step.status == "failed"), None)
+    if failed_step is not None:
+        console.print(f"Failed step: {failed_step.step_number}")
+        console.print(f"Reason: {failed_step.error or failed_step.summary or 'unknown'}")
+    console.print(f"Run log: {run_path(root, run.run_id)}")
+
+
+def _execute_direct_safe_operation_with_run(intent: str, workspace_root: Path, *, mode: str) -> bool:
+    action = _direct_safe_action(intent)
+    run = start_run(workspace_root, goal=intent, mode=mode)
+    append_history_event(
+        workspace_root,
+        "Run started",
+        {"Run ID": run.run_id, "Goal": intent, "Plan ID": "(none)", "Snapshot ID": "(none)"},
+    )
+    run = add_action(workspace_root, run, action)
+    started_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    handled = _handle_direct_safe_operation(intent, workspace_root)
+    completed_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    if not handled:
+        run = record_step(
+            workspace_root,
+            run,
+            StepResult(
+                step_number=1,
+                description=f"Run direct safe operation: {intent}",
+                action=action.tool,
+                action_id=action.action_id,
+                status="failed",
+                started_at=started_at,
+                completed_at=completed_at,
+                files_touched=[],
+                summary="Direct safe operation was not recognized.",
+                error="unsupported_direct_safe_operation",
+            ),
+        )
+        append_history_event(workspace_root, "Step recorded", {"Run ID": run.run_id, "Step": 1, "Action": action.tool, "Status": "failed"})
+        run = complete_run(workspace_root, run, result="failed", summary="Direct safe operation was not recognized.")
+        append_history_event(workspace_root, "Run completed", {"Run ID": run.run_id, "Result": "failed"})
+        _print_run_completion_summary(workspace_root, run)
+        return False
+    files_inspected = 1 if action.tool == "read_file" else 0
+    run = record_step(
+        workspace_root,
+        run,
+        StepResult(
+            step_number=1,
+            description=f"Run direct safe operation: {intent}",
+            action=action.tool,
+            action_id=action.action_id,
+            status="success",
+            started_at=started_at,
+            completed_at=completed_at,
+            files_touched=[],
+            summary=f"{action.tool} completed successfully.",
+            error=None,
+        ),
+    )
+    append_history_event(workspace_root, "Step recorded", {"Run ID": run.run_id, "Step": 1, "Action": action.tool, "Status": "success"})
+    run = complete_run(workspace_root, run, result="success", summary=f"Run result: success; Action: {action.tool}; Risk: {action.risk}; Files modified: 0")
+    append_history_event(workspace_root, "Run completed", {"Run ID": run.run_id, "Result": "success"})
+    _print_run_completion_summary(workspace_root, run, files_inspected=files_inspected, files_modified=0)
+    return True
+
+
 def _record_direct_safe_operation(root: Path, *, command: str, route: str, result: str = "completed") -> None:
     append_history_event(
         root,
@@ -799,7 +926,7 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goa
                 state.last_route = ROUTE_SAFE_INSPECT
                 state.error_message = None
                 state.sync_active_workflow()
-            _handle_direct_safe_operation(intent, Path.cwd().resolve())
+            _execute_direct_safe_operation_with_run(intent, Path.cwd().resolve(), mode=state.agent_mode)
             _complete_active_goal(state, message=f"Completed safe inspection for: {intent}")
             _record_direct_safe_operation(Path.cwd().resolve(), command=intent, route=ROUTE_SAFE_INSPECT)
             return True
@@ -814,7 +941,10 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goa
         state.last_result = "Awaiting guided listing selection."
         return True
 
-    if _handle_direct_safe_operation(intent, Path.cwd().resolve()):
+    if _listing_target_for_direct_safe_operation(intent) is not None or intent.strip().lower().startswith(("read ", "show tests", "show directory tree")):
+        handled = _execute_direct_safe_operation_with_run(intent, Path.cwd().resolve(), mode=state.agent_mode)
+        if not handled:
+            return False
         if start_new_goal:
             _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
         else:
@@ -913,8 +1043,15 @@ def _execution_result(
 
 
 def _cancel_active_goal(state: SessionState, *, message: str) -> None:
+    root = Path.cwd().resolve()
+    goal = state.active_goal or "(none)"
+    run = start_run(root, goal=goal, mode=state.agent_mode)
+    append_history_event(root, "Run started", {"Run ID": run.run_id, "Goal": goal, "Plan ID": "(none)", "Snapshot ID": "(none)"})
+    run = complete_run(root, run, result="cancelled", summary=message)
+    append_history_event(root, "Run completed", {"Run ID": run.run_id, "Result": "cancelled"})
     result = _execution_result(state=state, status="cancelled", message=message)
     _reflect_execution_result(state, result)
+    _print_run_completion_summary(root, run)
 
 
 def _has_cancellable_workflow(state: SessionState) -> bool:
@@ -1120,6 +1257,8 @@ def print_repl_cheatsheet() -> None:
         ("explain <command>", "Explain command."),
         ("after", "Next input or step."),
         ("status", "Session status."),
+        ("show last run", "Latest run record."),
+        ("show runs", "Recent run records."),
         ("help", "Help panel."),
         ("exit / quit", "Leave shell."),
     ]
@@ -1619,6 +1758,34 @@ def _show_current_plan(root: Path) -> GroundedPlan | None:
     return plan
 
 
+def _show_last_run(root: Path) -> None:
+    run = load_last_run(root)
+    if run is None:
+        console.print("No run records found.")
+        return
+    lines = [
+        f"Run ID: {run.run_id}",
+        f"Goal: {run.goal}",
+        f"Result: {run.result or '(pending)'}",
+        f"Started: {run.started_at}",
+        f"Completed: {run.completed_at or '(not completed)'}",
+        f"Steps: {len(run.steps)}",
+        f"Run log path: {run_path(root, run.run_id)}",
+    ]
+    console.print(Panel.fit("\n".join(lines), title="Last Run", border_style="bright_blue"))
+
+
+def _show_runs(root: Path, *, limit: int = 5) -> None:
+    runs = list_runs(root, limit=limit)
+    if not runs:
+        console.print("No run records found.")
+        return
+    lines = ["Run ID                Result      Goal"]
+    for run in runs:
+        lines.append(f"{run.run_id:<21} {(run.result or '(pending)'):<11} {run.goal}")
+    console.print(Panel.fit("\n".join(lines), title="Runs", border_style="bright_blue"))
+
+
 def _why_current_plan(root: Path) -> GroundedPlan | None:
     plan = _load_checked_grounded_plan(root)
     if plan is None:
@@ -2013,6 +2180,12 @@ def run_shell() -> None:
         if route == ROUTE_SHOW_PLAN:
             _show_current_plan(workspace_root)
             continue
+        if route == ROUTE_SHOW_LAST_RUN:
+            _show_last_run(workspace_root)
+            continue
+        if route == ROUTE_SHOW_RUNS:
+            _show_runs(workspace_root)
+            continue
         if route == ROUTE_SHOW_PENDING:
             _show_pending_goal(workspace_root, state=state)
             continue
@@ -2178,6 +2351,18 @@ def show_plan() -> None:
     _show_current_plan(Path.cwd().resolve())
 
 
+@show_app.command("last-run")
+def show_last_run() -> None:
+    """Show the latest run record."""
+    _show_last_run(Path.cwd().resolve())
+
+
+@show_app.command("runs")
+def show_runs(limit: int = typer.Option(5, "--limit", "-n", min=1, help="Number of recent run records to show.")) -> None:
+    """Show recent run records."""
+    _show_runs(Path.cwd().resolve(), limit=limit)
+
+
 @refresh_app.command("snapshot")
 def refresh_snapshot() -> None:
     """Force a fresh project snapshot."""
@@ -2210,6 +2395,12 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
         return
     if route == ROUTE_BUILTIN_EXIT:
         console.print("Use `snappy shell` for interactive exit/quit controls.")
+        return
+    if route == ROUTE_SHOW_LAST_RUN:
+        _show_last_run(Path.cwd().resolve())
+        return
+    if route == ROUTE_SHOW_RUNS:
+        _show_runs(Path.cwd().resolve())
         return
     if route == ROUTE_DESTRUCTIVE_INTENT:
         state = SessionState()
@@ -2245,7 +2436,12 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
         _handle_git_read(intent=decision.payload.get("intent", intent), workspace_root=Path.cwd().resolve())
         return
     if route == ROUTE_SAFE_INSPECT:
-        if _handle_direct_safe_operation(decision.payload.get("intent", intent), Path.cwd().resolve()):
+        safe_intent = decision.payload.get("intent", intent)
+        safe_lowered = safe_intent.strip().lower()
+        if (
+            _listing_target_for_direct_safe_operation(safe_intent) is not None
+            or safe_lowered.startswith(("read ", "show tests", "show directory tree"))
+        ) and _execute_direct_safe_operation_with_run(safe_intent, Path.cwd().resolve(), mode="direct"):
             _record_direct_safe_operation(Path.cwd().resolve(), command=decision.payload.get("intent", intent), route=ROUTE_SAFE_INSPECT)
             return
     handle_ask(decision.payload.get("intent", intent), session_mode=None)

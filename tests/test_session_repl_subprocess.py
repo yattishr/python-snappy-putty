@@ -718,6 +718,72 @@ def test_show_file_listing_bypasses_planning_in_active_mode(tmp_path: Path) -> N
         session = json.loads(session_path.read_text(encoding="utf-8"))
         assert "last_plan" not in session
         assert "current_plan" not in session
+    runs = sorted((tmp_path / ".snappy" / "runs").glob("run_*.json"))
+    assert len(runs) == 1
+    run = json.loads(runs[0].read_text(encoding="utf-8"))
+    assert run["goal"] == "show file listing"
+    assert run["result"] == "success"
+    assert run["actions"][0]["tool"] == "list_files"
+    assert run["steps"][0]["status"] == "success"
+
+
+def test_show_last_run_and_show_runs_display_run_records(tmp_path: Path) -> None:
+    (tmp_path / "alpha.txt").write_text("demo", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="show file listing\nshow last run\nshow runs\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Run completed." in proc.stdout
+    assert "Last Run" in proc.stdout
+    assert "Run ID:" in proc.stdout
+    assert "Goal: show file listing" in proc.stdout
+    assert "Result: success" in proc.stdout
+    assert "Run log path:" in proc.stdout
+    assert "Runs" in proc.stdout
+    assert "show file listing" in proc.stdout
+
+
+def test_cancel_active_workflow_records_cancelled_run(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+    env["SNAPPY_PUTTY_MOCK_LLM_PLAN"] = "1"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\ncancel\nshow last run\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Run cancelled." in proc.stdout
+    assert "Goal: help me improve this CLI" in proc.stdout
+    assert "Result: cancelled" in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    runs = sorted((tmp_path / ".snappy" / "runs").glob("run_*.json"))
+    assert len(runs) == 1
+    run = json.loads(runs[0].read_text(encoding="utf-8"))
+    assert run["goal"] == "help me improve this CLI"
+    assert run["result"] == "cancelled"
+    assert run["completed_at"] is not None
 
 
 def test_broad_destructive_intent_is_blocked_before_planning(tmp_path: Path) -> None:
