@@ -40,7 +40,7 @@ from snappy_putty.active_planner import (
 )
 from snappy_putty.agent_init import init_agent_project
 from snappy_putty.context import collect_context
-from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
+from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, list_dir, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
 from snappy_putty.git_read import execute_git_read, parse_git_read_intent
 from snappy_putty.history import append_history_event
@@ -86,6 +86,7 @@ from snappy_putty.router import (
     ROUTE_BUILTIN_EXIT,
     ROUTE_BUILTIN_HELP,
     ROUTE_BUILTIN_STATUS,
+    ROUTE_DESTRUCTIVE_INTENT,
     ROUTE_EXPLAIN,
     ROUTE_FS_MUTATION,
     ROUTE_GIT_READ,
@@ -694,8 +695,114 @@ def _record_agent_planning_result(
         state.sync_active_workflow()
 
 
+def _listing_target_for_direct_safe_operation(intent: str) -> str | None:
+    target = _extract_requested_path(intent)
+    if target is not None:
+        return target
+    lowered = intent.strip().lower()
+    if lowered.startswith(("show ", "list ")) and _is_listing_request(intent) and not _listing_request_is_ambiguous(intent):
+        return "."
+    return None
+
+
+def _handle_direct_safe_listing(intent: str) -> bool:
+    target = _listing_target_for_direct_safe_operation(intent)
+    if target is None:
+        return False
+    render_directory_listing(console=console, content=list_dir(target))
+    return True
+
+
+def _handle_direct_safe_read(intent: str, workspace_root: Path) -> bool:
+    match = re.match(r"^\s*read\s+(?P<path>\S+)\s*$", intent, flags=re.IGNORECASE)
+    if match is None:
+        return False
+    raw_path = match.group("path").strip("\"'")
+    candidate = (workspace_root / raw_path).resolve() if not Path(raw_path).is_absolute() else Path(raw_path).resolve()
+    try:
+        candidate.relative_to(workspace_root)
+    except ValueError:
+        console.print("Refusing to inspect a file outside the current project root.")
+        return True
+    if not candidate.is_file():
+        console.print(f"File not found: {raw_path}")
+        return True
+    _print_file_excerpt(candidate, title=f"File: {raw_path}")
+    return True
+
+
+def _handle_direct_safe_operation(intent: str, workspace_root: Path) -> bool:
+    lowered = intent.strip().lower()
+    if lowered == "show tests":
+        render_directory_listing(console=console, content=list_dir("tests"))
+        return True
+    if lowered == "show directory tree":
+        render_directory_listing(console=console, content=list_dir("."))
+        return True
+    return _handle_direct_safe_read(intent, workspace_root) or _handle_direct_safe_listing(intent)
+
+
+def _record_direct_safe_operation(root: Path, *, command: str, route: str, result: str = "completed") -> None:
+    append_history_event(
+        root,
+        "Direct safe operation",
+        {
+            "Command": command,
+            "Route": route,
+            "Result": result,
+            "Workflow state": "reset_to_idle",
+        },
+    )
+
+
+def _handle_destructive_intent(root: Path, state: SessionState, *, intent: str, kind: str, target: str | None = None) -> None:
+    broad = kind != "scoped"
+    reason = "destructive_intent" if broad else "destructive_scoped_operation"
+    state.reset_to_idle_preserving_history()
+    state.last_route = ROUTE_DESTRUCTIVE_INTENT
+    state.last_blocked_goal = intent
+    state.error_message = reason
+    state.last_result = "No action was taken."
+    if broad:
+        console.print("I can't help with deleting all files or wiping a filesystem.")
+        console.print("")
+        console.print("That request is destructive and unsafe.")
+        console.print("")
+        console.print("No action was taken.")
+    else:
+        console.print("This is a destructive scoped operation.")
+        if target:
+            console.print("")
+            console.print(f"Target: {target}")
+        console.print("")
+        console.print("Scoped destructive execution is not supported yet.")
+        console.print("No action was taken.")
+    append_history_event(
+        root,
+        "Destructive intent blocked",
+        {
+            "Goal": intent,
+            "Reason": reason,
+            "Result": "no_action_taken",
+            "Workflow state": "reset_to_idle",
+        },
+    )
+
+
 def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goal: bool = True) -> bool:
     if _is_listing_request(intent) and _extract_requested_path(intent) is None and not _listing_request_is_ambiguous(intent):
+        if _listing_target_for_direct_safe_operation(intent) is not None:
+            if start_new_goal:
+                _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+            else:
+                state.active_goal = intent
+                state.last_route = ROUTE_SAFE_INSPECT
+                state.error_message = None
+                state.sync_active_workflow()
+            _handle_direct_safe_operation(intent, Path.cwd().resolve())
+            _complete_active_goal(state, message=f"Completed safe inspection for: {intent}")
+            _record_direct_safe_operation(Path.cwd().resolve(), command=intent, route=ROUTE_SAFE_INSPECT)
+            return True
         if start_new_goal:
             _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
             _enter_planning(state)
@@ -705,6 +812,18 @@ def _handle_safe_inspect_repl(intent: str, state: SessionState, *, start_new_goa
             pending_context={"type": "guided_listing_choice", "base_intent": intent},
         )
         state.last_result = "Awaiting guided listing selection."
+        return True
+
+    if _handle_direct_safe_operation(intent, Path.cwd().resolve()):
+        if start_new_goal:
+            _begin_goal(state, goal=intent, route=ROUTE_SAFE_INSPECT)
+        else:
+            state.active_goal = intent
+            state.last_route = ROUTE_SAFE_INSPECT
+            state.error_message = None
+            state.sync_active_workflow()
+        _complete_active_goal(state, message=f"Completed safe inspection for: {intent}")
+        _record_direct_safe_operation(Path.cwd().resolve(), command=intent, route=ROUTE_SAFE_INSPECT)
         return True
 
     if start_new_goal:
@@ -1560,11 +1679,71 @@ def _explain_plan_step(root: Path, raw_step: str) -> GroundedPlan | None:
     return plan
 
 
-def _prompt_for_refinement(session: object | None) -> str:
+def _prompt_for_refinement(session: object | None, *, scope: str, step_index: int | None = None) -> str:
     prompt = "refinement> "
+    if scope == "step" and step_index is not None:
+        console.print(f"Refining step {step_index}.")
+        console.print("")
+        console.print("Describe how you want this step adjusted.")
+        console.print("The refinement should stay related to the current goal.")
+        console.print("")
+        console.print("Examples:")
+        console.print("- focus more on validation")
+        console.print("- split this into two smaller steps")
+        console.print("- reduce scope to storage only")
+        console.print("- include edge-case testing")
+        console.print("")
     if session is not None and hasattr(session, "prompt"):
         return str(session.prompt(prompt)).strip()
     return input(prompt).strip()
+
+
+def _classify_refinement_instruction(refinement: str) -> str:
+    lowered = refinement.strip().lower()
+    if not lowered:
+        return "valid_refinement"
+
+    route = classify_input(refinement).route
+    planning_intent = classify_planning_intent(refinement)
+    if route == ROUTE_OUT_OF_SCOPE or planning_intent in {
+        PlanningIntent.CURRENT_INFO_QUESTION,
+        PlanningIntent.GENERAL_KNOWLEDGE_QUESTION,
+        PlanningIntent.UNRELATED_NON_PROJECT_REQUEST,
+    }:
+        return "unrelated_request"
+
+    new_goal_prefixes = (
+        "help me ",
+        "plan ",
+        "build ",
+        "create ",
+        "implement ",
+        "write me ",
+        "give me ",
+        "tell me ",
+        "show me ",
+    )
+    if route == ROUTE_ASK and lowered.startswith(new_goal_prefixes):
+        return "new_goal_attempt"
+
+    return "valid_refinement"
+
+
+def _reject_refinement_instruction(root: Path, plan: GroundedPlan, *, reason: str) -> None:
+    append_history_event(
+        root,
+        "Plan refinement rejected",
+        {"Plan ID": plan.plan_id, "Reason": reason, "Validation": "failed"},
+    )
+    console.print("That looks like a new request, not a refinement instruction.")
+    console.print("")
+    console.print("Refinement should modify the current step.")
+    console.print("Examples:")
+    console.print("- focus on validation")
+    console.print("- split this into two steps")
+    console.print("- reduce scope to storage only")
+    console.print("")
+    console.print("The current plan was not changed.")
 
 
 def _refine_current_plan(root: Path, *, scope: str, step_text: str | None, change: str | None, session: object | None) -> GroundedPlan | None:
@@ -1574,17 +1753,7 @@ def _refine_current_plan(root: Path, *, scope: str, step_text: str | None, chang
     if plan.status == "invalidated":
         console.print("Cannot refine an invalidated plan.")
         return plan
-    refinement = (change or "").strip()
-    if not refinement:
-        refinement = _prompt_for_refinement(session)
-    if not refinement:
-        console.print("Refinement was empty; plan unchanged.")
-        return plan
-    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-    description = "plan refined"
-    updated_steps = list(plan.steps)
-    updated_summary = plan.summary
-    updated_assumptions = list(plan.assumptions)
+    step_index: int | None = None
     if scope == "step":
         if step_text is None:
             console.print("Usage: refine step <n>")
@@ -1594,9 +1763,26 @@ def _refine_current_plan(root: Path, *, scope: str, step_text: str | None, chang
         except ValueError:
             console.print("Usage: refine step <n>")
             return plan
-        if step_index < 1 or step_index > len(updated_steps):
-            console.print(f"Step {step_index} does not exist.")
+        if step_index < 1 or step_index > len(plan.steps):
+            console.print(f"Step {step_index} does not exist. Plan unchanged.")
             return plan
+    refinement = (change or "").strip()
+    if not refinement:
+        refinement = _prompt_for_refinement(session, scope=scope, step_index=step_index)
+    if not refinement:
+        console.print("Refinement was empty; plan unchanged.")
+        return plan
+    refinement_classification = _classify_refinement_instruction(refinement)
+    if refinement_classification != "valid_refinement":
+        _reject_refinement_instruction(root, plan, reason=refinement_classification)
+        return plan
+    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    description = "plan refined"
+    updated_steps = list(plan.steps)
+    updated_summary = plan.summary
+    updated_assumptions = list(plan.assumptions)
+    if scope == "step":
+        assert step_index is not None
         original = updated_steps[step_index - 1]
         updated_steps[step_index - 1] = replace(original, description=f"{original.description} Refinement: {refinement}")
         description = f"step {step_index} refined"
@@ -1750,6 +1936,16 @@ def run_shell() -> None:
         route = decision.route
         _debug(f"raw user input={text!r}")
         _debug(f"classified route={route}")
+
+        if route == ROUTE_DESTRUCTIVE_INTENT:
+            _handle_destructive_intent(
+                workspace_root,
+                state,
+                intent=decision.payload.get("intent", text),
+                kind=decision.payload.get("kind", "broad"),
+                target=decision.payload.get("target"),
+            )
+            continue
 
         if _clarification_input_is_locked(text=text, route=route, state=state):
             _render_clarification_lock_message(state)
@@ -2015,6 +2211,16 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     if route == ROUTE_BUILTIN_EXIT:
         console.print("Use `snappy shell` for interactive exit/quit controls.")
         return
+    if route == ROUTE_DESTRUCTIVE_INTENT:
+        state = SessionState()
+        _handle_destructive_intent(
+            Path.cwd().resolve(),
+            state,
+            intent=decision.payload.get("intent", intent),
+            kind=decision.payload.get("kind", "broad"),
+            target=decision.payload.get("target"),
+        )
+        return
     if route == ROUTE_EXPLAIN:
         command = decision.payload.get("command", "").strip()
         if not command:
@@ -2038,6 +2244,10 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     if route == ROUTE_GIT_READ:
         _handle_git_read(intent=decision.payload.get("intent", intent), workspace_root=Path.cwd().resolve())
         return
+    if route == ROUTE_SAFE_INSPECT:
+        if _handle_direct_safe_operation(decision.payload.get("intent", intent), Path.cwd().resolve()):
+            _record_direct_safe_operation(Path.cwd().resolve(), command=decision.payload.get("intent", intent), route=ROUTE_SAFE_INSPECT)
+            return
     handle_ask(decision.payload.get("intent", intent), session_mode=None)
 
 
@@ -2454,7 +2664,6 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
             return
         state.pending_question = None
         state.update_workflow_context(None)
-        _enter_planning(state)
         _handle_safe_inspect_repl(
             intent=f'give me a file listing for "{selected}"',
             state=state,
@@ -2465,7 +2674,6 @@ def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
     if prompt_kind == "guided_listing_custom_path":
         state.pending_question = None
         state.update_workflow_context(None)
-        _enter_planning(state)
         _handle_safe_inspect_repl(
             intent=f'give me a file listing for "{answer.strip()}"',
             state=state,
@@ -2576,6 +2784,7 @@ def _handle_status(state: SessionState) -> None:
             f"Last cancelled goal: {last_cancelled_goal}",
             f"Last failed goal: {last_failed_goal}",
             f"Last blocked goal: {last_blocked_goal}",
+            f"Block reason: {error_message if last_blocked_goal != '(none)' else '(none)'}",
             f"Last skipped goal: {last_skipped_goal}",
             f"Last skip reason: {last_skip_reason}",
             f"Error message: {error_message}",
@@ -2635,13 +2844,11 @@ def _current_control_state(state: SessionState) -> str:
 def _handle_git_read_repl(intent: str, workspace_root: Path, state: SessionState) -> bool:
     git_intent = parse_git_read_intent(intent)
     _begin_goal(state, goal=intent, route=ROUTE_GIT_READ)
-    _enter_planning(state)
     if git_intent is None:
         _fail_active_goal(state, message="Could not map the Git request to a supported read-only action.")
         render_git_read(console=console, title="Git Read Failed", content="Supported Git reads: status, recent commits, current branch, branches, remotes, diff summary, and show commit <sha>.", ok=False)
         return True
 
-    _set_state(state, LifecycleState.EXECUTING)
     with busy(get_status_message("ask"), console=console):
         result = execute_git_read(git_intent, workspace_root.resolve())
     render_git_read(console=console, title=result.title, content=result.body, ok=result.ok)
@@ -2660,6 +2867,7 @@ def _handle_git_read_repl(intent: str, workspace_root: Path, state: SessionState
     )
     if result.ok:
         _reflect_execution_result(state, execution_result)
+        _record_direct_safe_operation(workspace_root.resolve(), command=intent, route=ROUTE_GIT_READ)
     else:
         _reflect_execution_result(state, execution_result)
     return True

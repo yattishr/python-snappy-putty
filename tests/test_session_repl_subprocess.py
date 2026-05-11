@@ -688,6 +688,125 @@ def test_safe_inspect_success_returns_lifecycle_to_idle(tmp_path: Path) -> None:
     assert "Last completed goal: give me a file listing for the current directory" in proc.stdout
 
 
+def test_show_file_listing_bypasses_planning_in_active_mode(tmp_path: Path) -> None:
+    (tmp_path / "alpha.txt").write_text("demo", encoding="utf-8")
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="show file listing\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Directory Listing" in proc.stdout
+    assert "alpha.txt" in proc.stdout
+    assert "Grounded Plan" not in proc.stdout
+    assert "Inspecting project context" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last route: safe_inspect" in proc.stdout
+    assert "Grounded planning: no" in proc.stdout
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    if session_path.exists():
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert "last_plan" not in session
+        assert "current_plan" not in session
+
+
+def test_broad_destructive_intent_is_blocked_before_planning(tmp_path: Path) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me delete all files on this filesystem\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "I can't help with deleting all files or wiping a filesystem." in proc.stdout
+    assert "No action was taken." in proc.stdout
+    assert "Inspecting project context" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Last blocked goal: help me delete all files on this filesystem" in proc.stdout
+    assert "Block reason: destructive_intent" in proc.stdout
+
+
+def test_rm_rf_root_is_blocked_immediately(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="rm -rf /\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "That request is destructive and unsafe." in proc.stdout
+    assert "Last blocked goal: rm -rf /" in proc.stdout
+    assert "Block reason: destructive_intent" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+
+
+def test_scoped_destructive_request_is_conservatively_blocked(tmp_path: Path) -> None:
+    (tmp_path / ".pytest_cache").mkdir()
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="delete .pytest_cache\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "This is a destructive scoped operation." in proc.stdout
+    assert "Target: .pytest_cache" in proc.stdout
+    assert "No action was taken." in proc.stdout
+    assert (tmp_path / ".pytest_cache").is_dir()
+    assert "Current state: IDLE" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert "Block reason: destructive_scoped_operation" in proc.stdout
+
+
+def test_destructive_preflight_wins_over_planning(tmp_path: Path) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me delete everything then improve this CLI\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "That request is destructive and unsafe." in proc.stdout
+    assert "Inspecting project context" not in proc.stdout
+    assert "Grounded Plan" not in proc.stdout
+    assert "Last blocked goal: help me delete everything then improve this CLI" in proc.stdout
+    assert "Block reason: destructive_intent" in proc.stdout
+
+
 def test_unknown_command_resets_session_to_idle(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],

@@ -14,6 +14,7 @@ ROUTE_BUILTIN_AFTER = "builtin_after"
 ROUTE_BUILTIN_STATUS = "builtin_status"
 ROUTE_BUILTIN_CANCEL = "builtin_cancel"
 ROUTE_EXPLAIN = "explain"
+ROUTE_DESTRUCTIVE_INTENT = "destructive_or_high_risk_intent"
 ROUTE_FS_MUTATION = "fs_mutation"
 ROUTE_GIT_READ = "git_read"
 ROUTE_SAFE_INSPECT = "safe_inspect"
@@ -42,6 +43,36 @@ _REFINE_STEP_PATTERN = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _REFINE_PLAN_PATTERN = re.compile(r"^\s*refine\s+plan(?:\s+(?P<change>.+))?\s*$", flags=re.IGNORECASE | re.DOTALL)
+_DESTRUCTIVE_VERBS = (
+    "delete",
+    "remove",
+    "wipe",
+    "erase",
+    "destroy",
+    "drop",
+    "purge",
+    "overwrite",
+    "reset hard",
+    "force push",
+    "rm -rf",
+    "clean",
+)
+_BROAD_DESTRUCTIVE_TARGETS = (
+    "all files",
+    "everything",
+    "filesystem",
+    "root",
+    "home directory",
+    "repo",
+    "repository",
+    "project",
+    "production",
+    "database",
+    ".env",
+    "secrets",
+    "credentials",
+)
+_UNSAFE_SCOPED_TARGETS = {"/", "~", "$home", "..", ".env", ".git"}
 
 
 @dataclass(frozen=True)
@@ -56,9 +87,40 @@ def _is_safe_inspection_intent(text: str) -> bool:
     has_path_noun = any(token in lowered for token in ("file", "files", "directory", "directories", "folder", "folders"))
     if has_list_verb and has_path_noun:
         return True
+    if lowered in {"show directory tree", "show tests"}:
+        return True
+    if re.match(r"^\s*read\s+\S+", lowered):
+        return True
     if "git worktree" in lowered and any(token in lowered for token in ("list", "listing", "show")):
         return True
     return False
+
+
+def _destructive_intent_payload(text: str) -> dict[str, str] | None:
+    stripped = text.strip()
+    lowered = stripped.lower()
+    if not lowered:
+        return None
+
+    matched_verb = next((verb for verb in _DESTRUCTIVE_VERBS if re.search(rf"\b{re.escape(verb)}\b", lowered)), None)
+    if matched_verb is None:
+        return None
+
+    if matched_verb == "clean" and not any(target in lowered for target in ("build", "dist", "output", "cache", "temp", "temporary")):
+        return None
+
+    if "rm -rf" in lowered and re.search(r"rm\s+-rf\s+/(?:\s|$)", lowered):
+        return {"intent": stripped, "kind": "broad", "reason": "destructive_intent"}
+
+    if any(target in lowered for target in _BROAD_DESTRUCTIVE_TARGETS):
+        return {"intent": stripped, "kind": "broad", "reason": "destructive_intent"}
+
+    tokens = re.split(r"\s+", stripped)
+    target = tokens[-1].strip("\"'") if tokens else ""
+    if target.lower() in _UNSAFE_SCOPED_TARGETS or target.startswith("/"):
+        return {"intent": stripped, "kind": "broad", "reason": "destructive_intent", "target": target}
+
+    return {"intent": stripped, "kind": "scoped", "reason": "destructive_scoped_operation", "target": target}
 
 
 def _is_supported_ask_intent(text: str) -> bool:
@@ -229,6 +291,10 @@ def _is_out_of_scope_intent(text: str) -> bool:
 def classify_input(text: str) -> RouteDecision:
     stripped = text.strip()
     lowered = stripped.lower()
+
+    destructive_payload = _destructive_intent_payload(stripped)
+    if destructive_payload is not None:
+        return RouteDecision(route=ROUTE_DESTRUCTIVE_INTENT, payload=destructive_payload)
 
     if lowered == "inspect project":
         return RouteDecision(route=ROUTE_INSPECT_PROJECT, payload={"text": stripped})

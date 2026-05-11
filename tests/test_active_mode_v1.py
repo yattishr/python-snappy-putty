@@ -1053,6 +1053,10 @@ def test_refine_step_updates_session_and_history_without_execution(tmp_path: Pat
     )
 
     assert proc.returncode == 0
+    assert "Refining step 2." in proc.stdout
+    assert "Describe how you want this step adjusted." in proc.stdout
+    assert "The refinement should stay related to the current goal." in proc.stdout
+    assert "refinement>" in proc.stdout
     assert "Plan refined: step 2 refined." in proc.stdout
     assert "No changes have been applied." in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
@@ -1063,6 +1067,161 @@ def test_refine_step_updates_session_and_history_without_execution(tmp_path: Pat
     history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
     assert "Event: Plan refined" in history
     assert "Change: step 2 refined: focus only on CLI logging" in history
+
+
+def test_direct_safe_inspection_does_not_overwrite_existing_plan(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    create = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+        check=True,
+    )
+    assert create.returncode == 0
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    before = json.loads(session_path.read_text(encoding="utf-8"))
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="show file listing\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Directory Listing" in proc.stdout
+    assert "Grounded Plan" not in proc.stdout
+    after = json.loads(session_path.read_text(encoding="utf-8"))
+    assert after["last_plan"] == before["last_plan"]
+    assert after["current_plan"] == before["current_plan"]
+
+
+def test_refine_step_inline_refinement_does_not_show_prompt(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nrefine step 2 focus more on validation\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Refining step 2." not in proc.stdout
+    assert "Describe how you want this step adjusted." not in proc.stdout
+    assert "Plan refined: step 2 refined." in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "focus more on validation" in session["last_plan"]["steps"][1]["description"]
+
+
+def test_refine_step_out_of_range_leaves_state_unchanged(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    create = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+        check=True,
+    )
+    assert create.returncode == 0
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    before = json.loads(session_path.read_text(encoding="utf-8"))
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="refine step 99\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Step 99 does not exist. Plan unchanged." in proc.stdout
+    assert "Current state:" in proc.stdout
+    after = json.loads(session_path.read_text(encoding="utf-8"))
+    assert after["last_plan"] == before["last_plan"]
+    assert after["current_plan"] == before["current_plan"]
+
+
+def test_refine_step_rejects_new_goal_prompt_input_and_leaves_plan_unchanged(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    create = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+        check=True,
+    )
+    assert create.returncode == 0
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    before = json.loads(session_path.read_text(encoding="utf-8"))
+
+    reject = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="refine step 2\nhelp me build a starship\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert reject.returncode == 0
+    assert "That looks like a new request, not a refinement instruction." in reject.stdout
+    assert "The current plan was not changed." in reject.stdout
+    after = json.loads(session_path.read_text(encoding="utf-8"))
+    assert after["last_plan"] == before["last_plan"]
+    assert after["current_plan"] == before["current_plan"]
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Plan refinement rejected" in history
+    assert "Reason: new_goal_attempt" in history
+    assert "Validation: failed" in history
 
 
 def test_refine_plan_updates_session_without_adding_files(tmp_path: Path) -> None:
@@ -1281,7 +1440,7 @@ def test_new_goal_during_confirmation_does_not_crash_and_can_be_parked(tmp_path:
     assert "Event: Pending goal resumed" in history
 
 
-def test_show_pending_reports_active_goal_and_unparked_conflict(tmp_path: Path) -> None:
+def test_destructive_preflight_clears_active_goal_instead_of_parking_conflict(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
         encoding="utf-8",
@@ -1307,13 +1466,12 @@ def test_show_pending_reports_active_goal_and_unparked_conflict(tmp_path: Path) 
     )
 
     assert proc.returncode == 0
-    assert "A goal is already active:" in proc.stdout
+    assert "A goal is already active:" not in proc.stdout
+    assert "That request is destructive and unsafe." in proc.stdout
+    assert "No action was taken." in proc.stdout
     assert "No pending goal." in proc.stdout
-    assert "Active goal:\nhelp me add a menu screen" in proc.stdout
-    assert "State: CONFIRMATION" in proc.stdout
-    assert "Unparked request:\nhelp me delete all files on the filesystem" in proc.stdout
-    assert "Use: park this" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "workflow" not in session
     assert "pending_goal" not in session
 
 
