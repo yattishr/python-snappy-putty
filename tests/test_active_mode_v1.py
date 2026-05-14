@@ -369,7 +369,7 @@ def test_plan_validation_reports_snapshot_mismatch_reason(tmp_path: Path) -> Non
     assert session["current_plan"]["invalidation_reason"] == "plan_snapshot_mismatch"
 
 
-def test_plan_interaction_commands_share_invalidation_check(tmp_path: Path) -> None:
+def test_why_this_plan_is_read_only_but_other_plan_commands_validate(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
         encoding="utf-8",
@@ -401,7 +401,8 @@ def test_plan_interaction_commands_share_invalidation_check(tmp_path: Path) -> N
     )
 
     assert proc.returncode == 0
-    assert proc.stdout.count("Plan invalidated: snapshot_changed") == 3
+    assert proc.stdout.count("Plan invalidated: snapshot_changed") == 2
+    assert "LLM-backed plan rationale is unavailable." in proc.stdout
     assert "Cannot refine an invalidated plan." in proc.stdout
 
 
@@ -896,15 +897,62 @@ def test_plan_interaction_show_why_and_explain_step(tmp_path: Path) -> None:
     assert "Goal: help me improve this CLI" in proc.stdout
     assert "Mode:" in proc.stdout
     assert "Snapshot ID:" in proc.stdout
-    assert "Why files were selected:" in proc.stdout
-    assert "Why steps exist:" in proc.stdout
+    assert "Why these files" in proc.stdout
+    assert "Trade-offs" in proc.stdout
+    assert "Remaining uncertainty" in proc.stdout
     assert "What it does:" in proc.stdout
     assert "Files touched:" in proc.stdout
     assert "Risk level:" in proc.stdout
     history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
     assert "Event: Plan displayed" in history
-    assert "Event: Plan explained" in history
+    assert "Event: Plan rationale requested" in history
+    assert "Mode: llm_assisted" in history
     assert "Event: Step explained" in history
+
+
+def test_why_this_plan_falls_back_without_llm_and_is_read_only(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    create = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+        check=True,
+    )
+    assert create.returncode == 0
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    before = json.loads(session_path.read_text(encoding="utf-8"))
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="why this plan\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_unavailable_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "LLM-backed plan rationale is unavailable." in proc.stdout
+    assert "I can show the stored plan metadata" in proc.stdout
+    assert "Why these files:" in proc.stdout
+    after = json.loads(session_path.read_text(encoding="utf-8"))
+    assert after["current_plan"] == before["current_plan"]
+    assert after["last_plan"] == before["last_plan"]
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Plan rationale requested" in history
+    assert "Mode: metadata_fallback" in history
 
 
 def test_llm_available_creates_llm_assisted_plan(tmp_path: Path) -> None:
@@ -1222,6 +1270,79 @@ def test_refine_step_rejects_new_goal_prompt_input_and_leaves_plan_unchanged(tmp
     assert "Event: Plan refinement rejected" in history
     assert "Reason: new_goal_attempt" in history
     assert "Validation: failed" in history
+
+
+def test_refine_step_rejected_prompt_stays_open_and_accepts_next_refinement(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    create = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me improve this CLI"],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+        check=True,
+    )
+    assert create.returncode == 0
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    before = json.loads(session_path.read_text(encoding="utf-8"))
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="refine step 2\nhelp me build a starship\nfocus only on task validation and bad input handling\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.count("refinement>") >= 2
+    assert "That looks like a new request, not a refinement instruction." in proc.stdout
+    assert "Plan refined: step 2 refined." in proc.stdout
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert session.get("last_failed_goal") is None
+    assert session["last_plan"]["steps"][0] == before["last_plan"]["steps"][0]
+    assert "help me build a starship" not in json.dumps(session["last_plan"])
+    assert "focus only on task validation and bad input handling" in session["last_plan"]["steps"][1]["description"]
+
+
+def test_refine_step_back_exits_refinement_without_cancelling_workflow(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
+        encoding="utf-8",
+    )
+    src_dir = tmp_path / "src" / "snappy_putty"
+    src_dir.mkdir(parents=True)
+    (src_dir / "cli.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this CLI\nrefine step 2\nback\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Exited refinement mode. Plan unchanged." in proc.stdout
+    assert "Current state: CONFIRMATION" in proc.stdout
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    after = json.loads(session_path.read_text(encoding="utf-8"))
+    assert after["current_plan"]["status"] == "awaiting_confirmation"
+    assert after["last_plan"]["refinements"] == []
 
 
 def test_refine_plan_updates_session_without_adding_files(tmp_path: Path) -> None:

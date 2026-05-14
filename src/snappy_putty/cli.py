@@ -31,10 +31,12 @@ from snappy_putty.active_planner import (
     PlanningMode,
     assess_project_relevance,
     build_grounded_plan,
+    build_llm_plan_rationale_prompt,
     build_llm_prompt,
     classify_planning_intent,
     classify_planning_mode,
     create_llm_assisted_plan,
+    default_llm_rationale_client,
     grounded_plan_to_lines,
     validate_plan_integrity,
 )
@@ -1786,33 +1788,92 @@ def _show_runs(root: Path, *, limit: int = 5) -> None:
     console.print(Panel.fit("\n".join(lines), title="Runs", border_style="bright_blue"))
 
 
-def _why_current_plan(root: Path) -> GroundedPlan | None:
-    plan = _load_checked_grounded_plan(root)
-    if plan is None:
-        return None
-    if plan.status == "invalidated":
-        return None
+def _snapshot_summary_for_rationale(snapshot: ProjectSnapshot | None) -> str:
+    if snapshot is None:
+        return "(no active snapshot available)"
+    return "\n".join(
+        [
+            f"Snapshot ID: {snapshot.snapshot_id}",
+            f"Root: {snapshot.root_path}",
+            f"Languages: {', '.join(snapshot.languages) if snapshot.languages else '(none)'}",
+            f"Package managers: {', '.join(snapshot.package_managers) if snapshot.package_managers else '(none)'}",
+            f"Frameworks/tools: {', '.join(snapshot.frameworks) if snapshot.frameworks else '(none)'}",
+            f"Entry points: {', '.join(snapshot.entry_points) if snapshot.entry_points else '(none)'}",
+            f"Config files: {', '.join(snapshot.config_files[:8]) if snapshot.config_files else '(none)'}",
+            f"Docs: {', '.join(snapshot.docs[:8]) if snapshot.docs else '(none)'}",
+            f"Tests: {', '.join(snapshot.test_files[:8]) if snapshot.test_files else '(none)'}",
+            f"Sampled files: {', '.join(snapshot.sampled_files[:8]) if snapshot.sampled_files else '(none)'}",
+        ]
+    )
+
+
+def _metadata_plan_rationale_lines(plan: GroundedPlan) -> list[str]:
     lines = [
-        f"Goal: {plan.goal}",
-        f"Planning mode: {plan.mode}",
-        f"Snapshot ID: {plan.based_on_snapshot_id}",
+        "Why these files:",
+        *(f"- {item}: included in the stored plan context for this goal." for item in plan.files_inspected or ["(none)"]),
         "",
-        "Why files were selected:",
+        "Why this order:",
     ]
-    if plan.files_inspected:
-        lines.extend(f"- {item}: referenced by the stored plan as project context for this goal." for item in plan.files_inspected)
-    else:
-        lines.append("- (none)")
-    lines.extend(["", "Why steps exist:"])
     if plan.steps:
         for index, step in enumerate(plan.steps, start=1):
             touched = ", ".join(step.files) if step.files else "(none)"
-            lines.append(f"{index}. {step.description}")
-            lines.append(f"   Reason: stored step for progressing toward the goal; files={touched}; risk={step.risk}.")
+            lines.append(f"- Step {index}: {step.description} (files={touched}; risk={step.risk})")
     else:
-        lines.append("1. (none)")
-    lines.extend(["", "Assumptions:", *(f"- {item}" for item in plan.assumptions or ["(none)"])])
-    append_history_event(root, "Plan explained", {"Plan ID": plan.plan_id, "Mode": plan.mode})
+        lines.append("- (none)")
+    lines.extend(
+        [
+            "",
+            "Trade-offs:",
+            "- Metadata fallback can describe stored plan structure but cannot infer deeper planning intent.",
+            "",
+            "Alternatives avoided:",
+            "- Broader alternatives are not inferred without LLM rationale.",
+            "",
+            "Project evidence:",
+            *(f"- {item}" for item in plan.files_inspected or ["(none)"]),
+            "",
+            "Remaining uncertainty:",
+            *(f"- {item}" for item in plan.risks or ["(none)"]),
+        ]
+    )
+    return lines
+
+
+def _why_current_plan(root: Path, *, session_mode: str | None = None) -> GroundedPlan | None:
+    plan = load_grounded_plan(root)
+    if plan is None:
+        console.print("No active plan to display.")
+        return None
+    if plan.status == "invalidated":
+        console.print(_plan_invalidated_message(plan.invalidation_reason))
+        return None
+    client = default_llm_rationale_client(session_mode=session_mode)
+    mode = "metadata_fallback"
+    if get_agent_mode(session_mode) == "active" and client is not None:
+        snapshot = load_project_snapshot(root)
+        prompt = build_llm_plan_rationale_prompt(
+            goal=plan.goal,
+            plan=plan,
+            selected_files=list(plan.files_inspected),
+            snapshot_summary=_snapshot_summary_for_rationale(snapshot),
+        )
+        try:
+            rationale = client.explain_plan(prompt)
+        except LLMPlannerUnavailableError:
+            rationale = ""
+        if rationale:
+            mode = "llm_assisted"
+            append_history_event(root, "Plan rationale requested", {"Plan ID": plan.plan_id, "Mode": mode})
+            console.print(Panel.fit(rationale, title="Why This Plan", border_style="bright_blue"))
+            return plan
+    lines = [
+        "LLM-backed plan rationale is unavailable.",
+        "",
+        "I can show the stored plan metadata, but I can't provide a deeper rationale right now.",
+        "",
+        *_metadata_plan_rationale_lines(plan),
+    ]
+    append_history_event(root, "Plan rationale requested", {"Plan ID": plan.plan_id, "Mode": mode})
     console.print(Panel.fit("\n".join(lines), title="Why This Plan", border_style="bright_blue"))
     return plan
 
@@ -1933,78 +1994,89 @@ def _refine_current_plan(root: Path, *, scope: str, step_text: str | None, chang
         if step_index < 1 or step_index > len(plan.steps):
             console.print(f"Step {step_index} does not exist. Plan unchanged.")
             return plan
+    prompted = not (change or "").strip()
     refinement = (change or "").strip()
-    if not refinement:
-        refinement = _prompt_for_refinement(session, scope=scope, step_index=step_index)
-    if not refinement:
-        console.print("Refinement was empty; plan unchanged.")
-        return plan
-    refinement_classification = _classify_refinement_instruction(refinement)
-    if refinement_classification != "valid_refinement":
-        _reject_refinement_instruction(root, plan, reason=refinement_classification)
-        return plan
-    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-    description = "plan refined"
-    updated_steps = list(plan.steps)
-    updated_summary = plan.summary
-    updated_assumptions = list(plan.assumptions)
-    if scope == "step":
-        assert step_index is not None
-        original = updated_steps[step_index - 1]
-        updated_steps[step_index - 1] = replace(original, description=f"{original.description} Refinement: {refinement}")
-        description = f"step {step_index} refined"
-    else:
-        updated_summary = f"{plan.summary or plan.goal} Refinement: {refinement}"
-        updated_assumptions.append(f"User refinement: {refinement}")
-    updated_refinements = [*plan.refinements, {"timestamp": timestamp, "change": description}]
-    updated_plan = replace(
-        plan,
-        steps=updated_steps,
-        assumptions=updated_assumptions,
-        summary=updated_summary,
-        status="awaiting_confirmation",
-        refinements=updated_refinements,
-    )
-    snapshot = load_current_snapshot_metadata(root)
-    if snapshot is None:
-        append_history_event(
-            root,
-            "Plan refinement rejected",
-            {"Plan ID": plan.plan_id, "Reason": "missing_or_invalid_snapshot", "Validation": "failed"},
+    while True:
+        if not refinement:
+            refinement = _prompt_for_refinement(session, scope=scope, step_index=step_index)
+        if not refinement:
+            console.print("Refinement was empty; plan unchanged.")
+            return plan
+        if prompted and refinement.lower() in {"cancel", "exit", "back"}:
+            console.print("Exited refinement mode. Plan unchanged.")
+            return plan
+        refinement_classification = _classify_refinement_instruction(refinement)
+        if refinement_classification != "valid_refinement":
+            _reject_refinement_instruction(root, plan, reason=refinement_classification)
+            if prompted:
+                refinement = ""
+                continue
+            return plan
+        timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        description = "plan refined"
+        updated_steps = list(plan.steps)
+        updated_summary = plan.summary
+        updated_assumptions = list(plan.assumptions)
+        if scope == "step":
+            assert step_index is not None
+            original = updated_steps[step_index - 1]
+            updated_steps[step_index - 1] = replace(original, description=f"{original.description} Refinement: {refinement}")
+            description = f"step {step_index} refined"
+        else:
+            updated_summary = f"{plan.summary or plan.goal} Refinement: {refinement}"
+            updated_assumptions.append(f"User refinement: {refinement}")
+        updated_refinements = [*plan.refinements, {"timestamp": timestamp, "change": description}]
+        updated_plan = replace(
+            plan,
+            steps=updated_steps,
+            assumptions=updated_assumptions,
+            summary=updated_summary,
+            status="awaiting_confirmation",
+            refinements=updated_refinements,
         )
-        console.print("Refinement rejected.")
-        console.print("")
-        console.print("Reason:")
-        console.print("- missing or invalid project snapshot")
-        console.print("")
-        console.print("No changes were applied to the plan.")
-        return plan
-    validation = validate_plan_integrity(updated_plan, snapshot, original_plan=plan, refinement_text=refinement)
-    if not validation.valid:
-        reason = validation.errors[0] if validation.errors else "plan integrity validation failed"
-        append_history_event(
-            root,
-            "Plan refinement rejected",
-            {"Plan ID": plan.plan_id, "Reason": reason, "Validation": "failed"},
-        )
-        console.print("Refinement rejected.")
-        console.print("")
-        console.print("Reason:")
-        for error in validation.errors:
-            console.print(f"- {error}")
-        console.print("")
-        console.print("No changes were applied to the plan.")
-        return plan
-    save_grounded_plan(root, updated_plan)
-    append_history_event(root, "Plan refined", {"Plan ID": plan.plan_id, "Change": f"{description}: {refinement}", "Validation": "passed"})
-    console.print(f"Plan refined: {description}.")
-    if validation.warnings:
-        console.print("Warning:")
-        for warning in validation.warnings:
-            console.print(f"- {warning}")
-        console.print("You can continue refining or revert.")
-    console.print("No changes have been applied.")
-    return updated_plan
+        snapshot = load_current_snapshot_metadata(root)
+        if snapshot is None:
+            append_history_event(
+                root,
+                "Plan refinement rejected",
+                {"Plan ID": plan.plan_id, "Reason": "missing_or_invalid_snapshot", "Validation": "failed"},
+            )
+            console.print("Refinement rejected.")
+            console.print("")
+            console.print("Reason:")
+            console.print("- missing or invalid project snapshot")
+            console.print("")
+            console.print("No changes were applied to the plan.")
+            return plan
+        validation = validate_plan_integrity(updated_plan, snapshot, original_plan=plan, refinement_text=refinement)
+        if not validation.valid:
+            reason = validation.errors[0] if validation.errors else "plan integrity validation failed"
+            append_history_event(
+                root,
+                "Plan refinement rejected",
+                {"Plan ID": plan.plan_id, "Reason": reason, "Validation": "failed"},
+            )
+            console.print("Refinement rejected.")
+            console.print("")
+            console.print("Reason:")
+            for error in validation.errors:
+                console.print(f"- {error}")
+            console.print("")
+            console.print("No changes were applied to the plan.")
+            if prompted:
+                refinement = ""
+                continue
+            return plan
+        save_grounded_plan(root, updated_plan)
+        append_history_event(root, "Plan refined", {"Plan ID": plan.plan_id, "Change": f"{description}: {refinement}", "Validation": "passed"})
+        console.print(f"Plan refined: {description}.")
+        if validation.warnings:
+            console.print("Warning:")
+            for warning in validation.warnings:
+                console.print(f"- {warning}")
+            console.print("You can continue refining or revert.")
+        console.print("No changes have been applied.")
+        return updated_plan
 
 
 def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> tuple[str | None, str | None]:
@@ -2213,7 +2285,7 @@ def run_shell() -> None:
             _debug(f"resumed pending goal input={text!r}")
             _debug(f"classified route={route}")
         if route == ROUTE_WHY_PLAN:
-            _why_current_plan(workspace_root)
+            _why_current_plan(workspace_root, session_mode=state.agent_mode)
             continue
         if route == ROUTE_EXPLAIN_STEP:
             _explain_plan_step(workspace_root, decision.payload.get("step", ""))

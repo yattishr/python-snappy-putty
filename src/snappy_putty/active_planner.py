@@ -79,6 +79,10 @@ class LLMPlannerClient(Protocol):
     def create_plan(self, prompt: str) -> dict[str, Any]: ...
 
 
+class LLMRationaleClient(Protocol):
+    def explain_plan(self, prompt: str) -> str: ...
+
+
 class LLMPlannerUnavailableError(RuntimeError):
     pass
 
@@ -641,6 +645,63 @@ def build_llm_prompt(goal: str, snapshot: ProjectSnapshot) -> str:
     )
 
 
+def build_llm_plan_rationale_prompt(
+    *,
+    goal: str,
+    plan: GroundedPlan,
+    selected_files: list[str],
+    snapshot_summary: str,
+) -> str:
+    steps = "\n".join(
+        f"{index}. {step.description}\n"
+        f"   files: {', '.join(step.files) if step.files else '(none)'}\n"
+        f"   risk: {step.risk}"
+        for index, step in enumerate(plan.steps, start=1)
+    ) or "1. (none)"
+    return (
+        "You are assisting Snappy PuTTy, a supervised agentic CLI.\n\n"
+        "Explain why the stored plan was chosen. Do not create, refine, or execute a plan.\n"
+        "Use only the provided stored plan metadata and project snapshot summary.\n"
+        "Return concise plain text with these headings:\n"
+        "Why these files\n"
+        "Why this order\n"
+        "Trade-offs\n"
+        "Alternatives avoided\n"
+        "Project evidence\n"
+        "Remaining uncertainty\n\n"
+        f"User goal:\n{goal}\n\n"
+        f"Selected files:\n{', '.join(selected_files) if selected_files else '(none)'}\n\n"
+        f"Snapshot summary:\n{snapshot_summary}\n\n"
+        "Stored plan:\n"
+        f"Plan ID: {plan.plan_id}\n"
+        f"Mode: {plan.mode}\n"
+        f"Status: {plan.status}\n"
+        f"Summary: {plan.summary}\n"
+        f"Assumptions: {'; '.join(plan.assumptions) if plan.assumptions else '(none)'}\n"
+        f"Risks: {'; '.join(plan.risks) if plan.risks else '(none)'}\n"
+        f"Steps:\n{steps}\n"
+    )
+
+
+def default_llm_rationale_client(session_mode: str | None = None) -> LLMRationaleClient | None:
+    if os.getenv("SNAPPY_PUTTY_MOCK_LLM_FAILURE") == "1":
+        return _FailingLLMRationaleClient()
+    if os.getenv("SNAPPY_PUTTY_MOCK_LLM_PLAN") == "1":
+        return _MockLLMRationaleClient()
+    if get_agent_mode(session_mode) != "active":
+        return None
+    from snappy_putty import agent as agent_module
+
+    if not agent_module.is_llm_available(session_mode=session_mode):
+        return None
+    if agent_module.Agent is None or agent_module.Runner is None:
+        return None
+    try:
+        return _AgentsLLMRationaleClient(Agent=agent_module.Agent, Runner=agent_module.Runner)
+    except Exception as exc:
+        raise LLMPlannerUnavailableError(f"LLM-backed plan rationale could not initialize: {exc}") from exc
+
+
 def default_llm_planner_client(session_mode: str | None = None) -> LLMPlannerClient | None:
     if os.getenv("SNAPPY_PUTTY_MOCK_LLM_FAILURE") == "1":
         return _FailingLLMPlannerClient()
@@ -684,6 +745,26 @@ class _AgentsLLMPlannerClient:
             raise LLMPlanValidationError("LLM planner returned invalid JSON.") from exc
 
 
+class _AgentsLLMRationaleClient:
+    def __init__(self, *, Agent: Any, Runner: Any) -> None:
+        self._runner = Runner
+        self._agent = Agent(
+            name="Snappy PuTTy Plan Rationale",
+            instructions=(
+                "Explain the rationale for an already stored plan. "
+                "Do not generate new plans, suggest execution, or claim state changes."
+            ),
+            model=os.getenv("SNAPPY_PUTTY_MODEL", DEFAULT_OPENAI_MODEL),
+        )
+
+    def explain_plan(self, prompt: str) -> str:
+        try:
+            result = asyncio.run(self._runner.run(self._agent, prompt))
+        except Exception as exc:
+            raise LLMPlannerUnavailableError("LLM-backed plan rationale is unavailable.") from exc
+        return str(result.final_output).strip()
+
+
 def _extract_json(text: str) -> str:
     fenced_json = re.search(r"```json\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
     if fenced_json:
@@ -701,6 +782,33 @@ def _extract_json(text: str) -> str:
 class _FailingLLMPlannerClient:
     def create_plan(self, prompt: str) -> dict[str, Any]:
         raise LLMPlannerUnavailableError("LLM-assisted planning is unavailable.")
+
+
+class _FailingLLMRationaleClient:
+    def explain_plan(self, prompt: str) -> str:
+        raise LLMPlannerUnavailableError("LLM-backed plan rationale is unavailable.")
+
+
+class _MockLLMRationaleClient:
+    def explain_plan(self, prompt: str) -> str:
+        goal_match = re.search(r"User goal:\n(?P<goal>.*?)\n\nSelected files:", prompt, flags=re.DOTALL)
+        files_match = re.search(r"Selected files:\n(?P<files>.*?)\n\nSnapshot summary:", prompt, flags=re.DOTALL)
+        goal = goal_match.group("goal").strip() if goal_match else "the stored goal"
+        files = files_match.group("files").strip() if files_match else "(none)"
+        return (
+            "Why these files\n"
+            f"The selected files ({files}) are the concrete project evidence attached to the stored plan for {goal}.\n\n"
+            "Why this order\n"
+            "The plan starts with review/context work before focused changes so later steps are constrained by existing implementation details.\n\n"
+            "Trade-offs\n"
+            "It favors a narrow, inspectable path over broad rewrites or speculative file creation.\n\n"
+            "Alternatives avoided\n"
+            "Broader changes were avoided because the stored plan only has evidence for the selected files and known risks.\n\n"
+            "Project evidence\n"
+            "The rationale is based on the snapshot summary, selected files, assumptions, risks, and stored plan steps.\n\n"
+            "Remaining uncertainty\n"
+            "The exact implementation details remain uncertain until the files are inspected and tests are run."
+        )
 
 
 class _MockLLMPlannerClient:
