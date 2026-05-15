@@ -13,6 +13,14 @@ from typing import Any, Protocol
 
 from snappy_putty.agent import DEFAULT_OPENAI_MODEL
 from snappy_putty.agent_discovery import get_agent_mode
+from snappy_putty.context_discovery import (
+    ContextDiscoveryResult,
+    RepoMap,
+    SelectedContextFile,
+    SufficiencyResult,
+    build_llm_context_prompt,
+    discover_context,
+)
 from snappy_putty.project_inspector import ProjectSnapshot, is_project_snapshot_valid
 
 
@@ -66,6 +74,7 @@ class GroundedPlan:
     summary: str | None = None
     refinements: list[dict[str, str]] = field(default_factory=list)
     invalidation_reason: str | None = None
+    context_selection: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -347,6 +356,7 @@ def build_grounded_plan(
         summary=f"Deterministic grounded plan for: {goal.strip()}",
         refinements=[],
         invalidation_reason=None,
+        context_selection=None,
     )
 
 
@@ -356,6 +366,7 @@ def create_llm_assisted_plan(
     *,
     client: LLMPlannerClient | None = None,
     session_mode: str | None = None,
+    progress: Any | None = None,
 ) -> GroundedPlan:
     planner_client = client or default_llm_planner_client(session_mode=session_mode)
     if planner_client is None:
@@ -363,15 +374,29 @@ def create_llm_assisted_plan(
             "LLM-assisted planning is unavailable. Deterministic planning and inspection remain available."
         )
 
-    prompt = build_llm_prompt(goal, snapshot)
+    context_bundle = discover_context(
+        goal,
+        snapshot,
+        sufficiency_checker=_sufficiency_checker_for_client(planner_client),
+        progress=progress,
+    )
+    if not context_bundle.sufficiency.get("final_sufficient", False):
+        raise LLMPlanValidationError(
+            f"I could not gather enough grounded context to create a reliable implementation plan. {context_bundle.sufficiency.get('reason', '')}".strip()
+        )
+    _emit_progress(progress, "Generating grounded plan...")
+    prompt = build_llm_prompt(goal, snapshot, context_bundle=context_bundle)
     raw_response = planner_client.create_plan(prompt)
-    return validate_llm_plan(raw_response, snapshot, Path(snapshot.root_path))
+    _emit_progress(progress, "Validating plan...")
+    return validate_llm_plan(raw_response, snapshot, Path(snapshot.root_path), context_selection=context_bundle.metadata())
 
 
 def validate_llm_plan(
     raw_plan: dict[str, Any] | LLMPlanResponse,
     snapshot: ProjectSnapshot,
     project_root: Path,
+    *,
+    context_selection: dict[str, Any] | None = None,
 ) -> GroundedPlan:
     if not is_project_snapshot_valid(project_root, snapshot):
         raise LLMPlanValidationError("Project snapshot is stale.")
@@ -447,6 +472,7 @@ def validate_llm_plan(
         summary=summary,
         refinements=[],
         invalidation_reason=None,
+        context_selection=context_selection if context_selection is not None else _optional_dict(payload, "context_selection"),
     )
     return grounded_plan
 
@@ -589,6 +615,7 @@ def plan_from_payload(payload: Any) -> GroundedPlan:
         summary=summary,
         refinements=refinements,
         invalidation_reason=_optional_str(payload, "invalidation_reason"),
+        context_selection=_optional_dict(payload, "context_selection"),
     )
 
 
@@ -607,11 +634,17 @@ def invalidate_plan(plan: GroundedPlan, *, reason: str | None = None) -> Grounde
         summary=plan.summary,
         refinements=list(plan.refinements),
         invalidation_reason=reason,
+        context_selection=plan.context_selection,
     )
 
 
-def build_llm_prompt(goal: str, snapshot: ProjectSnapshot) -> str:
-    relevant_files = ", ".join(_select_deterministic_files(goal, snapshot)) or "(none)"
+def build_llm_prompt(goal: str, snapshot: ProjectSnapshot, context_bundle: ContextDiscoveryResult | None = None) -> str:
+    if context_bundle is None:
+        relevant_files = ", ".join(_select_deterministic_files(goal, snapshot)) or "(none)"
+        context_text = "Bounded context bundle: (not available)\n\n"
+    else:
+        relevant_files = ", ".join(item.path for item in context_bundle.selected_context) or "(none)"
+        context_text = "Bounded context bundle:\n" + build_llm_context_prompt(context_bundle) + "\n\n"
     project_summary = _project_summary(snapshot)
     return (
         "You are assisting Snappy PuTTy, a supervised agentic CLI.\n\n"
@@ -625,6 +658,7 @@ def build_llm_prompt(goal: str, snapshot: ProjectSnapshot) -> str:
         f"Project snapshot id:\n{snapshot.snapshot_id}\n\n"
         f"Project summary:\n{project_summary}\n\n"
         f"Relevant files:\n{relevant_files}\n\n"
+        f"{context_text}"
         "Return JSON with this shape:\n"
         "{\n"
         '  "goal": string,\n'
@@ -671,6 +705,7 @@ def build_llm_plan_rationale_prompt(
         "Remaining uncertainty\n\n"
         f"User goal:\n{goal}\n\n"
         f"Selected files:\n{', '.join(selected_files) if selected_files else '(none)'}\n\n"
+        f"Context selection metadata:\n{json.dumps(plan.context_selection or {}, indent=2)}\n\n"
         f"Snapshot summary:\n{snapshot_summary}\n\n"
         "Stored plan:\n"
         f"Plan ID: {plan.plan_id}\n"
@@ -744,6 +779,17 @@ class _AgentsLLMPlannerClient:
         except json.JSONDecodeError as exc:
             raise LLMPlanValidationError("LLM planner returned invalid JSON.") from exc
 
+    def check_context_sufficiency(self, prompt: str) -> dict[str, Any]:
+        try:
+            result = asyncio.run(self._runner.run(self._agent, prompt))
+        except Exception as exc:
+            raise LLMPlannerUnavailableError("LLM-assisted context sufficiency check is unavailable.") from exc
+        final_output = str(result.final_output)
+        try:
+            return json.loads(_extract_json(final_output))
+        except json.JSONDecodeError as exc:
+            raise LLMPlanValidationError("LLM context sufficiency check returned invalid JSON.") from exc
+
 
 class _AgentsLLMRationaleClient:
     def __init__(self, *, Agent: Any, Runner: Any) -> None:
@@ -812,17 +858,29 @@ class _MockLLMRationaleClient:
 
 
 class _MockLLMPlannerClient:
+    def check_context_sufficiency(self, prompt: str) -> dict[str, Any]:
+        files = re.findall(r'"path":\s*"([^"]+)"', prompt)
+        sufficient = bool(files)
+        return {
+            "sufficient": sufficient,
+            "reason": "Mock sufficiency check found selected context." if sufficient else "No selected files were provided.",
+            "missing_context_queries": [],
+            "files_to_read_next": [],
+        }
+
     def create_plan(self, prompt: str) -> dict[str, Any]:
         goal_match = re.search(r"User goal:\n(?P<goal>.*?)\n\nProject snapshot id:", prompt, flags=re.DOTALL)
         snapshot_match = re.search(r"Project snapshot id:\n(?P<snapshot>\S+)", prompt)
-        files_match = re.search(r"Relevant files:\n(?P<files>.*?)\n\nReturn JSON", prompt, flags=re.DOTALL)
+        files_match = re.search(r"Relevant files:\n(?P<files>.*?)\n\nBounded context bundle:", prompt, flags=re.DOTALL)
+        if files_match is None:
+            files_match = re.search(r"Relevant files:\n(?P<files>.*?)\n\nReturn JSON", prompt, flags=re.DOTALL)
         goal = goal_match.group("goal").strip() if goal_match else "Improve the project"
         snapshot_id = snapshot_match.group("snapshot").strip() if snapshot_match else ""
         files_text = files_match.group("files").strip() if files_match else ""
         files = [item.strip() for item in files_text.split(",") if item.strip() and item.strip() != "(none)"]
         if not files:
             files = ["README.md"]
-        primary_files = files[:3]
+        primary_files = _mock_primary_plan_files(goal, files)
         return {
             "goal": goal,
             "summary": f"Grounded LLM-assisted plan for: {goal}",
@@ -847,6 +905,66 @@ class _MockLLMPlannerClient:
             "risks": ["Mock LLM plan is limited to the selected project context."],
             "assumptions": ["Only files provided in the planning context are in scope."],
         }
+
+
+def _mock_primary_plan_files(goal: str, files: list[str]) -> list[str]:
+    lowered = goal.lower()
+    if not any(term in lowered for term in ("cli", "command", "terminal")):
+        return files[:3]
+    entrypoints = [
+        path
+        for path in files
+        if Path(path).name in {"cli.py", "main.py", "app.py", "commands.py", "cli.js", "main.js", "index.js", "main.go", "main.rs"}
+    ]
+    anchors = [path for path in files if Path(path).suffix.lower() in {".md", ".toml", ".json"}]
+    tests = [path for path in files if "/test" in f"/{path}".lower() or Path(path).name.lower().startswith("test_")]
+    selected = _dedupe_list([*entrypoints, *tests, *anchors, *files])
+    return selected[:3]
+
+
+def build_context_sufficiency_prompt(goal: str, repo_map: RepoMap, selected: list[SelectedContextFile]) -> str:
+    repo_summary = {
+        "languages": repo_map.languages,
+        "files": [{"path": item.path, "kind": item.kind, "role_hints": item.role_hints} for item in repo_map.files],
+        "entrypoint_candidates": repo_map.entrypoint_candidates,
+        "tests": repo_map.tests,
+        "docs": repo_map.docs,
+        "configs": repo_map.configs,
+    }
+    return (
+        "Given the user goal, repo map summary, and selected file summaries, decide whether this is enough context "
+        "to create a grounded implementation plan. This is not the final plan. Return strict JSON only with keys "
+        "sufficient, reason, missing_context_queries, files_to_read_next. Only request files that exist in the repo map.\n\n"
+        f"User goal:\n{goal}\n\n"
+        f"Repo map summary:\n{json.dumps(repo_summary, indent=2)}\n\n"
+        f"Selected file summaries:\n{json.dumps([asdict(item) for item in selected], indent=2)}\n"
+    )
+
+
+def _sufficiency_checker_for_client(client: LLMPlannerClient) -> Any | None:
+    checker = getattr(client, "check_context_sufficiency", None)
+    if checker is None:
+        return None
+
+    def _check(goal: str, repo_map: RepoMap, selected: list[SelectedContextFile]) -> SufficiencyResult:
+        raw = checker(build_context_sufficiency_prompt(goal, repo_map, selected))
+        if not isinstance(raw, dict):
+            raise LLMPlanValidationError("LLM context sufficiency check must return a JSON object.")
+        known = {item.path for item in repo_map.files}
+        files = [item for item in _coerce_optional_str_list(raw.get("files_to_read_next", []), "files_to_read_next") if item in known]
+        return SufficiencyResult(
+            sufficient=bool(raw.get("sufficient")),
+            reason=str(raw.get("reason") or ""),
+            missing_context_queries=_coerce_optional_str_list(raw.get("missing_context_queries", []), "missing_context_queries"),
+            files_to_read_next=files,
+        )
+
+    return _check
+
+
+def _emit_progress(progress: Any | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
 
 
 def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[str]:
@@ -1127,6 +1245,19 @@ def _require_str_list(payload: dict[str, Any], field_name: str, *, required: boo
     return result
 
 
+def _coerce_optional_str_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise LLMPlanValidationError(f"{field_name} must be a list")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise LLMPlanValidationError(f"{field_name} must contain strings only")
+        result.append(item)
+    return result
+
+
 def _require_refinements(value: Any) -> list[dict[str, str]]:
     if value is None:
         return []
@@ -1344,6 +1475,15 @@ def _optional_str(payload: dict[str, Any], field_name: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a string when present")
+    return value
+
+
+def _optional_dict(payload: dict[str, Any], field_name: str) -> dict[str, Any] | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object when present")
     return value
 
 

@@ -15,14 +15,19 @@ _NOISY_DIRS = {
     ".snappy",
     ".venv",
     "venv",
+    "env",
     "node_modules",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
     "dist",
     "build",
+    "coverage",
     ".next",
+    ".nuxt",
     ".cache",
+    "vendor",
+    "target",
 }
 
 _CONFIG_FILES = {

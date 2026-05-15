@@ -188,6 +188,10 @@ _COMMAND_SHAPED_PREFIXES = (
 )
 
 
+def emit_progress(message: str) -> None:
+    console.print(f"[dim]{message}[/dim]")
+
+
 def _non_project_skip_reason(intent: str) -> str:
     planning_intent = classify_planning_intent(intent)
     if planning_intent == PlanningIntent.CURRENT_INFO_QUESTION:
@@ -1808,9 +1812,17 @@ def _snapshot_summary_for_rationale(snapshot: ProjectSnapshot | None) -> str:
 
 
 def _metadata_plan_rationale_lines(plan: GroundedPlan) -> list[str]:
+    context_files = []
+    if plan.context_selection:
+        for item in plan.context_selection.get("files", []):
+            if isinstance(item, dict):
+                context_files.append(
+                    f"- {item.get('path', '(unknown)')}: {item.get('reason', 'selected by bounded context discovery')} "
+                    f"(score={item.get('score', 0)}, role={item.get('role', 'file')})"
+                )
     lines = [
         "Why these files:",
-        *(f"- {item}: included in the stored plan context for this goal." for item in plan.files_inspected or ["(none)"]),
+        *(context_files or (f"- {item}: included in the stored plan context for this goal." for item in plan.files_inspected or ["(none)"])),
         "",
         "Why this order:",
     ]
@@ -1831,6 +1843,10 @@ def _metadata_plan_rationale_lines(plan: GroundedPlan) -> list[str]:
             "",
             "Project evidence:",
             *(f"- {item}" for item in plan.files_inspected or ["(none)"]),
+        "",
+            "Context expansion:",
+            f"- Expanded: {bool(plan.context_selection and plan.context_selection.get('expanded'))}",
+            f"- Sufficiency: {(plan.context_selection or {}).get('sufficiency', {}).get('reason', '(not recorded)')}",
             "",
             "Remaining uncertainty:",
             *(f"- {item}" for item in plan.risks or ["(none)"]),
@@ -2544,8 +2560,17 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
         related, relevance_reason = assess_project_relevance(intent, snapshot)
-        console.print("Inspecting project context...")
+        emit_progress("Inspecting project context...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
+        append_history_event(
+            root,
+            "Context discovery started",
+            {
+                "Goal": intent,
+                "Snapshot ID": snapshot.snapshot_id,
+                "Strategy": "bounded_context_discovery_v1",
+            },
+        )
         if planning_intent in {
             PlanningIntent.GENERAL_KNOWLEDGE_QUESTION,
             PlanningIntent.CURRENT_INFO_QUESTION,
@@ -2604,8 +2629,8 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         try:
             with busy(get_status_message("plan"), console=console):
                 if planning_mode == PlanningMode.LLM_ASSISTED:
-                    plan = create_llm_assisted_plan(intent, snapshot, session_mode=session_mode)
-                    console.print("Generating LLM-assisted grounded plan...")
+                    emit_progress("Generating LLM-assisted grounded plan...")
+                    plan = create_llm_assisted_plan(intent, snapshot, session_mode=session_mode, progress=emit_progress)
                 else:
                     plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
         except LLMPlannerUnavailableError as exc:
@@ -2650,6 +2675,27 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 plan_mode=None,
             )
         save_grounded_plan(root, plan, snapshot)
+        if plan.context_selection:
+            append_history_event(
+                root,
+                "Context selected",
+                {
+                    "Goal": plan.goal,
+                    "Snapshot ID": plan.based_on_snapshot_id,
+                    "Files": [item.get("path", "") for item in plan.context_selection.get("files", [])],
+                    "Sufficiency": plan.context_selection.get("sufficiency", {}).get("final_sufficient"),
+                },
+            )
+            if plan.context_selection.get("expanded"):
+                append_history_event(
+                    root,
+                    "Context expanded",
+                    {
+                        "Goal": plan.goal,
+                        "Added files": [item.get("path", "") for item in plan.context_selection.get("files", [])[12:]],
+                        "Reason": plan.context_selection.get("sufficiency", {}).get("reason", ""),
+                    },
+                )
         event_name = "LLM-assisted plan created" if plan.mode == PlanningMode.LLM_ASSISTED.value else "Grounded plan created"
         append_history_event(
             root,
