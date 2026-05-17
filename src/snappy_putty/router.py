@@ -54,6 +54,7 @@ _DESTRUCTIVE_VERBS = (
     "drop",
     "purge",
     "overwrite",
+    "reset",
     "reset hard",
     "force push",
     "rm -rf",
@@ -75,6 +76,24 @@ _BROAD_DESTRUCTIVE_TARGETS = (
     "credentials",
 )
 _UNSAFE_SCOPED_TARGETS = {"/", "~", "$home", "..", ".env", ".git"}
+_BROAD_CLEANUP_PHRASES = (
+    "clean the entire filesystem",
+    "clean entire filesystem",
+    "clean the whole filesystem",
+    "clean whole filesystem",
+    "clean the entire machine",
+    "clean entire machine",
+    "clean everything",
+    "clean all files",
+    "clean all data",
+    "wipe environment",
+    "reset the environment",
+    "reset environment",
+    "reset everything",
+    "remove all artifacts",
+    "delete all artifacts",
+    "purge all artifacts",
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +126,9 @@ def _destructive_intent_payload(text: str) -> dict[str, str] | None:
     matched_verb = next((verb for verb in _DESTRUCTIVE_VERBS if re.search(rf"\b{re.escape(verb)}\b", lowered)), None)
     if matched_verb is None:
         return None
+
+    if any(phrase in lowered for phrase in _BROAD_CLEANUP_PHRASES):
+        return {"intent": stripped, "kind": "cleanup_broad", "reason": "destructive_intent"}
 
     if matched_verb == "clean" and not any(target in lowered for target in ("build", "dist", "output", "cache", "temp", "temporary")):
         return None

@@ -811,6 +811,44 @@ def test_broad_destructive_intent_is_blocked_before_planning(tmp_path: Path) -> 
     assert "Block reason: destructive_intent" in proc.stdout
 
 
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "help me clean the entire filesystem",
+        "reset the environment",
+        "clean everything",
+        "remove all artifacts",
+    ],
+)
+def test_cleanup_reset_destructive_intent_is_blocked_before_planning(tmp_path: Path, intent: str) -> None:
+    env = _repl_env()
+    env["SNAPPY_AGENT_MODE"] = "active"
+    env["SNAPPY_PUTTY_MOCK_LLM_PLAN"] = "1"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input=f"{intent}\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "I can't help with cleaning, deleting, or wiping an entire filesystem." in proc.stdout
+    assert "That request is destructive and unsafe." in proc.stdout
+    assert "No action was taken." in proc.stdout
+    assert "Inspecting project context" not in proc.stdout
+    assert "Building repo map" not in proc.stdout
+    assert "Grounded Plan" not in proc.stdout
+    assert "Current state: IDLE" in proc.stdout
+    assert "Active goal: (none)" in proc.stdout
+    assert "Pending plan: (none)" in proc.stdout
+    assert f"Last blocked goal: {intent}" in proc.stdout
+    assert "Block reason: destructive_intent" in proc.stdout
+
+
 def test_rm_rf_root_is_blocked_immediately(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],

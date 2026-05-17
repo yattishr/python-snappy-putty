@@ -897,7 +897,10 @@ def _handle_destructive_intent(root: Path, state: SessionState, *, intent: str, 
     state.error_message = reason
     state.last_result = "No action was taken."
     if broad:
-        console.print("I can't help with deleting all files or wiping a filesystem.")
+        if kind == "cleanup_broad":
+            console.print("I can't help with cleaning, deleting, or wiping an entire filesystem.")
+        else:
+            console.print("I can't help with deleting all files or wiping a filesystem.")
         console.print("")
         console.print("That request is destructive and unsafe.")
         console.print("")
