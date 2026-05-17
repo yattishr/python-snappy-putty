@@ -11,6 +11,7 @@ from typing import Callable, Optional
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from snappy_putty.agent import AgentRunResult, _extract_requested_path, _is_listing_request, _listing_request_is_ambiguous, plan_with_agent
 from snappy_putty.agent_discovery import (
@@ -138,6 +139,7 @@ from snappy_putty.session import (
     restore_workflow_snapshot,
     SessionState,
 )
+from snappy_putty.skills import DEFAULT_SKILLS_DIR, Skill, discover_skills, match_skills, validate_skill_path
 from snappy_putty.status import busy, get_status_message
 from snappy_putty.models import AgentOutput, PlanStep as AgentPlanStep
 
@@ -145,13 +147,16 @@ app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
 inspect_app = typer.Typer(help="Read-only project inspection commands.", invoke_without_command=False)
 show_app = typer.Typer(help="Display cached inspection and planning state.", invoke_without_command=False)
 refresh_app = typer.Typer(help="Refresh cached project inspection state.", invoke_without_command=False)
+skills_app = typer.Typer(help="Discover, inspect, and validate local skills.", invoke_without_command=True)
 app.add_typer(inspect_app, name="inspect")
 app.add_typer(show_app, name="show")
 app.add_typer(refresh_app, name="refresh")
+app.add_typer(skills_app, name="skills")
 console = Console()
 UNKNOWN_COMMAND_MESSAGE = "I don't recognize that command. Try 'help' to see what I can do."
 OUT_OF_SCOPE_MESSAGE = "I can only help with software, hardware, and technology topics."
 OUT_OF_SCOPE_HINT_MESSAGE = "Try asking about code, debugging, CLIs, repos, APIs, or hardware."
+SKILLS_MIGRATION_HINT = "Run snappy skills validate .snappy/skills for details, or create .snappy/skills/<name>/SKILL.md."
 RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_HELP,
     ROUTE_BUILTIN_DOCTOR,
@@ -1589,6 +1594,21 @@ def _project_root(cwd: Path | None = None) -> Path:
     return (cwd or Path.cwd()).resolve()
 
 
+def _display_path(path: Path | None) -> str:
+    if path is None:
+        return "(none)"
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _shorten(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
 def _snapshot_summary_lines(snapshot: ProjectSnapshot) -> list[str]:
     return [
         f"Snapshot ID: {snapshot.snapshot_id}",
@@ -1638,6 +1658,16 @@ def _plan_interaction_lines(plan: GroundedPlan) -> list[str]:
             lines.append(f"   Risk: {step.risk}")
     else:
         lines.append("1. (none)")
+    skill_selection = (plan.context_selection or {}).get("skill_selection")
+    if isinstance(skill_selection, dict):
+        matched = skill_selection.get("matched")
+        lines.extend(["", "Matched skills:"])
+        if isinstance(matched, list) and matched:
+            for item in matched:
+                if isinstance(item, dict):
+                    lines.append(f"- {item.get('name', '(unknown)')} (score={item.get('score', 0)})")
+        else:
+            lines.append("- (none)")
     lines.extend(
         [
             "",
@@ -2325,7 +2355,7 @@ def run_shell() -> None:
             doctor(verbose=False)
             continue
         if text == "skills":
-            skills(agent_mode_override=state.agent_mode)
+            _render_skills_list(agent_mode_override=state.agent_mode)
             continue
         if text == "rules":
             rules(agent_mode_override=state.agent_mode)
@@ -2563,6 +2593,8 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
         related, relevance_reason = assess_project_relevance(intent, snapshot)
+        skill_registry = discover_skills(root)
+        skill_matches = match_skills(intent, skill_registry.skills)
         emit_progress("Inspecting project context...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
         append_history_event(
@@ -2633,14 +2665,20 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
             with busy(get_status_message("plan"), console=console):
                 if planning_mode == PlanningMode.LLM_ASSISTED:
                     emit_progress("Generating LLM-assisted grounded plan...")
-                    plan = create_llm_assisted_plan(intent, snapshot, session_mode=session_mode, progress=emit_progress)
+                    plan = create_llm_assisted_plan(
+                        intent,
+                        snapshot,
+                        session_mode=session_mode,
+                        progress=emit_progress,
+                        skill_matches=skill_matches,
+                    )
                 else:
-                    plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
+                    plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC, skill_matches=skill_matches)
         except LLMPlannerUnavailableError as exc:
             _debug(str(exc))
             console.print("Generating deterministic grounded plan from inspected project context...")
             with busy(get_status_message("plan"), console=console):
-                plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC)
+                plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC, skill_matches=skill_matches)
         except LLMPlanValidationError as exc:
             console.print("LLM-assisted plan was rejected by validation.")
             console.print(f"Reason: {exc}")
@@ -2699,6 +2737,16 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                         "Reason": plan.context_selection.get("sufficiency", {}).get("reason", ""),
                     },
                 )
+        if skill_matches:
+            append_history_event(
+                root,
+                "Skills matched",
+                {
+                    "Goal": plan.goal,
+                    "Matched": [match.skill.metadata.name for match in skill_matches],
+                    "Scores": [match.score for match in skill_matches],
+                },
+            )
         event_name = "LLM-assisted plan created" if plan.mode == PlanningMode.LLM_ASSISTED.value else "Grounded plan created"
         append_history_event(
             root,
@@ -2781,18 +2829,106 @@ def init(force: bool = typer.Option(False, "--force", help="Overwrite scaffold f
     console.print(result.message)
 
 
-@app.command()
-def skills(agent_mode_override: str | None = None) -> None:
-    """List skills loaded from .snappy/skills/*.md."""
-    registry = load_agent_skill_registry(Path.cwd(), session_mode=agent_mode_override)
-    if not registry.skills:
+def _skill_status(skill: Skill, issue_codes: set[str]) -> str:
+    return "warning" if issue_codes else "valid"
+
+
+def _render_skills_list(agent_mode_override: str | None = None) -> None:
+    registry = discover_skills(Path.cwd())
+    legacy_registry = load_agent_skill_registry(Path.cwd(), session_mode=agent_mode_override)
+    missing_skill_md = any(issue.code == "missing_skill_md" for issue in registry.errors)
+    if registry.skills:
+        table = Table(title="Available Skills")
+        table.add_column("name")
+        table.add_column("risk")
+        table.add_column("status")
+        table.add_column("description")
+        table.add_column("path")
+        warning_codes_by_path: dict[Path, set[str]] = {}
+        for issue in registry.warnings:
+            if issue.path is not None:
+                warning_codes_by_path.setdefault(issue.path, set()).add(issue.code)
+        for skill in registry.skills:
+            risk = str(skill.metadata.snappy.get("risk") or "")
+            status = _skill_status(skill, warning_codes_by_path.get(skill.metadata.path, set()))
+            table.add_row(
+                skill.metadata.name,
+                risk or "-",
+                status,
+                _shorten(skill.metadata.description, 72),
+                _display_path(skill.metadata.path),
+            )
+        console.print(table)
+    elif legacy_registry.skills:
+        console.print("Loaded skills:")
+        for skill in legacy_registry.skills:
+            console.print(f"- {skill.name} [{skill.risk}]", markup=False)
+    elif missing_skill_md:
+        console.print("No skills loaded.")
+        console.print(SKILLS_MIGRATION_HINT, markup=False, soft_wrap=True)
+    elif legacy_registry.warnings:
         console.print("No skills loaded.")
     else:
-        console.print("Loaded skills:")
-        for skill in registry.skills:
-            console.print(f"- {skill.name} [{skill.risk}]", markup=False)
-    for warning in registry.warnings:
+        console.print("No skills found in .snappy/skills/.")
+    for issue in registry.issues:
+        console.print(f"{issue.severity}: {issue.code}: {issue.message} ({_display_path(issue.path)})", markup=False)
+    for warning in legacy_registry.warnings:
         console.print(warning)
+
+
+@skills_app.callback(invoke_without_command=True)
+def skills_root(ctx: typer.Context) -> None:
+    """List discovered skills."""
+    if ctx.invoked_subcommand is None:
+        _render_skills_list()
+
+
+@skills_app.command("inspect")
+def skills_inspect(name: str = typer.Argument(..., help="Skill name to inspect.")) -> None:
+    """Inspect one skill without executing any bundled resources."""
+    registry = discover_skills(Path.cwd())
+    skill = next((item for item in registry.skills if item.metadata.name == name), None)
+    if skill is None:
+        console.print(f"Skill not found: {name}")
+        raise typer.Exit(code=1)
+    lines = [
+        f"Name: {skill.metadata.name}",
+        f"Path: {_display_path(skill.metadata.path)}",
+        f"Description: {skill.metadata.description}",
+        f"Frontmatter: {skill.metadata.frontmatter}",
+        f"x-snappy: {skill.metadata.snappy or {}}",
+        "",
+        "Body:",
+        skill.body or "(empty)",
+        "",
+        "Adjacent files:",
+        *(f"- {_display_path(path)}" for path in skill.files if path not in skill.scripts),
+        "",
+        "Scripts (non-executable resources):",
+        *(f"- {_display_path(path)}" for path in skill.scripts),
+    ]
+    if not any(path not in skill.scripts for path in skill.files):
+        insert_at = lines.index("Scripts (non-executable resources):") - 1
+        lines.insert(insert_at, "- (none)")
+    if not skill.scripts:
+        lines.append("- (none)")
+    console.print(Panel("\n".join(lines), title="Skill Inspect", border_style="bright_blue"))
+
+
+@skills_app.command("validate")
+def skills_validate(path: str | None = typer.Argument(None, help="Skill folder or skills directory to validate.")) -> None:
+    """Validate one skill folder or the default skills directory."""
+    target = Path(path) if path else Path.cwd() / DEFAULT_SKILLS_DIR
+    if not target.is_absolute():
+        target = (Path.cwd() / target).resolve()
+    registry = validate_skill_path(target)
+    if not registry.issues:
+        console.print("Skills validation passed.")
+        return
+    for issue in registry.issues:
+        console.print(f"{issue.severity}: {issue.code}: {issue.message} ({_display_path(issue.path)})", markup=False)
+    if registry.errors:
+        raise typer.Exit(code=1)
 
 
 @app.command()

@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from snappy_putty.skills import load_skill_registry
+
 
 @dataclass(frozen=True)
 class AgentProjectDiscovery:
@@ -300,6 +302,21 @@ def load_agent_skill_registry(cwd: Path | None = None, session_mode: str | None 
 
     skills: list[AgentSkill] = []
     warnings: list[str] = []
+    folder_registry = load_skill_registry(skills_dir)
+    for skill in folder_registry.skills:
+        skills.append(
+            AgentSkill(
+                name=skill.metadata.name,
+                description=skill.metadata.description,
+                intent_examples=[skill.metadata.description],
+                risk=str(skill.metadata.snappy.get("risk") or "unknown"),
+            )
+        )
+    for issue in folder_registry.issues:
+        if issue.severity == "warning":
+            warnings.append(f"Warning: .snappy skill {issue.code}: {issue.message}")
+        else:
+            warnings.append(f"Warning: skipped .snappy skill because {issue.message}")
     for path in sorted(skills_dir.glob("*.md")):
         try:
             skills.append(_parse_skill_file(path))
