@@ -23,6 +23,7 @@ from snappy_putty.context_discovery import (
 )
 from snappy_putty.project_inspector import ProjectSnapshot, is_project_snapshot_valid
 from snappy_putty.project_relevance import (
+    ProjectRelationship,
     ProjectRelationshipResult,
     classify_project_relationship,
 )
@@ -389,7 +390,11 @@ def create_llm_assisted_plan(
         sufficiency_checker=_sufficiency_checker_for_client(planner_client),
         progress=progress,
     )
-    if not context_bundle.sufficiency.get("final_sufficient", False):
+    if not context_bundle.sufficiency.get("final_sufficient", False) and not _can_plan_project_extension(
+        project_relationship,
+        skill_matches,
+        context_bundle,
+    ):
         raise LLMPlanValidationError(
             f"I could not gather enough grounded context to create a reliable implementation plan. {context_bundle.sufficiency.get('reason', '')}".strip()
         )
@@ -403,6 +408,23 @@ def create_llm_assisted_plan(
         Path(snapshot.root_path),
         context_selection=_context_with_skill_selection(context_bundle.metadata(), skill_matches, project_relationship),
     )
+
+
+def _can_plan_project_extension(
+    project_relationship: ProjectRelationshipResult | None,
+    skill_matches: list[SkillMatch] | None,
+    context_bundle: ContextDiscoveryResult,
+) -> bool:
+    if project_relationship is None or not project_relationship.is_project_related:
+        return False
+    if project_relationship.relationship not in {
+        ProjectRelationship.PROJECT_EXTENSION,
+        ProjectRelationship.PROJECT_ADAPTATION,
+    }:
+        return False
+    if skill_matches:
+        return True
+    return any(item.kind in {"source", "config"} or item.role == "entrypoint" for item in context_bundle.selected_context)
 
 
 def validate_llm_plan(

@@ -1,4 +1,5 @@
 from io import StringIO
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 
@@ -741,6 +742,58 @@ def test_agent_mode_select_opens_menu_and_applies_choice(monkeypatch) -> None:
     output = buffer.getvalue()
     assert "Agent mode set to: active (session)" in output
     assert "Beast mode ON" in output
+
+
+def test_why_current_plan_uses_spinner_for_llm_rationale(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    entered: list[str] = []
+
+    plan = cli.GroundedPlan(
+        plan_id="plan_demo",
+        goal="help me improve this CLI",
+        mode="llm_assisted",
+        created_at="2026-05-18T00:00:00+00:00",
+        based_on_snapshot_id="snap_demo",
+        files_inspected=["src/snappy_putty/cli.py"],
+        steps=[
+            cli.GroundedPlanStep(
+                step_id="step_1",
+                description="Review CLI behavior.",
+                files=["src/snappy_putty/cli.py"],
+                proposed_new_files=[],
+                risk="LOW",
+                requires_confirmation=True,
+            )
+        ],
+        risks=[],
+        assumptions=[],
+        status="awaiting_confirmation",
+        summary="Demo plan",
+        refinements=[],
+        invalidation_reason=None,
+        context_selection={},
+    )
+
+    class FakeRationaleClient:
+        def explain_plan(self, prompt: str) -> str:
+            return "Because the selected files contain the active CLI workflow."
+
+    @contextmanager
+    def fake_busy(message: str | None = None, *, console=None):
+        entered.append(message or "")
+        yield
+
+    monkeypatch.setattr(cli, "load_grounded_plan", lambda root: plan)
+    monkeypatch.setattr(cli, "default_llm_rationale_client", lambda session_mode=None: FakeRationaleClient())
+    monkeypatch.setattr(cli, "load_project_snapshot", lambda root: None)
+    monkeypatch.setattr(cli, "get_status_message", lambda mode=None: f"status:{mode}")
+    monkeypatch.setattr(cli, "busy", fake_busy)
+
+    result = cli._why_current_plan(tmp_path, session_mode="active")
+
+    assert result == plan
+    assert entered == ["status:rationale"]
+    assert "Because the selected files contain the active CLI workflow." in buffer.getvalue()
 
 
 def test_status_includes_current_state_and_failure_fields(monkeypatch) -> None:

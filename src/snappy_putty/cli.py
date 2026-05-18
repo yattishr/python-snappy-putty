@@ -1988,7 +1988,8 @@ def _why_current_plan(root: Path, *, session_mode: str | None = None) -> Grounde
             snapshot_summary=_snapshot_summary_for_rationale(snapshot),
         )
         try:
-            rationale = client.explain_plan(prompt)
+            with busy(get_status_message("rationale"), console=console):
+                rationale = client.explain_plan(prompt)
         except LLMPlannerUnavailableError:
             rationale = ""
         if rationale:
@@ -2787,23 +2788,25 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         except LLMPlanValidationError as exc:
             console.print("LLM-assisted plan was rejected by validation.")
             console.print(f"Reason: {exc}")
-            _record_planning_skipped_memory(root, goal=intent, reason="llm_required_but_unavailable", snapshot=snapshot)
-            return AgentRunResult(
-                output=AgentOutput(
-                    goal=intent,
-                    assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
-                    question=None,
-                    plan=[],
-                    commands=[],
-                    warnings=["No project plan was created."],
-                    snippets=[],
-                ),
-                raw_model_text=None,
-                parse_error=None,
-                directory_listing=None,
-                plan_mode=None,
-                skip_reason="llm_required_but_unavailable",
+            append_history_event(
+                root,
+                "LLM-assisted plan rejected",
+                {
+                    "Goal": intent,
+                    "Snapshot ID": snapshot.snapshot_id,
+                    "Reason": str(exc),
+                    "Fallback": "deterministic",
+                },
             )
+            console.print("Generating deterministic grounded plan from inspected project context...")
+            with busy(get_status_message("plan"), console=console):
+                plan = build_grounded_plan(
+                    intent,
+                    snapshot,
+                    mode=PlanningMode.DETERMINISTIC,
+                    skill_matches=skill_matches,
+                    project_relationship=project_relationship,
+                )
         if plan is None:
             return AgentRunResult(
                 output=AgentOutput(

@@ -7,8 +7,10 @@ import subprocess
 import sys
 
 from snappy_putty import active_planner, agent as agent_module
-from snappy_putty.active_planner import LLMPlanValidationError, PlanningMode, validate_llm_plan
+from snappy_putty import cli
+from snappy_putty.active_planner import LLMPlanValidationError, PlanningMode, create_llm_assisted_plan, validate_llm_plan
 from snappy_putty.project_inspector import inspect_project
+from snappy_putty.skills import discover_skills, match_skills
 
 
 def _env() -> dict[str, str]:
@@ -498,6 +500,162 @@ def test_node_frontend_request_is_project_extension_with_skill(tmp_path: Path) -
     assert relationship["matched_skills"] == ["frontend-design"]
     assert "controllers/productControllers.js" in plan["files_inspected"]
     assert "models/productModel.js" in plan["files_inspected"]
+
+
+def test_skill_guided_frontend_extension_reaches_llm_when_no_frontend_exists(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
+    (tmp_path / "controllers").mkdir()
+    (tmp_path / "controllers" / "productControllers.js").write_text("exports.listProducts = () => []\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "frontend-design",
+        "Create production-grade frontend interfaces. Use this skill for web UI, dashboards, React components, and HTML/CSS layouts.",
+        relationships=["project_extension"],
+        targets=["javascript"],
+        indicators=["frontend", "front end", "admin interface"],
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me build a front end with an admin interface"],
+        cwd=tmp_path,
+        env=_llm_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Matched skill: frontend-design" in proc.stdout
+    assert "LLM-assisted plan was rejected by validation." not in proc.stdout
+    assert "Generating deterministic grounded plan from inspected project context" not in proc.stdout
+    assert "Mode: llm_assisted" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    plan = session["current_plan"]
+    assert plan["mode"] == PlanningMode.LLM_ASSISTED.value
+    assert plan["context_selection"]["project_relationship"]["relationship"] == "project_extension"
+    assert plan["context_selection"]["skill_selection"]["matched"][0]["name"] == "frontend-design"
+
+
+def test_skill_guided_extension_bypasses_negative_sufficiency_gate(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "frontend-design",
+        "Create production-grade frontend interfaces. Use this skill for web UI, dashboards, React components, and HTML/CSS layouts.",
+        relationships=["project_extension"],
+        targets=["javascript"],
+        indicators=["frontend", "front end", "admin interface"],
+    )
+    goal = "help me build a front end with an admin interface"
+    snapshot = inspect_project(tmp_path)
+    skills = discover_skills(tmp_path)
+    skill_matches = match_skills(goal, skills.skills)
+    project_relationship = active_planner.assess_project_relationship(goal, snapshot, skill_matches=skill_matches)
+
+    class InsufficientButPlannableClient:
+        def __init__(self) -> None:
+            self.create_plan_called = False
+
+        def check_context_sufficiency(self, prompt: str) -> dict[str, object]:
+            return {
+                "sufficient": False,
+                "reason": "No frontend files exist yet.",
+                "missing_context_queries": [],
+                "files_to_read_next": [],
+            }
+
+        def create_plan(self, prompt: str) -> dict[str, object]:
+            self.create_plan_called = True
+            assert "Skill: frontend-design" in prompt
+            return {
+                "goal": goal,
+                "summary": "Add a frontend admin interface grounded in the existing API files.",
+                "based_on_snapshot_id": snapshot.snapshot_id,
+                "files_inspected": ["package.json", "server.js"],
+                "steps": [
+                    {
+                        "description": "Create a small admin frontend that consumes the existing product API.",
+                        "files": ["package.json", "server.js"],
+                        "proposed_new_files": ["admin/index.html", "admin/app.js", "admin/styles.css"],
+                        "risk": "MEDIUM",
+                        "requires_confirmation": True,
+                    }
+                ],
+                "risks": ["Frontend asset serving may change server routing."],
+                "assumptions": ["The new admin interface can be added as static assets."],
+            }
+
+    client = InsufficientButPlannableClient()
+
+    plan = create_llm_assisted_plan(
+        goal,
+        snapshot,
+        client=client,
+        skill_matches=skill_matches,
+        project_relationship=project_relationship,
+    )
+
+    assert client.create_plan_called is True
+    assert plan.mode == PlanningMode.LLM_ASSISTED.value
+    assert plan.steps[0].proposed_new_files == ["admin/index.html", "admin/app.js", "admin/styles.css"]
+
+
+def test_api_auth_extension_bypasses_negative_sufficiency_gate_with_existing_context(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
+    (tmp_path / "controllers").mkdir()
+    (tmp_path / "controllers" / "productControllers.js").write_text("exports.listProducts = () => []\n", encoding="utf-8")
+    goal = "help me add API authentication grounded in the existing API files"
+    snapshot = inspect_project(tmp_path)
+    project_relationship = active_planner.assess_project_relationship(goal, snapshot, skill_matches=[])
+
+    class InsufficientButPlannableClient:
+        def __init__(self) -> None:
+            self.create_plan_called = False
+
+        def check_context_sufficiency(self, prompt: str) -> dict[str, object]:
+            return {
+                "sufficient": False,
+                "reason": "No auth layer exists yet.",
+                "missing_context_queries": [],
+                "files_to_read_next": [],
+            }
+
+        def create_plan(self, prompt: str) -> dict[str, object]:
+            self.create_plan_called = True
+            return {
+                "goal": goal,
+                "summary": "Add API authentication grounded in the current server and controller files.",
+                "based_on_snapshot_id": snapshot.snapshot_id,
+                "files_inspected": ["package.json", "server.js", "controllers/productControllers.js"],
+                "steps": [
+                    {
+                        "description": "Add authentication checks around the existing product API routing.",
+                        "files": ["package.json", "server.js", "controllers/productControllers.js"],
+                        "proposed_new_files": ["auth.js"],
+                        "risk": "MEDIUM",
+                        "requires_confirmation": True,
+                    }
+                ],
+                "risks": ["Authentication changes may alter response status codes for existing clients."],
+                "assumptions": ["The API can use a new local auth helper."],
+            }
+
+    client = InsufficientButPlannableClient()
+
+    plan = create_llm_assisted_plan(
+        goal,
+        snapshot,
+        client=client,
+        skill_matches=[],
+        project_relationship=project_relationship,
+    )
+
+    assert client.create_plan_called is True
+    assert plan.mode == PlanningMode.LLM_ASSISTED.value
+    assert plan.steps[0].proposed_new_files == ["auth.js"]
 
 
 def test_python_streamlit_and_gradio_requests_are_project_extensions(tmp_path: Path) -> None:
@@ -1280,6 +1438,34 @@ def test_llm_failure_falls_back_to_deterministic_plan(tmp_path: Path) -> None:
     assert session["current_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
     assert session["last_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
     history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Grounded plan created" in history
+
+
+def test_llm_validation_rejection_falls_back_to_deterministic_plan(tmp_path: Path, monkeypatch, capsys) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("console.log('server')\n", encoding="utf-8")
+    controllers_dir = tmp_path / "controllers"
+    controllers_dir.mkdir()
+    (controllers_dir / "productControllers.js").write_text("exports.listProducts = () => []\n", encoding="utf-8")
+
+    def reject_llm_plan(*args, **kwargs):
+        raise LLMPlanValidationError("not enough grounded context")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "create_llm_assisted_plan", reject_llm_plan)
+
+    result = cli.handle_ask("help me improve this api", session_mode="active")
+
+    captured = capsys.readouterr()
+    assert "LLM-assisted plan was rejected by validation." in captured.out
+    assert "Generating deterministic grounded plan from inspected project context" in captured.out
+    assert result.plan_mode == PlanningMode.DETERMINISTIC.value
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["current_plan"]["goal"] == "help me improve this api"
+    assert session["current_plan"]["mode"] == PlanningMode.DETERMINISTIC.value
+    assert "last_skipped_goal" not in session
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: LLM-assisted plan rejected" in history
     assert "Event: Grounded plan created" in history
 
 
