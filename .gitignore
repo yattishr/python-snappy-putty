@@ -1,4 +1,5 @@
 .venv
 .env
+.snappy
 src/snappy_putty/__pycache__/
 tests/__pycache__/
