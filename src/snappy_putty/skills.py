@@ -8,7 +8,15 @@ from typing import Any, Literal
 
 
 DEFAULT_SKILLS_DIR = Path(".snappy") / "skills"
-_VALID_SNAPPY_KEYS = {"risk", "tools", "requires_confirmation", "tags"}
+_VALID_SNAPPY_KEYS = {
+    "risk",
+    "tools",
+    "requires_confirmation",
+    "tags",
+    "project_relationships",
+    "extension_targets",
+    "indicators",
+}
 _STOPWORDS = {
     "a",
     "an",
@@ -222,6 +230,13 @@ def match_skills(goal: str, skills: list[Skill], *, limit: int = 3) -> list[Skil
             reasons.append(f"heading matched: {', '.join(sorted(heading_hits))}")
 
         description_lower = skill.metadata.description.lower()
+        raw_indicators = skill.metadata.snappy.get("indicators")
+        indicators = [item.lower() for item in raw_indicators if isinstance(item, str)] if isinstance(raw_indicators, list) else []
+        for indicator in indicators:
+            if indicator and indicator in goal_lower:
+                score += 0.4
+                reasons.append(f"x-snappy indicator matched: {indicator}")
+                break
         for phrase in _goal_phrases(goal_tokens):
             if phrase in description_lower:
                 score += 0.35

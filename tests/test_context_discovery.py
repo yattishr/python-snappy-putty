@@ -50,6 +50,76 @@ def test_repo_map_excludes_noise(tmp_path: Path) -> None:
     assert not any(path.startswith((".git/", ".snappy/", ".venv/", "node_modules/")) for path in paths)
 
 
+def test_node_project_inspection_includes_javascript_sources(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node src/index.js"}}\n', encoding="utf-8")
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "index.js").write_text("console.log('hello')\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+
+    assert "package.json" in snapshot.config_files
+    assert "src/index.js" in snapshot.source_files
+    assert "javascript" in snapshot.languages
+
+
+def test_typescript_project_inspection_includes_tsx_sources(tmp_path: Path) -> None:
+    (tmp_path / "tsconfig.json").write_text('{"compilerOptions": {"jsx": "react-jsx"}}\n', encoding="utf-8")
+    (tmp_path / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "App.tsx").write_text("export function App() { return <main /> }\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+
+    assert "tsconfig.json" in snapshot.config_files
+    assert "vite.config.ts" in snapshot.config_files
+    assert "src/App.tsx" in snapshot.source_files
+    assert "typescript" in snapshot.languages
+
+
+def test_node_project_inspection_excludes_generated_directories(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.js").write_text("export {}\n", encoding="utf-8")
+    generated_dirs = [
+        "node_modules",
+        "build",
+        "dist",
+        ".next",
+        ".turbo",
+        ".vite",
+        "out",
+        ".cache",
+        ".parcel-cache",
+    ]
+    for dirname in generated_dirs:
+        generated = tmp_path / dirname
+        generated.mkdir()
+        (generated / "artifact.js").write_text("ignored\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+    inspected = set(snapshot.config_files + snapshot.source_files + snapshot.test_files + snapshot.sampled_files)
+
+    assert "src/index.js" in snapshot.source_files
+    assert not any(path.startswith(f"{dirname}/") for dirname in generated_dirs for path in inspected)
+
+
+def test_python_project_inspection_behavior_stays_stable(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text("def test_app():\n    assert True\n", encoding="utf-8")
+
+    snapshot = inspect_project(tmp_path)
+
+    assert "pyproject.toml" in snapshot.config_files
+    assert "src/app.py" in snapshot.source_files
+    assert "tests/test_app.py" in snapshot.test_files
+    assert "python" in snapshot.languages
+
+
 def test_cli_project_selects_entrypoint_and_balanced_context(tmp_path: Path) -> None:
     _taskcli_project(tmp_path)
 

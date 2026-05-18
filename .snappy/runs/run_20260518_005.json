@@ -1,0 +1,36 @@
+{
+  "run_id": "run_20260518_005",
+  "goal": "give me a file listing for src",
+  "mode": "direct",
+  "state": "SUCCESS",
+  "plan_id": null,
+  "snapshot_id": null,
+  "started_at": "2026-05-18T15:22:54+02:00",
+  "completed_at": "2026-05-18T15:22:55+02:00",
+  "result": "success",
+  "steps": [
+    {
+      "step_number": 1,
+      "description": "Run direct safe operation: give me a file listing for src",
+      "action": "list_files",
+      "status": "success",
+      "started_at": "2026-05-18T15:22:55+02:00",
+      "completed_at": "2026-05-18T15:22:55+02:00",
+      "files_touched": [],
+      "summary": "list_files completed successfully.",
+      "error": null,
+      "action_id": "action_001"
+    }
+  ],
+  "summary": "Run result: success; Action: list_files; Risk: LOW; Files modified: 0",
+  "actions": [
+    {
+      "action_id": "action_001",
+      "tool": "list_files",
+      "risk": "LOW",
+      "scope": "read_only",
+      "target": "src",
+      "requires_confirmation": false
+    }
+  ]
+}

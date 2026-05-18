@@ -47,6 +47,33 @@ def _off_env() -> dict[str, str]:
     return env
 
 
+def _write_skill(
+    root: Path,
+    name: str,
+    description: str,
+    *,
+    relationships: list[str] | None = None,
+    targets: list[str] | None = None,
+    indicators: list[str] | None = None,
+) -> None:
+    skill_dir = root / ".snappy" / "skills" / name
+    skill_dir.mkdir(parents=True)
+    lines = ["---", f"name: {name}", f"description: {description}"]
+    if relationships or targets or indicators:
+        lines.append("x-snappy:")
+        if relationships:
+            lines.append("  project_relationships:")
+            lines.extend(f"    - {item}" for item in relationships)
+        if targets:
+            lines.append("  extension_targets:")
+            lines.extend(f"    - {item}" for item in targets)
+        if indicators:
+            lines.append("  indicators:")
+            lines.extend(f"    - {item}" for item in indicators)
+    lines.extend(["---", "", "Use as planning guidance only."])
+    (skill_dir / "SKILL.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def test_grounded_llm_planner_uses_same_session_mode_capability_check(monkeypatch) -> None:
     seen_session_modes: list[str | None] = []
 
@@ -432,6 +459,204 @@ def test_active_mode_rejects_irrelevant_goal_without_creating_plan(tmp_path: Pat
     assert session["last_skip_reason"] == "goal_not_project_related"
     history_path = tmp_path / ".snappy" / "memory" / "history.md"
     assert "Planning skipped" in history_path.read_text(encoding="utf-8")
+
+
+def test_node_frontend_request_is_project_extension_with_skill(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
+    (tmp_path / "controllers").mkdir()
+    (tmp_path / "controllers" / "productControllers.js").write_text("exports.listProducts = () => []\n", encoding="utf-8")
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "productModel.js").write_text("class Product {}\n", encoding="utf-8")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "products.json").write_text("[]\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "frontend-design",
+        "Create production-grade frontend interfaces. Use this skill for web UI, dashboards, React components, and HTML/CSS layouts.",
+        indicators=["frontend", "web ui", "dashboard"],
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me build a frontend interface for this application"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Classified request as project_extension" in proc.stdout
+    assert "Matched skill: frontend-design" in proc.stdout
+    assert "Grounded Plan" in proc.stdout
+    assert not (tmp_path / "frontend").exists()
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    plan = session["current_plan"]
+    relationship = plan["context_selection"]["project_relationship"]
+    assert relationship["relationship"] == "project_extension"
+    assert relationship["matched_skills"] == ["frontend-design"]
+    assert "controllers/productControllers.js" in plan["files_inspected"]
+    assert "models/productModel.js" in plan["files_inspected"]
+
+
+def test_python_streamlit_and_gradio_requests_are_project_extensions(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("def predict(value):\n    return value\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "streamlit-dashboard",
+        "Use this skill when the user asks to build a Streamlit dashboard, analytics interface, data app, or Python-based frontend.",
+        relationships=["project_extension"],
+        targets=["python"],
+        indicators=["streamlit", "dashboard", "data app"],
+    )
+    _write_skill(
+        tmp_path,
+        "gradio-interface",
+        "Use this skill when the user asks to add a Gradio UI or machine learning interface for the current Python project.",
+        relationships=["project_extension"],
+        targets=["python"],
+        indicators=["gradio", "ui"],
+    )
+
+    streamlit = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me build a Streamlit dashboard for this project"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    gradio = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me add a Gradio UI for this app"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert streamlit.returncode == 0
+    assert "Classified request as project_extension" in streamlit.stdout
+    assert "Matched skill: streamlit-dashboard" in streamlit.stdout
+    assert gradio.returncode == 0
+    assert "Classified request as project_extension" in gradio.stdout
+    assert "Matched skill: gradio-interface" in gradio.stdout
+    assert not (tmp_path / "streamlit_app.py").exists()
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_python_flask_request_is_project_adaptation_with_skill(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "flask-web-interface",
+        "Use this skill when the user asks to build a Flask web interface, lightweight Python web app, admin UI, or browser-based frontend.",
+        relationships=["project_extension", "project_adaptation"],
+        targets=["python"],
+        indicators=["flask", "web interface"],
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me turn this script into a Flask app"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Classified request as project_adaptation" in proc.stdout
+    assert "Matched skill: flask-web-interface" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["current_plan"]["context_selection"]["project_relationship"]["relationship"] == "project_adaptation"
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_generic_docker_extension_creates_grounded_plan(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
+    (tmp_path / "main.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me add Docker support for this project"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Classified request as project_extension" in proc.stdout
+    assert "Grounded Plan" in proc.stdout
+    assert not (tmp_path / "Dockerfile").exists()
+
+
+def test_active_planning_uses_latest_saved_snapshot(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    first = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "inspect", "project"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    second = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "inspect", "project"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    saved_snapshot = json.loads((tmp_path / ".snappy" / "memory" / "project_snapshot.json").read_text(encoding="utf-8"))
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "summarize README.md"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert proc.returncode == 0
+    assert f"Using snapshot: {saved_snapshot['snapshot_id']}" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["current_plan"]["based_on_snapshot_id"] == saved_snapshot["snapshot_id"]
+
+
+def test_skill_match_without_project_context_still_rejects_unrelated_request(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("console.log('server')\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "frontend-design",
+        "Create distinctive posters and frontend designs. Use this skill for web UI, dashboards, and birthday party posters.",
+        indicators=["poster", "frontend"],
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "help me design a poster for a birthday party"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "does not appear to be related to the current project" in proc.stdout
+    assert "No project plan was created." in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "current_plan" not in session
 
 
 def test_broad_developer_goal_with_llm_unavailable_creates_deterministic_plan(tmp_path: Path) -> None:

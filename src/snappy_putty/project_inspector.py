@@ -25,7 +25,11 @@ _NOISY_DIRS = {
     "coverage",
     ".next",
     ".nuxt",
+    ".turbo",
+    ".vite",
+    "out",
     ".cache",
+    ".parcel-cache",
     "vendor",
     "target",
 }
@@ -39,9 +43,45 @@ _CONFIG_FILES = {
     "tox.ini",
     "pytest.ini",
     "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "tsconfig.json",
+    "jsconfig.json",
+    "vite.config.js",
+    "vite.config.ts",
+    "next.config.js",
+    "next.config.mjs",
+    "next.config.ts",
+    "nuxt.config.js",
+    "nuxt.config.ts",
+    "eslint.config.js",
+    "eslint.config.mjs",
+    ".eslintrc",
+    ".eslintrc.json",
+    "tailwind.config.js",
+    "tailwind.config.ts",
+    "postcss.config.js",
     "Cargo.toml",
     "go.mod",
     "Makefile",
+}
+
+_SOURCE_DIR_PREFIXES = ("src/", "lib/", "app/")
+
+_JAVASCRIPT_SOURCE_SUFFIXES = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".vue",
+    ".svelte",
+    ".json",
+    ".css",
+    ".scss",
+    ".html",
 }
 
 _LANGUAGE_MAP = {
@@ -53,7 +93,16 @@ _LANGUAGE_MAP = {
     ".yml": "yaml",
     ".sh": "shell",
     ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
     ".ts": "typescript",
+    ".tsx": "typescript",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".css": "css",
+    ".scss": "scss",
+    ".html": "html",
     ".go": "go",
     ".rs": "rust",
 }
@@ -355,11 +404,23 @@ def _detect_test_files(rel_paths: list[str]) -> list[str]:
 def _detect_source_files(rel_paths: list[str]) -> list[str]:
     source_files: list[str] = []
     for path in rel_paths:
-        if path.startswith("src/") or path.startswith("lib/") or path.startswith("app/"):
+        suffix = Path(path).suffix.lower()
+        if path.startswith(_SOURCE_DIR_PREFIXES):
             source_files.append(path)
         elif path.endswith(".py") and not path.startswith("tests/"):
             source_files.append(path)
+        elif suffix in _JAVASCRIPT_SOURCE_SUFFIXES and not _is_config_file(path) and not _is_test_path(path):
+            source_files.append(path)
     return source_files[:100]
+
+
+def _is_config_file(path: str) -> bool:
+    return Path(path).name in _CONFIG_FILES
+
+
+def _is_test_path(path: str) -> bool:
+    name = Path(path).name
+    return "/tests/" in f"/{path}/" or name.startswith("test_") or ".test." in name or ".spec." in name
 
 
 def _detect_entry_points(root: Path, files: list[Path], rel_paths: list[str]) -> list[str]:

@@ -30,7 +30,7 @@ from snappy_putty.active_planner import (
     PlanStep as GroundedPlanStep,
     PlanningIntent,
     PlanningMode,
-    assess_project_relevance,
+    assess_project_relationship,
     build_grounded_plan,
     build_llm_plan_rationale_prompt,
     build_llm_prompt,
@@ -2592,11 +2592,19 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         root = Path.cwd().resolve()
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
-        related, relevance_reason = assess_project_relevance(intent, snapshot)
         skill_registry = discover_skills(root)
         skill_matches = match_skills(intent, skill_registry.skills)
+        project_relationship = assess_project_relationship(intent, snapshot, skill_matches=skill_matches)
+        related = project_relationship.is_project_related
+        relevance_reason = project_relationship.reason
         emit_progress("Inspecting project context...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
+        if skill_matches:
+            console.print(f"Matched skill: {skill_matches[0].skill.metadata.name}")
+        if related:
+            console.print(
+                f"Classified request as {project_relationship.relationship.value}: {project_relationship.reason}"
+            )
         append_history_event(
             root,
             "Context discovery started",
@@ -2604,6 +2612,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 "Goal": intent,
                 "Snapshot ID": snapshot.snapshot_id,
                 "Strategy": "bounded_context_discovery_v1",
+                "Project relationship": project_relationship.as_metadata(),
             },
         )
         if planning_intent in {
@@ -2671,14 +2680,27 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                         session_mode=session_mode,
                         progress=emit_progress,
                         skill_matches=skill_matches,
+                        project_relationship=project_relationship,
                     )
                 else:
-                    plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC, skill_matches=skill_matches)
+                    plan = build_grounded_plan(
+                        intent,
+                        snapshot,
+                        mode=PlanningMode.DETERMINISTIC,
+                        skill_matches=skill_matches,
+                        project_relationship=project_relationship,
+                    )
         except LLMPlannerUnavailableError as exc:
             _debug(str(exc))
             console.print("Generating deterministic grounded plan from inspected project context...")
             with busy(get_status_message("plan"), console=console):
-                plan = build_grounded_plan(intent, snapshot, mode=PlanningMode.DETERMINISTIC, skill_matches=skill_matches)
+                plan = build_grounded_plan(
+                    intent,
+                    snapshot,
+                    mode=PlanningMode.DETERMINISTIC,
+                    skill_matches=skill_matches,
+                    project_relationship=project_relationship,
+                )
         except LLMPlanValidationError as exc:
             console.print("LLM-assisted plan was rejected by validation.")
             console.print(f"Reason: {exc}")
@@ -2747,6 +2769,11 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     "Scores": [match.score for match in skill_matches],
                 },
             )
+        append_history_event(
+            root,
+            "Project relationship classified",
+            project_relationship.as_metadata(),
+        )
         event_name = "LLM-assisted plan created" if plan.mode == PlanningMode.LLM_ASSISTED.value else "Grounded plan created"
         append_history_event(
             root,
@@ -2758,6 +2785,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 "Based on snapshot": plan.based_on_snapshot_id,
                 "Files referenced": plan.files_inspected,
                 "Status": plan.status,
+                "Project relationship": project_relationship.relationship.value,
             },
         )
         _render_grounded_plan_report(plan)

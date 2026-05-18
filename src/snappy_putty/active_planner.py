@@ -22,6 +22,10 @@ from snappy_putty.context_discovery import (
     discover_context,
 )
 from snappy_putty.project_inspector import ProjectSnapshot, is_project_snapshot_valid
+from snappy_putty.project_relevance import (
+    ProjectRelationshipResult,
+    classify_project_relationship,
+)
 from snappy_putty.skills import SkillMatch, skill_guidance_text, skill_selection_metadata
 
 
@@ -301,33 +305,23 @@ def classify_planning_intent(user_input: str) -> PlanningIntent:
     return PlanningIntent.STRUCTURED_PROJECT_INTENT
 
 
-def assess_project_relevance(goal: str, snapshot: ProjectSnapshot) -> tuple[bool, str]:
-    lowered = goal.strip().lower()
-    if not lowered:
-        return False, "goal_not_project_related"
+def assess_project_relationship(
+    goal: str,
+    snapshot: ProjectSnapshot,
+    *,
+    skill_matches: list[SkillMatch] | None = None,
+) -> ProjectRelationshipResult:
+    return classify_project_relationship(goal, snapshot, matched_skills=skill_matches)
 
-    if any(term in lowered for term in _PROJECT_RELATED_TERMS):
-        return True, "project_terms_matched"
 
-    goal_tokens = {token.strip(".,:;!?()[]{}\"'") for token in re.split(r"\s+", lowered) if token}
-    known_paths = {
-        *snapshot.sampled_files,
-        *snapshot.config_files,
-        *snapshot.docs,
-        *snapshot.test_files,
-        *snapshot.source_files,
-        *snapshot.entry_points,
-    }
-    for path in known_paths:
-        normalized = path.lower().replace("\\", "/")
-        basename = Path(normalized).name
-        if normalized in lowered or basename in goal_tokens:
-            return True, "snapshot_reference_matched"
-
-    if any(token in lowered for token in ("inspect ", "explain ", "improve ", "update ", "modify ", "add ", "refactor ")):
-        return True, "project_action_matched"
-
-    return False, "goal_not_project_related"
+def assess_project_relevance(
+    goal: str,
+    snapshot: ProjectSnapshot,
+    *,
+    skill_matches: list[SkillMatch] | None = None,
+) -> tuple[bool, str]:
+    result = assess_project_relationship(goal, snapshot, skill_matches=skill_matches)
+    return result.is_project_related, result.reason
 
 
 def build_grounded_plan(
@@ -337,9 +331,16 @@ def build_grounded_plan(
     mode: PlanningMode = PlanningMode.DETERMINISTIC,
     llm_client: LLMPlannerClient | None = None,
     skill_matches: list[SkillMatch] | None = None,
+    project_relationship: ProjectRelationshipResult | None = None,
 ) -> GroundedPlan:
     if mode == PlanningMode.LLM_ASSISTED:
-        return create_llm_assisted_plan(goal, snapshot, client=llm_client, skill_matches=skill_matches)
+        return create_llm_assisted_plan(
+            goal,
+            snapshot,
+            client=llm_client,
+            skill_matches=skill_matches,
+            project_relationship=project_relationship,
+        )
 
     files_inspected = _select_deterministic_files(goal, snapshot)
     steps = _deterministic_steps(goal, files_inspected, snapshot)
@@ -362,7 +363,7 @@ def build_grounded_plan(
         summary=f"Deterministic grounded plan for: {goal.strip()}",
         refinements=[],
         invalidation_reason=None,
-        context_selection=_context_with_skill_selection(None, skill_matches),
+        context_selection=_context_with_skill_selection(None, skill_matches, project_relationship),
     )
 
 
@@ -374,6 +375,7 @@ def create_llm_assisted_plan(
     session_mode: str | None = None,
     progress: Any | None = None,
     skill_matches: list[SkillMatch] | None = None,
+    project_relationship: ProjectRelationshipResult | None = None,
 ) -> GroundedPlan:
     planner_client = client or default_llm_planner_client(session_mode=session_mode)
     if planner_client is None:
@@ -399,7 +401,7 @@ def create_llm_assisted_plan(
         raw_response,
         snapshot,
         Path(snapshot.root_path),
-        context_selection=_context_with_skill_selection(context_bundle.metadata(), skill_matches),
+        context_selection=_context_with_skill_selection(context_bundle.metadata(), skill_matches, project_relationship),
     )
 
 
@@ -557,6 +559,12 @@ def grounded_plan_to_lines(plan: GroundedPlan) -> list[str]:
 
     if plan.summary:
         lines.extend(["", f"Summary: {plan.summary}"])
+
+    project_relationship = (plan.context_selection or {}).get("project_relationship")
+    if isinstance(project_relationship, dict):
+        relationship = project_relationship.get("relationship", "(unknown)")
+        reason = project_relationship.get("reason", "(unknown)")
+        lines.extend(["", f"Project relationship: {relationship} ({reason})"])
 
     skill_selection = (plan.context_selection or {}).get("skill_selection")
     if isinstance(skill_selection, dict):
@@ -1001,6 +1009,8 @@ def _emit_progress(progress: Any | None, message: str) -> None:
 def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[str]:
     if _is_cli_goal(goal):
         candidates = _select_cli_context_files(snapshot)
+    elif _is_interface_or_api_extension_goal(goal.lower()):
+        candidates = _select_interface_extension_context_files(snapshot)
     else:
         candidates = list(snapshot.sampled_files)
     known_paths = set(_known_snapshot_paths(snapshot))
@@ -1015,6 +1025,53 @@ def _select_deterministic_files(goal: str, snapshot: ProjectSnapshot) -> list[st
         for item in snapshot.docs[:3]:
             _append_if_missing(candidates, item)
     return _dedupe_list(candidates)[:6]
+
+
+def _is_interface_or_api_extension_goal(goal_lower: str) -> bool:
+    return any(
+        token in goal_lower
+        for token in (
+            "frontend",
+            "front end",
+            "ui",
+            "interface",
+            "dashboard",
+            "admin",
+            "streamlit",
+            "gradio",
+            "flask",
+            "django",
+            "fastapi",
+            "react",
+            "api",
+        )
+    )
+
+
+def _select_interface_extension_context_files(snapshot: ProjectSnapshot) -> list[str]:
+    selected: list[str] = []
+    for item in [*snapshot.config_files, *snapshot.entry_points]:
+        _append_if_missing(selected, item)
+    signals = (
+        "route",
+        "routes",
+        "controller",
+        "controllers",
+        "model",
+        "models",
+        "server",
+        "app.",
+        "main.",
+        "api",
+        "data",
+    )
+    for item in snapshot.source_files:
+        lowered = item.lower()
+        if any(signal in lowered for signal in signals):
+            _append_if_missing(selected, item)
+    for item in snapshot.sampled_files:
+        _append_if_missing(selected, item)
+    return selected
 
 
 def _is_cli_goal(goal: str) -> bool:
@@ -1522,9 +1579,16 @@ def _project_summary_from_snapshot(snapshot: ProjectSnapshot) -> str:
     return _project_summary(snapshot)
 
 
-def _context_with_skill_selection(context_selection: dict[str, Any] | None, matches: list[SkillMatch] | None) -> dict[str, Any] | None:
-    if not matches:
+def _context_with_skill_selection(
+    context_selection: dict[str, Any] | None,
+    matches: list[SkillMatch] | None,
+    project_relationship: ProjectRelationshipResult | None = None,
+) -> dict[str, Any] | None:
+    if not matches and project_relationship is None:
         return context_selection
     context = dict(context_selection or {})
-    context["skill_selection"] = skill_selection_metadata(matches)
+    if matches:
+        context["skill_selection"] = skill_selection_metadata(matches)
+    if project_relationship is not None:
+        context["project_relationship"] = project_relationship.as_metadata()
     return context
