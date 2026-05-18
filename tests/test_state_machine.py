@@ -688,6 +688,32 @@ def test_agent_mode_choice_question_defaults_to_current_selection() -> None:
     assert question["footer"] == "(Use ↑/↓ to navigate, ENTER to select)"
 
 
+def test_choice_prompt_text_numbers_arrow_menu_options() -> None:
+    question = cli._build_active_goal_conflict_question(
+        active_goal="help me improve this api",
+        incoming_goal="help me build a front end with an admin interface",
+    )
+
+    output = cli._render_choice_prompt_text(question)
+
+    assert "› 1. Keep current goal active" in output
+    assert "  2. Cancel current goal and start this request" in output
+    assert "  3. Park this new request for later" in output
+
+
+def test_active_goal_conflict_choice_maps_numeric_and_text_input() -> None:
+    question = cli._build_active_goal_conflict_question(
+        active_goal="help me improve this api",
+        incoming_goal="help me build a front end with an admin interface",
+    )
+
+    assert cli._resolve_active_goal_conflict_choice("1", question) == cli.CONFLICT_KEEP_CURRENT
+    assert cli._resolve_active_goal_conflict_choice("2", question) == cli.CONFLICT_CANCEL_AND_START
+    assert cli._resolve_active_goal_conflict_choice("3", question) == cli.CONFLICT_PARK_INCOMING
+    assert cli._resolve_active_goal_conflict_choice("park this", question) == cli.CONFLICT_PARK_INCOMING
+    assert cli._resolve_active_goal_conflict_choice("", question) == cli.CONFLICT_KEEP_CURRENT
+
+
 def test_agent_mode_without_argument_is_display_only(monkeypatch) -> None:
     buffer = _capture_console(monkeypatch)
     state = SessionState(agent_mode="active")

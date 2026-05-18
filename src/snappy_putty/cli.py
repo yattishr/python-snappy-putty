@@ -157,6 +157,9 @@ UNKNOWN_COMMAND_MESSAGE = "I don't recognize that command. Try 'help' to see wha
 OUT_OF_SCOPE_MESSAGE = "I can only help with software, hardware, and technology topics."
 OUT_OF_SCOPE_HINT_MESSAGE = "Try asking about code, debugging, CLIs, repos, APIs, or hardware."
 SKILLS_MIGRATION_HINT = "Run snappy skills validate .snappy/skills for details, or create .snappy/skills/<name>/SKILL.md."
+CONFLICT_KEEP_CURRENT = "keep_current"
+CONFLICT_CANCEL_AND_START = "cancel_and_start"
+CONFLICT_PARK_INCOMING = "park_incoming"
 RESERVED_CONTROL_ROUTES = {
     ROUTE_BUILTIN_HELP,
     ROUTE_BUILTIN_DOCTOR,
@@ -507,6 +510,33 @@ def _build_agent_mode_choice_question(*, current_mode: str, source: str) -> dict
     }
 
 
+def _build_active_goal_conflict_question(*, active_goal: str, incoming_goal: str) -> dict[str, object]:
+    return {
+        "type": "choice",
+        "message": "\n".join(
+            [
+                "A goal is already active:",
+                "",
+                active_goal,
+                "",
+                "New request:",
+                incoming_goal,
+                "",
+                "What would you like to do?",
+            ]
+        ),
+        "options": [
+            {"label": "Keep current goal active", "value": CONFLICT_KEEP_CURRENT},
+            {"label": "Cancel current goal and start this request", "value": CONFLICT_CANCEL_AND_START},
+            {"label": "Park this new request for later", "value": CONFLICT_PARK_INCOMING},
+        ],
+        "selected_index": 0,
+        "escape_value": CONFLICT_KEEP_CURRENT,
+        "footer": "(Use ↑/↓ to navigate, ENTER to select, or ESC to keep current goal)",
+        "fallback_prompt": "Enter choice > ",
+    }
+
+
 def _resolve_choice_menu_input(raw_value: str, question: dict[str, object]) -> str:
     value = raw_value.strip()
     options = question.get("options", [])
@@ -535,6 +565,17 @@ def _is_choice_input(raw_value: str, question: dict[str, object]) -> bool:
     return resolved in option_values
 
 
+def _resolve_active_goal_conflict_choice(raw_value: str, question: dict[str, object]) -> str:
+    value = _resolve_choice_menu_input(raw_value, question).strip().lower()
+    if value in {CONFLICT_KEEP_CURRENT, "keep", "current", "finish"}:
+        return CONFLICT_KEEP_CURRENT
+    if value in {CONFLICT_CANCEL_AND_START, "cancel", "start", "replace"}:
+        return CONFLICT_CANCEL_AND_START
+    if value in {CONFLICT_PARK_INCOMING, "park", "park this"}:
+        return CONFLICT_PARK_INCOMING
+    return CONFLICT_KEEP_CURRENT
+
+
 def _render_choice_prompt_text(question: dict[str, object]) -> str:
     options = question.get("options", [])
     selected_index = int(question.get("selected_index", 0))
@@ -543,8 +584,8 @@ def _render_choice_prompt_text(question: dict[str, object]) -> str:
         for index, option in enumerate(options):
             if not isinstance(option, dict):
                 continue
-            prefix = ">" if index == selected_index else " "
-            lines.append(f"{prefix} {option.get('label', option.get('value', ''))}")
+            prefix = "›" if index == selected_index else " "
+            lines.append(f"{prefix} {index + 1}. {option.get('label', option.get('value', ''))}")
     footer = str(question.get("footer") or "(Use ↑/↓ to navigate, ENTER to select, or type a command/path)")
     lines.extend(["", footer, "> "])
     return "\n".join(lines)
@@ -578,6 +619,10 @@ def _prompt_choice_question(session, question: dict[str, object]) -> str:
         selected = options[int(question.get("selected_index", 0))]
         selected_value = selected.get("value", "") if isinstance(selected, dict) else ""
         event.app.exit(result=str(selected_value))
+
+    @kb.add("escape")
+    def _handle_escape(event) -> None:
+        event.app.exit(result=str(question.get("escape_value") or ""))
 
     return str(
         session.prompt(
@@ -1091,7 +1136,23 @@ def _active_goal_text(state: SessionState) -> str:
     return (snapshot.goal if snapshot else state.active_goal) or "(unknown)"
 
 
-def _handle_active_goal_conflict(*, state: SessionState, workspace_root: Path, incoming_goal: str) -> bool:
+def _prompt_active_goal_conflict_choice(*, session, active_goal: str, incoming_goal: str) -> str:
+    question = _build_active_goal_conflict_question(active_goal=active_goal, incoming_goal=incoming_goal)
+    if session is None:
+        raw_choice = _prompt_choice_fallback(question)
+    else:
+        raw_choice = _prompt_choice_question(session, question)
+    return _resolve_active_goal_conflict_choice(raw_choice, question)
+
+
+def _handle_active_goal_conflict(
+    *,
+    state: SessionState,
+    workspace_root: Path,
+    incoming_goal: str,
+    session=None,
+    interactive: bool = False,
+) -> bool:
     if not state.has_active_goal or state.current_state == LifecycleState.IDLE:
         return False
     active_goal = _active_goal_text(state)
@@ -1105,6 +1166,26 @@ def _handle_active_goal_conflict(*, state: SessionState, workspace_root: Path, i
             "Result": "not_started",
         },
     )
+    if interactive:
+        choice = _prompt_active_goal_conflict_choice(session=session, active_goal=active_goal, incoming_goal=incoming_goal)
+        if choice == CONFLICT_CANCEL_AND_START:
+            append_history_event(
+                workspace_root,
+                "Goal conflict resolved",
+                {
+                    "Active goal": active_goal,
+                    "Incoming goal": incoming_goal,
+                    "Result": "cancelled_active_goal",
+                },
+            )
+            _cancel_active_goal(state, message="Cancelled active task state to start a new request.")
+            state.last_conflicting_goal = None
+            return False
+        if choice == CONFLICT_PARK_INCOMING:
+            _park_goal_text(state=state, workspace_root=workspace_root, goal_text=incoming_goal)
+            return True
+        console.print("Keeping current goal active.")
+        return True
     console.print(
         "\n".join(
             [
@@ -2364,6 +2445,8 @@ def run_shell() -> None:
             state=state,
             workspace_root=workspace_root,
             incoming_goal=decision.payload.get("intent") or decision.payload.get("command") or text,
+            session=session,
+            interactive=sys.stdin.isatty(),
         ):
             continue
         if route == ROUTE_UNKNOWN:

@@ -697,6 +697,46 @@ def test_broad_developer_goal_with_llm_unavailable_creates_deterministic_plan(tm
     assert "last_skip_reason" not in session
 
 
+def test_broad_api_goal_creates_deterministic_plan_for_node_api(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "server.js").write_text(
+        "const express = require('express')\nconst productRoutes = require('./routes/products')\n",
+        encoding="utf-8",
+    )
+    routes_dir = tmp_path / "routes"
+    routes_dir.mkdir()
+    (routes_dir / "products.js").write_text("module.exports = router\n", encoding="utf-8")
+    controllers_dir = tmp_path / "controllers"
+    controllers_dir.mkdir()
+    (controllers_dir / "products.js").write_text("exports.listProducts = (req, res) => res.json([])\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me improve this api\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "This request does not appear to be related to the current project." not in proc.stdout
+    assert "Classified request as direct_project_work" in proc.stdout
+    assert "Generating deterministic grounded plan from inspected project context" in proc.stdout
+    assert "Pending plan: deterministic plan with" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    plan = session["current_plan"]
+    assert plan["goal"] == "help me improve this api"
+    assert plan["context_selection"]["project_relationship"]["relationship"] == "direct_project_work"
+    assert "server.js" in plan["files_inspected"]
+    assert "routes/products.js" in plan["files_inspected"]
+    assert "controllers/products.js" in plan["files_inspected"]
+
+
 def test_active_mode_without_llm_capability_creates_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
