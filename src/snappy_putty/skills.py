@@ -432,11 +432,26 @@ def _headings(body: str) -> list[str]:
 
 
 def _tokens(text: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", text.lower())
-        if len(token) > 1 and token not in _STOPWORDS
-    }
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(token) <= 1 or token in _STOPWORDS:
+            continue
+        tokens.add(token)
+        tokens.update(_token_variants(token))
+    return tokens
+
+
+def _token_variants(token: str) -> set[str]:
+    variants: set[str] = set()
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        variants.add(token[:-1])
+    if len(token) > 4 and token.endswith("ing"):
+        variants.add(token[:-3])
+        variants.add(token[:-3] + "e")
+    if len(token) > 3 and token.endswith("ed"):
+        variants.add(token[:-2])
+        variants.add(token[:-1])
+    return {variant for variant in variants if len(variant) > 1 and variant not in _STOPWORDS}
 
 
 def _goal_phrases(tokens: set[str]) -> list[str]:

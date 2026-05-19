@@ -895,6 +895,33 @@ def test_broad_api_goal_creates_deterministic_plan_for_node_api(tmp_path: Path) 
     assert "controllers/products.js" in plan["files_inspected"]
 
 
+def test_create_spec_goal_matches_doc_coauthoring_skill_for_node_api(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        "Guide users through a structured workflow for co-authoring documentation. Use when user wants to write documentation, proposals, technical specs, decision docs, or similar structured content. Trigger when user mentions writing docs, creating proposals, drafting specs, or similar documentation tasks.",
+    )
+
+    snapshot = inspect_project(tmp_path)
+    registry = discover_skills(tmp_path)
+    matches = match_skills("help me create a spec for this nodejs api", registry.skills)
+    relationship = active_planner.assess_project_relationship(
+        "help me create a spec for this nodejs api",
+        snapshot,
+        skill_matches=matches,
+    )
+
+    assert matches
+    assert matches[0].skill.metadata.name == "doc-coauthoring"
+    assert relationship.is_project_related
+    assert relationship.matched_skills == ["doc-coauthoring"]
+
+
 def test_active_mode_without_llm_capability_creates_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",
@@ -1467,6 +1494,44 @@ def test_llm_validation_rejection_falls_back_to_deterministic_plan(tmp_path: Pat
     history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
     assert "Event: LLM-assisted plan rejected" in history
     assert "Event: Grounded plan created" in history
+
+
+def test_llm_plan_validation_relocates_new_doc_paths_to_proposed_files(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
+    controllers_dir = tmp_path / "controllers"
+    controllers_dir.mkdir()
+    (controllers_dir / "productControllers.js").write_text("exports.listProducts = () => []\n", encoding="utf-8")
+    snapshot = inspect_project(tmp_path)
+
+    plan = validate_llm_plan(
+        {
+            "goal": "help me create a spec for this nodejs api",
+            "summary": "Create a grounded API spec plan.",
+            "based_on_snapshot_id": snapshot.snapshot_id,
+            "files_inspected": ["server.js", "controllers/productControllers.js", "spec/README.md"],
+            "steps": [
+                {
+                    "description": "Draft the API spec from the inspected server and controller behavior.",
+                    "files": ["server.js", "controllers/productControllers.js", "spec/README.md"],
+                    "proposed_new_files": [],
+                    "risk": "LOW",
+                    "requires_confirmation": True,
+                }
+            ],
+            "risks": ["The spec may omit behavior not visible in inspected files."],
+            "assumptions": ["The server and controller files are the authoritative API surface."],
+        },
+        snapshot,
+        tmp_path,
+    )
+
+    assert plan.files_inspected == ["server.js", "controllers/productControllers.js"]
+    assert plan.steps[0].files == ["server.js", "controllers/productControllers.js"]
+    assert plan.steps[0].proposed_new_files == ["spec/README.md"]
 
 
 def test_previous_valid_plan_not_confused_with_skipped_request(tmp_path: Path) -> None:

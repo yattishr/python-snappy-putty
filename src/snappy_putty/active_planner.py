@@ -451,6 +451,7 @@ def validate_llm_plan(
         raise LLMPlanValidationError("Project snapshot is stale.")
 
     payload = _coerce_llm_plan_payload(raw_plan)
+    payload = _relocate_new_document_references(payload, snapshot, project_root)
     _require_keys(payload, {"goal", "summary", "files_inspected", "steps", "risks", "assumptions"})
     raw_snapshot_id = _optional_str(payload, "based_on_snapshot_id")
     if raw_snapshot_id is not None and raw_snapshot_id != snapshot.snapshot_id:
@@ -1461,6 +1462,77 @@ def _validate_existing_files(
             raise LLMPlanValidationError(f"Referenced file does not exist: {rel_path}")
         validated.append(rel_path)
     return _dedupe_list(validated)
+
+
+def _relocate_new_document_references(
+    payload: dict[str, Any],
+    snapshot: ProjectSnapshot,
+    project_root: Path,
+) -> dict[str, Any]:
+    """Move likely new documentation paths into proposed_new_files before strict validation."""
+    known_paths = set(_known_snapshot_paths(snapshot))
+    relocated: list[str] = []
+    normalized = dict(payload)
+
+    raw_files_inspected = normalized.get("files_inspected")
+    if isinstance(raw_files_inspected, list):
+        existing_files: list[Any] = []
+        for item in raw_files_inspected:
+            if isinstance(item, str) and _is_missing_new_document_path(item, known_paths, project_root):
+                relocated.append(_validate_project_path(item, project_root, field_name="files_inspected"))
+            else:
+                existing_files.append(item)
+        normalized["files_inspected"] = existing_files
+
+    raw_steps = normalized.get("steps")
+    if isinstance(raw_steps, list):
+        steps: list[Any] = []
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                steps.append(raw_step)
+                continue
+            step = dict(raw_step)
+            step_files = step.get("files")
+            raw_proposed = step.get("proposed_new_files", [])
+            proposed = list(raw_proposed or []) if isinstance(raw_proposed, list) else raw_proposed
+            if isinstance(step_files, list) and isinstance(proposed, list):
+                existing_step_files: list[Any] = []
+                for item in step_files:
+                    if isinstance(item, str) and _is_missing_new_document_path(item, known_paths, project_root):
+                        rel_path = _validate_project_path(item, project_root, field_name="files")
+                        relocated.append(rel_path)
+                        if rel_path not in proposed:
+                            proposed.append(rel_path)
+                    else:
+                        existing_step_files.append(item)
+                step["files"] = existing_step_files
+                step["proposed_new_files"] = proposed
+            steps.append(step)
+        normalized["steps"] = steps
+
+    if relocated and isinstance(normalized.get("steps"), list) and normalized["steps"]:
+        first_step = normalized["steps"][0]
+        if isinstance(first_step, dict):
+            proposed = first_step.get("proposed_new_files")
+            if isinstance(proposed, list):
+                for rel_path in relocated:
+                    if rel_path not in proposed:
+                        proposed.append(rel_path)
+    return normalized
+
+
+def _is_missing_new_document_path(path_text: str, known_paths: set[str], project_root: Path) -> bool:
+    rel_path = _validate_project_path(path_text, project_root, field_name="path")
+    if rel_path in known_paths or (project_root / rel_path).exists():
+        return False
+    path = Path(rel_path)
+    parts = {part.lower() for part in path.parts}
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".mdx", ".rst", ".adoc"}:
+        return True
+    if suffix in {".json", ".yaml", ".yml"} and parts.intersection({"doc", "docs", "spec", "specs", "openapi"}):
+        return True
+    return bool(parts.intersection({"doc", "docs", "spec", "specs"}))
 
 
 def _validate_proposed_files(paths: Any, project_root: Path, *, field_name: str) -> list[str]:
