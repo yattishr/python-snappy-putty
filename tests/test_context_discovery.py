@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -212,3 +213,102 @@ def test_plan_stores_context_metadata(tmp_path: Path) -> None:
     assert payload["context_selection"]["files"]
     assert payload["context_selection"]["sufficiency"]["final_sufficient"] is True
     assert json.loads(json.dumps(payload))
+
+
+class _CountingMockPlanner(active_planner._MockLLMPlannerClient):
+    def __init__(self) -> None:
+        self.sufficiency_checks = 0
+        self.prompts: list[str] = []
+
+    def check_context_sufficiency(self, prompt: str) -> dict[str, object]:
+        self.sufficiency_checks += 1
+        return super().check_context_sufficiency(prompt)
+
+    def create_plan(self, prompt: str) -> dict[str, object]:
+        self.prompts.append(prompt)
+        return super().create_plan(prompt)
+
+
+def test_repeated_planning_on_unchanged_snapshot_reuses_cached_context(tmp_path: Path) -> None:
+    _taskcli_project(tmp_path)
+    snapshot = inspect_project(tmp_path)
+    client = _CountingMockPlanner()
+
+    first = active_planner.create_llm_assisted_plan("help me implement logging", snapshot, client=client)
+    second = active_planner.create_llm_assisted_plan("help me implement logging", snapshot, client=client)
+
+    assert first.context_selection["cache_hit"] is False
+    assert second.context_selection["cache_hit"] is True
+    assert client.sufficiency_checks == 1
+    assert (tmp_path / ".snappy" / "cache").is_dir()
+
+
+def test_changed_file_hash_invalidates_context_cache(tmp_path: Path) -> None:
+    _taskcli_project(tmp_path)
+    snapshot = inspect_project(tmp_path)
+    first = discover_context("help me implement logging", snapshot)
+    assert first.cache_hit is False
+
+    (tmp_path / "src" / "taskcli" / "storage.py").write_text("def load_tasks():\n    return ['changed']\n", encoding="utf-8")
+    changed_snapshot = replace(inspect_project(tmp_path), snapshot_id=snapshot.snapshot_id)
+    second = discover_context("help me implement logging", changed_snapshot)
+
+    assert second.cache_hit is False
+    assert second.cache_key != first.cache_key
+
+
+def test_package_lock_is_not_entrypoint_for_vanilla_node_api_goal(tmp_path: Path) -> None:
+    (tmp_path / "package-lock.json").write_text('{"name": "demo", "packages": {}}\n', encoding="utf-8")
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "routes.js").write_text("export function usersRoute(req, res) { res.end('ok') }\n", encoding="utf-8")
+    (src_dir / "server.js").write_text("import { usersRoute } from './routes.js'\nexport function start() {}\n", encoding="utf-8")
+
+    result = discover_context("help me add an API route spec", inspect_project(tmp_path))
+    selected = [item.path for item in result.selected_context]
+
+    assert "package-lock.json" not in result.repo_map.entrypoint_candidates
+    assert "package-lock.json" not in selected
+    assert "src/routes.js" in selected
+
+
+def test_generated_planner_payload_is_smaller_on_repeated_calls(tmp_path: Path) -> None:
+    _taskcli_project(tmp_path)
+    (tmp_path / "src" / "taskcli" / "storage.py").write_text(
+        "def load_tasks():\n"
+        "    data = []\n"
+        + "\n".join(f"    data.append('task-{index}')" for index in range(300))
+        + "\n    return data\n",
+        encoding="utf-8",
+    )
+    snapshot = inspect_project(tmp_path)
+    first_context = discover_context("help me implement logging", snapshot)
+    second_context = discover_context("help me implement logging", snapshot)
+
+    first_parts = active_planner.build_llm_prompt_parts("help me implement logging", snapshot, context_bundle=first_context)
+    second_parts = active_planner.build_llm_prompt_parts("help me implement logging", snapshot, context_bundle=second_context)
+
+    assert first_context.cache_hit is False
+    assert second_context.cache_hit is True
+    assert first_parts.stable_prefix == second_parts.stable_prefix
+    assert len(second_parts.dynamic_payload) < len(first_parts.dynamic_payload)
+
+
+def test_context_cache_can_be_disabled_with_env(tmp_path: Path, monkeypatch) -> None:
+    _taskcli_project(tmp_path)
+    snapshot = inspect_project(tmp_path)
+    calls = 0
+
+    def checker(goal, repo_map, selected):
+        nonlocal calls
+        calls += 1
+        return SufficiencyResult(True, "Enough context.")
+
+    monkeypatch.setenv("SNAPPY_DISABLE_CONTEXT_CACHE", "1")
+
+    first = discover_context("help me improve CLI", snapshot, sufficiency_checker=checker)
+    second = discover_context("help me improve CLI", snapshot, sufficiency_checker=checker)
+
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert calls == 2

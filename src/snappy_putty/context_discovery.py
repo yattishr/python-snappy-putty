@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,8 @@ from snappy_putty.project_inspector import ProjectSnapshot
 
 
 STRATEGY = "bounded_context_discovery_v1"
+CONTEXT_CACHE_VERSION = "context_cache_v1"
+PLANNER_PROMPT_VERSION = "grounded_planner_prompt_v2"
 MAX_SELECTED_FILES = 12
 MAX_EXPANSION_FILES = 5
 MAX_TOTAL_FILES = 15
@@ -255,10 +258,14 @@ class ContextDiscoveryResult:
     sufficiency: dict[str, Any]
     expanded: bool
     rejected_expansion_files: list[str] = field(default_factory=list)
+    cache_key: str | None = None
+    cache_hit: bool = False
 
     def metadata(self) -> dict[str, Any]:
         return {
             "strategy": STRATEGY,
+            "cache_key": self.cache_key,
+            "cache_hit": self.cache_hit,
             "max_files": MAX_SELECTED_FILES,
             "max_expansion_files": MAX_EXPANSION_FILES,
             "max_total_files": MAX_TOTAL_FILES,
@@ -320,13 +327,30 @@ def discover_context(
     *,
     sufficiency_checker: Callable[[str, RepoMap, list[SelectedContextFile]], SufficiencyResult] | None = None,
     progress: Callable[[str], None] | None = None,
+    planner_mode: str = "llm_assisted",
+    planner_version: str = PLANNER_PROMPT_VERSION,
+    use_cache: bool | None = None,
 ) -> ContextDiscoveryResult:
     _emit(progress, "Building repo map...")
     repo_map = build_repo_map(snapshot)
     _emit(progress, "Analyzing relevant files...")
     terms = derive_goal_terms(goal)
     ranked = rank_files(goal, repo_map, terms=terms)
-    selected_paths = _balanced_selection(ranked, repo_map, max_files=MAX_SELECTED_FILES)
+    selected_paths = _balanced_selection(ranked, repo_map, goal=goal, max_files=MAX_SELECTED_FILES)
+    cache_key = context_cache_key(
+        goal,
+        snapshot,
+        repo_map,
+        selected_paths,
+        planner_mode=planner_mode,
+        planner_version=planner_version,
+    )
+    cache_enabled = not _context_cache_disabled(snapshot) if use_cache is None else use_cache
+    if cache_enabled:
+        cached = load_context_cache(snapshot, cache_key)
+        if cached is not None:
+            _emit(progress, "Reusing cached context.")
+            return cached
     _emit(progress, "Preparing context...")
     selected = compress_context(repo_map, selected_paths, ranked)
     _emit(progress, "Checking context sufficiency...")
@@ -342,7 +366,7 @@ def discover_context(
             selected_paths = _dedupe([*selected_paths, *expansion])[:MAX_TOTAL_FILES]
             selected = compress_context(repo_map, selected_paths, ranked)
             final = sufficiency_checker(goal, repo_map, selected) if sufficiency_checker else heuristic_sufficiency(goal, repo_map, selected)
-    return ContextDiscoveryResult(
+    result = ContextDiscoveryResult(
         goal=goal,
         snapshot_id=snapshot.snapshot_id,
         repo_map=repo_map,
@@ -357,7 +381,12 @@ def discover_context(
         },
         expanded=expanded,
         rejected_expansion_files=rejected,
+        cache_key=cache_key,
+        cache_hit=False,
     )
+    if cache_enabled:
+        save_context_cache(snapshot, result)
+    return result
 
 
 def derive_goal_terms(goal: str) -> list[str]:
@@ -485,8 +514,145 @@ def repo_map_summary(repo_map: RepoMap) -> dict[str, Any]:
     }
 
 
-def build_llm_context_prompt(bundle: ContextDiscoveryResult) -> str:
+def build_llm_context_prompt(bundle: ContextDiscoveryResult, *, compact_cached: bool = False) -> str:
+    if compact_cached and bundle.cache_hit:
+        payload = {
+            "goal": bundle.goal,
+            "snapshot_id": bundle.snapshot_id,
+            "context_cache_key": bundle.cache_key,
+            "repo_map_summary": repo_map_summary(bundle.repo_map),
+            "selected_context": [
+                {
+                    "path": item.path,
+                    "role": item.role,
+                    "kind": item.kind,
+                    "score": item.score,
+                    "reason": item.reason,
+                    "imports": item.imports,
+                    "symbols": item.symbols,
+                    "content_hints": item.content_hints,
+                }
+                for item in bundle.selected_context
+            ],
+            "sufficiency": bundle.sufficiency,
+        }
+        return json.dumps(payload, indent=2)
     return json.dumps(bundle.bundle_payload(), indent=2)
+
+
+def context_cache_key(
+    goal: str,
+    snapshot: ProjectSnapshot,
+    repo_map: RepoMap,
+    selected_paths: list[str],
+    *,
+    planner_mode: str,
+    planner_version: str,
+) -> str:
+    material = {
+        "cache_version": CONTEXT_CACHE_VERSION,
+        "snapshot_id": snapshot.snapshot_id,
+        "goal_hash": _hash_text(_normalize_goal(goal)),
+        "selected_file_hashes": _selected_file_hashes(repo_map, selected_paths),
+        "planner_mode": planner_mode,
+        "planner_version": planner_version,
+    }
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"ctx_{digest[:24]}"
+
+
+def load_context_cache(snapshot: ProjectSnapshot, cache_key: str) -> ContextDiscoveryResult | None:
+    path = _context_cache_path(snapshot, cache_key)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    try:
+        result = context_result_from_payload(payload)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if result.snapshot_id != snapshot.snapshot_id or result.cache_key != cache_key:
+        return None
+    return ContextDiscoveryResult(
+        goal=result.goal,
+        snapshot_id=result.snapshot_id,
+        repo_map=result.repo_map,
+        selected_context=result.selected_context,
+        sufficiency=result.sufficiency,
+        expanded=result.expanded,
+        rejected_expansion_files=result.rejected_expansion_files,
+        cache_key=result.cache_key,
+        cache_hit=True,
+    )
+
+
+def save_context_cache(snapshot: ProjectSnapshot, result: ContextDiscoveryResult) -> None:
+    if not result.cache_key:
+        return
+    path = _context_cache_path(snapshot, result.cache_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(context_result_to_payload(result), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def context_result_to_payload(result: ContextDiscoveryResult) -> dict[str, Any]:
+    payload = asdict(result)
+    payload["cache_hit"] = False
+    return payload
+
+
+def context_result_from_payload(payload: dict[str, Any]) -> ContextDiscoveryResult:
+    repo_map_payload = payload["repo_map"]
+    repo_map = RepoMap(
+        root=str(repo_map_payload["root"]),
+        languages=_str_list(repo_map_payload.get("languages", [])),
+        files=[
+            RepoFile(
+                path=str(item["path"]),
+                kind=str(item["kind"]),
+                language=item.get("language") if isinstance(item.get("language"), str) else None,
+                size_bytes=int(item.get("size_bytes", 0)),
+                role_hints=_str_list(item.get("role_hints", [])),
+                symbols=_str_list(item.get("symbols", [])),
+                imports=_str_list(item.get("imports", [])),
+                content_hints=_str_list(item.get("content_hints", [])),
+            )
+            for item in repo_map_payload.get("files", [])
+            if isinstance(item, dict)
+        ],
+        tests=_str_list(repo_map_payload.get("tests", [])),
+        docs=_str_list(repo_map_payload.get("docs", [])),
+        configs=_str_list(repo_map_payload.get("configs", [])),
+        entrypoint_candidates=_str_list(repo_map_payload.get("entrypoint_candidates", [])),
+    )
+    selected = [
+        SelectedContextFile(
+            path=str(item["path"]),
+            role=str(item["role"]),
+            kind=str(item["kind"]),
+            score=int(item.get("score", 0)),
+            reason=str(item.get("reason", "")),
+            imports=_str_list(item.get("imports", [])),
+            symbols=_str_list(item.get("symbols", [])),
+            content_hints=_str_list(item.get("content_hints", [])),
+            snippet=str(item.get("snippet", "")),
+        )
+        for item in payload.get("selected_context", [])
+        if isinstance(item, dict)
+    ]
+    return ContextDiscoveryResult(
+        goal=str(payload["goal"]),
+        snapshot_id=str(payload["snapshot_id"]),
+        repo_map=repo_map,
+        selected_context=selected,
+        sufficiency=dict(payload.get("sufficiency", {})),
+        expanded=bool(payload.get("expanded", False)),
+        rejected_expansion_files=_str_list(payload.get("rejected_expansion_files", [])),
+        cache_key=payload.get("cache_key") if isinstance(payload.get("cache_key"), str) else None,
+        cache_hit=bool(payload.get("cache_hit", False)),
+    )
 
 
 def _iter_files(root: Path) -> list[Path]:
@@ -562,15 +728,18 @@ def _extract_imports(language: str | None, text: str) -> list[str]:
     return _dedupe(imports)[:30]
 
 
-def _balanced_selection(ranked: dict[str, tuple[int, list[str]]], repo_map: RepoMap, *, max_files: int) -> list[str]:
+def _balanced_selection(ranked: dict[str, tuple[int, list[str]]], repo_map: RepoMap, *, goal: str, max_files: int) -> list[str]:
     by_path = {item.path: item for item in repo_map.files}
     ordered = sorted(ranked, key=lambda path: (-ranked[path][0], _kind_priority(by_path[path].kind), path))
     selected: list[str] = []
+    lockfiles_allowed = _lockfile_allowed(goal, repo_map)
     for path in repo_map.entrypoint_candidates:
+        if _lockfile_path(path) and not lockfiles_allowed:
+            continue
         _append(selected, path)
         break
     for path in ordered:
-        if _low_signal_path(path):
+        if _low_signal_path(path) or (_lockfile_path(path) and not lockfiles_allowed):
             continue
         if by_path[path].kind == "source":
             _append(selected, path)
@@ -581,10 +750,13 @@ def _balanced_selection(ranked: dict[str, tuple[int, list[str]]], repo_map: Repo
             _append(selected, path)
             break
     for group in (repo_map.docs, repo_map.configs):
-        if group:
-            _append(selected, group[0])
+        for path in group:
+            if _lockfile_path(path) and not lockfiles_allowed:
+                continue
+            _append(selected, path)
+            break
     for path in ordered:
-        if _low_signal_path(path):
+        if _low_signal_path(path) or (_lockfile_path(path) and not lockfiles_allowed):
             continue
         _append(selected, path)
         if len(selected) >= max_files:
@@ -663,6 +835,19 @@ def _low_signal_path(path: str) -> bool:
     return Path(path).name in {"__init__.py", "mod.rs"}
 
 
+def _lockfile_path(path: str) -> bool:
+    return Path(path).name in {"package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
+
+
+def _lockfile_allowed(goal: str, repo_map: RepoMap) -> bool:
+    goal_lower = goal.lower()
+    if any(token in goal_lower for token in ("dependency", "dependencies", "package", "npm", "lockfile", "package-lock", "install")):
+        return True
+    non_lock_config = [path for path in repo_map.configs if not _lockfile_path(path)]
+    source_files = [item.path for item in repo_map.files if item.kind == "source" and not _lockfile_path(item.path)]
+    return not non_lock_config and not source_files
+
+
 def _read_sample(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="ignore")[:80_000]
@@ -689,3 +874,53 @@ def _dedupe(items: list[str]) -> list[str]:
 def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     if progress:
         progress(message)
+
+
+def _context_cache_path(snapshot: ProjectSnapshot, cache_key: str) -> Path:
+    return Path(snapshot.root_path) / ".snappy" / "cache" / f"{cache_key}.json"
+
+
+def _context_cache_disabled(snapshot: ProjectSnapshot) -> bool:
+    disable_value = os.getenv("SNAPPY_DISABLE_CONTEXT_CACHE")
+    if disable_value is not None:
+        return disable_value.strip().lower() in {"1", "true", "yes", "on", "disabled", "disable"}
+    enable_value = os.getenv("SNAPPY_CONTEXT_CACHE")
+    if enable_value is not None:
+        return enable_value.strip().lower() in {"0", "false", "no", "off", "disabled", "disable"}
+    config_path = Path(snapshot.root_path) / ".snappy" / "snappy.yaml"
+    try:
+        lines = config_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        normalized = line.split("#", 1)[0].strip().lower()
+        if normalized in {"context_cache: false", "context_cache: off", "disable_context_cache: true"}:
+            return True
+    return False
+
+
+def _normalize_goal(goal: str) -> str:
+    return " ".join(goal.strip().lower().split())
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _selected_file_hashes(repo_map: RepoMap, selected_paths: list[str]) -> list[dict[str, str]]:
+    hashes: list[dict[str, str]] = []
+    root = Path(repo_map.root)
+    for rel_path in selected_paths:
+        path = root / rel_path
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+        hashes.append({"path": rel_path, "sha256": digest})
+    return hashes
+
+
+def _str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
