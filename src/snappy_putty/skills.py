@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from difflib import SequenceMatcher
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ _VALID_SNAPPY_KEYS = {
     "project_relationships",
     "extension_targets",
     "indicators",
+    "negative_indicators",
 }
 _STOPWORDS = {
     "a",
@@ -232,11 +234,33 @@ def match_skills(goal: str, skills: list[Skill], *, limit: int = 3) -> list[Skil
         description_lower = skill.metadata.description.lower()
         raw_indicators = skill.metadata.snappy.get("indicators")
         indicators = [item.lower() for item in raw_indicators if isinstance(item, str)] if isinstance(raw_indicators, list) else []
+        raw_negative_indicators = skill.metadata.snappy.get("negative_indicators")
+        negative_indicators = (
+            [item.lower() for item in raw_negative_indicators if isinstance(item, str)]
+            if isinstance(raw_negative_indicators, list)
+            else []
+        )
+        if _phrases_match_goal(goal_lower, negative_indicators):
+            reasons.append("x-snappy negative indicator matched")
+            score -= 0.75
         for indicator in indicators:
             if indicator and indicator in goal_lower:
-                score += 0.4
+                score += 0.65
                 reasons.append(f"x-snappy indicator matched: {indicator}")
                 break
+        else:
+            indicator_similarity = _best_phrase_similarity(goal, " ".join(indicators))
+            if indicator_similarity >= 0.72:
+                score += 0.5
+                reasons.append(f"x-snappy indicator similarity: {indicator_similarity:.2f}")
+        description_similarity = _best_phrase_similarity(goal, skill.metadata.description)
+        if description_similarity >= 0.72:
+            score += 0.45
+            reasons.append(f"description similarity: {description_similarity:.2f}")
+        body_similarity = _best_phrase_similarity(goal, skill.body)
+        if body_similarity >= 0.82:
+            score += 0.25
+            reasons.append(f"body similarity: {body_similarity:.2f}")
         for phrase in _goal_phrases(goal_tokens):
             if phrase in description_lower:
                 score += 0.35
@@ -452,6 +476,80 @@ def _token_variants(token: str) -> set[str]:
         variants.add(token[:-2])
         variants.add(token[:-1])
     return {variant for variant in variants if len(variant) > 1 and variant not in _STOPWORDS}
+
+
+def _phrases_match_goal(goal_lower: str, phrases: list[str]) -> bool:
+    for phrase in phrases:
+        if phrase and (phrase in goal_lower or _best_phrase_similarity(goal_lower, phrase) >= 0.82):
+            return True
+    return False
+
+
+def _best_phrase_similarity(goal: str, reference: str) -> float:
+    goal_windows = _phrase_windows(goal, min_size=2, max_size=7)
+    reference_windows = _phrase_windows(reference, min_size=2, max_size=9)
+    if not goal_windows or not reference_windows:
+        return 0.0
+    best = 0.0
+    for goal_window in goal_windows:
+        for reference_window in reference_windows:
+            best = max(best, _phrase_similarity(goal_window, reference_window))
+    return round(best, 3)
+
+
+def _phrase_similarity(left: str, right: str) -> float:
+    left_tokens = _normalized_phrase_tokens(left)
+    right_tokens = _normalized_phrase_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    related = _related_token_overlap(left_tokens, right_tokens)
+    char_ratio = SequenceMatcher(None, " ".join(left_tokens), " ".join(right_tokens)).ratio()
+    return (0.7 * related) + (0.3 * char_ratio)
+
+
+def _related_token_overlap(left_tokens: list[str], right_tokens: list[str]) -> float:
+    matched_right: set[int] = set()
+    matches = 0
+    for left in left_tokens:
+        for index, right in enumerate(right_tokens):
+            if index in matched_right:
+                continue
+            if _tokens_are_related(left, right):
+                matched_right.add(index)
+                matches += 1
+                break
+    return matches / max(len(left_tokens), len(right_tokens))
+
+
+def _tokens_are_related(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    left_variants = {left, *_token_variants(left)}
+    right_variants = {right, *_token_variants(right)}
+    if left_variants & right_variants:
+        return True
+    shorter, longer = sorted((left, right), key=len)
+    return len(shorter) >= 3 and longer.startswith(shorter)
+
+
+def _phrase_windows(text: str, *, min_size: int, max_size: int) -> list[str]:
+    tokens = _normalized_phrase_tokens(text)
+    windows: list[str] = []
+    for size in range(min_size, min(max_size, len(tokens)) + 1):
+        for index in range(0, len(tokens) - size + 1):
+            windows.append(" ".join(tokens[index : index + size]))
+    if len(tokens) == 1 and min_size <= 1:
+        windows.append(tokens[0])
+    return windows
+
+
+def _normalized_phrase_tokens(text: str) -> list[str]:
+    phrase_stopwords = {"the", "this", "that", "for", "with", "and", "or", "a", "an", "to", "me", "my"}
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) > 1 and token not in phrase_stopwords
+    ]
 
 
 def _goal_phrases(tokens: set[str]) -> list[str]:

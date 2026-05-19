@@ -108,6 +108,57 @@ def test_matching_is_bounded_deterministic_and_includes_reasons(tmp_path: Path) 
     assert match_skills("plan a database migration", registry.skills) == []
 
 
+def test_matching_uses_skill_description_for_documentation_phrasing_variants(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        description=(
+            "Guide users through a structured workflow for co-authoring documentation. "
+            "Use when the user wants to write documentation, create a spec, draft a proposal, "
+            "write up a decision, or co-author structured content."
+        ),
+    )
+    registry = discover_skills(tmp_path)
+
+    examples = [
+        "write a doc for this API",
+        "write up the API behavior",
+        "create a spec for this nodejs api",
+        "draft documentation for the routes",
+    ]
+
+    for goal in examples:
+        matches = match_skills(goal, registry.skills)
+        assert matches, goal
+        assert matches[0].skill.metadata.name == "doc-coauthoring"
+        assert matches[0].reasons
+
+
+def test_matching_respects_skill_authored_negative_indicators(tmp_path: Path) -> None:
+    skill_dir = _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        description=(
+            "Guide users through a structured workflow for co-authoring documentation. "
+            "Use when the user wants to write documentation, create a spec, draft a proposal, "
+            "write up a decision, or co-author structured content."
+        ),
+    )
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    text = text.replace(
+        "  requires_confirmation: false\n",
+        "  requires_confirmation: false\n"
+        "  negative_indicators:\n"
+        "    - write code\n"
+        "    - implement endpoint\n",
+    )
+    (skill_dir / "SKILL.md").write_text(text, encoding="utf-8")
+
+    registry = discover_skills(tmp_path)
+
+    assert match_skills("write code for a new API endpoint", registry.skills) == []
+
+
 def test_cli_skills_list_inspect_and_validate(tmp_path: Path) -> None:
     _write_skill(tmp_path)
 
