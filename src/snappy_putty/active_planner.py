@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 from snappy_putty.agent import DEFAULT_OPENAI_MODEL
 from snappy_putty.agent_discovery import get_agent_mode
+from snappy_putty.config import SnappyConfig
 from snappy_putty.context_discovery import (
     ContextDiscoveryResult,
     PLANNER_PROMPT_VERSION,
@@ -322,8 +323,22 @@ def assess_project_relationship(
     snapshot: ProjectSnapshot,
     *,
     skill_matches: list[SkillMatch] | None = None,
+    config: SnappyConfig | None = None,
 ) -> ProjectRelationshipResult:
-    return classify_project_relationship(goal, snapshot, matched_skills=skill_matches)
+    result = classify_project_relationship(goal, snapshot, matched_skills=skill_matches)
+    if (
+        config is not None
+        and not config.planning.allow_project_extensions
+        and result.relationship == ProjectRelationship.PROJECT_EXTENSION
+    ):
+        return ProjectRelationshipResult(
+            False,
+            ProjectRelationship.UNRELATED,
+            min(result.confidence, 0.24),
+            "project_extensions_disabled_by_config",
+            result.matched_skills,
+        )
+    return result
 
 
 def assess_project_relevance(
@@ -331,8 +346,9 @@ def assess_project_relevance(
     snapshot: ProjectSnapshot,
     *,
     skill_matches: list[SkillMatch] | None = None,
+    config: SnappyConfig | None = None,
 ) -> tuple[bool, str]:
-    result = assess_project_relationship(goal, snapshot, skill_matches=skill_matches)
+    result = assess_project_relationship(goal, snapshot, skill_matches=skill_matches, config=config)
     return result.is_project_related, result.reason
 
 
@@ -344,6 +360,7 @@ def build_grounded_plan(
     llm_client: LLMPlannerClient | None = None,
     skill_matches: list[SkillMatch] | None = None,
     project_relationship: ProjectRelationshipResult | None = None,
+    config: SnappyConfig | None = None,
 ) -> GroundedPlan:
     if mode == PlanningMode.LLM_ASSISTED:
         return create_llm_assisted_plan(
@@ -352,6 +369,7 @@ def build_grounded_plan(
             client=llm_client,
             skill_matches=skill_matches,
             project_relationship=project_relationship,
+            config=config,
         )
 
     files_inspected = _select_deterministic_files(goal, snapshot)
@@ -375,7 +393,7 @@ def build_grounded_plan(
         summary=f"Deterministic grounded plan for: {goal.strip()}",
         refinements=[],
         invalidation_reason=None,
-        context_selection=_context_with_skill_selection(None, skill_matches, project_relationship),
+        context_selection=_context_with_skill_selection(None, skill_matches, project_relationship, config),
     )
 
 
@@ -388,6 +406,7 @@ def create_llm_assisted_plan(
     progress: Any | None = None,
     skill_matches: list[SkillMatch] | None = None,
     project_relationship: ProjectRelationshipResult | None = None,
+    config: SnappyConfig | None = None,
 ) -> GroundedPlan:
     planner_client = client or default_llm_planner_client(session_mode=session_mode)
     if planner_client is None:
@@ -402,6 +421,7 @@ def create_llm_assisted_plan(
         progress=progress,
         planner_mode=PlanningMode.LLM_ASSISTED.value,
         planner_version=PLANNER_PROMPT_VERSION,
+        max_selected_files=config.planning.max_context_files if config is not None else None,
     )
     if not context_bundle.sufficiency.get("final_sufficient", False) and not _can_plan_project_extension(
         project_relationship,
@@ -419,7 +439,7 @@ def create_llm_assisted_plan(
         raw_response,
         snapshot,
         Path(snapshot.root_path),
-        context_selection=_context_with_skill_selection(context_bundle.metadata(), skill_matches, project_relationship),
+        context_selection=_context_with_skill_selection(context_bundle.metadata(), skill_matches, project_relationship, config),
     )
 
 
@@ -1712,12 +1732,21 @@ def _context_with_skill_selection(
     context_selection: dict[str, Any] | None,
     matches: list[SkillMatch] | None,
     project_relationship: ProjectRelationshipResult | None = None,
+    config: SnappyConfig | None = None,
 ) -> dict[str, Any] | None:
-    if not matches and project_relationship is None:
+    if not matches and project_relationship is None and config is None:
         return context_selection
     context = dict(context_selection or {})
     if matches:
         context["skill_selection"] = skill_selection_metadata(matches)
     if project_relationship is not None:
         context["project_relationship"] = project_relationship.as_metadata()
+    if config is not None:
+        context["project_config"] = {
+            "source": config.source,
+            "allow_project_extensions": config.planning.allow_project_extensions,
+            "max_context_files": config.planning.max_context_files,
+            "skills_enabled": list(config.skills.enabled),
+            "skills_disabled": list(config.skills.disabled),
+        }
     return context

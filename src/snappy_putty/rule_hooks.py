@@ -77,6 +77,7 @@ def evaluate_filesystem_policy(
     cwd: Path,
     workspace_root: Path,
     rule_registry: AgentRuleRegistry,
+    protected_paths: Iterable[str] = (),
 ) -> tuple[PolicyDecision, str | None]:
     block_rules: list[str] = []
     confirm_rules: list[str] = []
@@ -85,7 +86,12 @@ def evaluate_filesystem_policy(
     blocked_message: str | None = None
 
     if rule_registry.is_active(PROTECT_PROJECT_ROOT_RULE):
-        blocked_message = _protect_project_root_message(plan=plan, cwd=cwd, workspace_root=workspace_root)
+        blocked_message = _protect_project_root_message(
+            plan=plan,
+            cwd=cwd,
+            workspace_root=workspace_root,
+            configured_protected_paths=protected_paths,
+        )
         if blocked_message is not None:
             block_rules.append(PROTECT_PROJECT_ROOT_RULE)
 
@@ -120,12 +126,14 @@ def before_filesystem_mutation_plan_or_execute(
     cwd: Path,
     workspace_root: Path,
     rule_registry: AgentRuleRegistry,
+    protected_paths: Iterable[str] = (),
 ) -> FilesystemRuleDecision:
     policy_decision, blocked_message = evaluate_filesystem_policy(
         plan=plan,
         cwd=cwd,
         workspace_root=workspace_root,
         rule_registry=rule_registry,
+        protected_paths=protected_paths,
     )
     if policy_decision.outcome == "block":
         return FilesystemRuleDecision(blocked=True, message=blocked_message, policy_decision=policy_decision)
@@ -146,14 +154,20 @@ def before_agent_mode_change(*, target_mode: str, rule_registry: AgentRuleRegist
     return None
 
 
-def _protect_project_root_message(*, plan: FsPlan, cwd: Path, workspace_root: Path) -> str | None:
+def _protect_project_root_message(
+    *,
+    plan: FsPlan,
+    cwd: Path,
+    workspace_root: Path,
+    configured_protected_paths: Iterable[str] = (),
+) -> str | None:
     if any("Path escapes workspace root:" in warning for warning in plan.warnings):
         return (
             "Operation blocked by rule: protect_project_root\n\n"
             "The requested filesystem mutation targets a protected path."
         )
 
-    protected_paths = _protected_paths(cwd=cwd, workspace_root=workspace_root)
+    protected_paths = _protected_paths(cwd=cwd, workspace_root=workspace_root, configured_protected_paths=configured_protected_paths)
     for op in plan.ops:
         for candidate in _relevant_op_paths(op=op, cwd=cwd):
             if candidate in protected_paths:
@@ -164,11 +178,17 @@ def _protect_project_root_message(*, plan: FsPlan, cwd: Path, workspace_root: Pa
     return None
 
 
-def _protected_paths(*, cwd: Path, workspace_root: Path) -> set[Path]:
+def _protected_paths(*, cwd: Path, workspace_root: Path, configured_protected_paths: Iterable[str] = ()) -> set[Path]:
     protected = {workspace_root.resolve()}
     cwd_root = cwd.resolve().anchor or "/"
     protected.add(Path(cwd_root).resolve())
     protected.add(Path.home().resolve())
+    for path_text in configured_protected_paths:
+        candidate = Path(path_text)
+        if candidate.is_absolute():
+            protected.add(candidate.resolve())
+        else:
+            protected.add((workspace_root / candidate).resolve())
     return protected
 
 

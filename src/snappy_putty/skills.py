@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from snappy_putty.config import SnappyConfig
+
 
 DEFAULT_SKILLS_DIR = Path(".snappy") / "skills"
 _VALID_SNAPPY_KEYS = {
@@ -97,9 +99,32 @@ def default_skills_path(root: Path | None = None) -> Path:
     return (root or Path.cwd()).resolve() / DEFAULT_SKILLS_DIR
 
 
-def discover_skills(root: Path | None = None) -> SkillRegistry:
+def discover_skills(root: Path | None = None, config: SnappyConfig | None = None) -> SkillRegistry:
     skills_dir = default_skills_path(root)
-    return load_skill_registry(skills_dir)
+    registry = load_skill_registry(skills_dir)
+    if config is None:
+        return registry
+    return filter_skill_registry(registry, config=config)
+
+
+def filter_skill_registry(registry: SkillRegistry, *, config: SnappyConfig) -> SkillRegistry:
+    enabled = set(config.skills.enabled)
+    disabled = set(config.skills.disabled)
+    skills: list[Skill] = []
+    issues = list(registry.issues)
+    known = {skill.metadata.name for skill in registry.skills}
+    for missing in sorted((enabled | disabled) - known):
+        issues.append(_issue("warning", "configured_skill_missing", f"Configured skill is missing: {missing}", config.path))
+    for skill in registry.skills:
+        name = skill.metadata.name
+        if name in disabled:
+            issues.append(_issue("warning", "skill_disabled_by_config", f"Skill disabled by config: {name}", skill.metadata.path))
+            continue
+        if enabled and name not in enabled:
+            issues.append(_issue("warning", "skill_not_enabled_by_config", f"Skill not enabled by config allowlist: {name}", skill.metadata.path))
+            continue
+        skills.append(skill)
+    return SkillRegistry(skills=skills, issues=issues)
 
 
 def load_skill_registry(path: Path) -> SkillRegistry:

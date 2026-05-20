@@ -42,6 +42,7 @@ from snappy_putty.active_planner import (
     validate_plan_integrity,
 )
 from snappy_putty.agent_init import init_agent_project
+from snappy_putty.config import SnappyConfig, config_path, load_effective_config, starter_config_text, validate_config
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, list_dir, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
@@ -148,10 +149,12 @@ inspect_app = typer.Typer(help="Read-only project inspection commands.", invoke_
 show_app = typer.Typer(help="Display cached inspection and planning state.", invoke_without_command=False)
 refresh_app = typer.Typer(help="Refresh cached project inspection state.", invoke_without_command=False)
 skills_app = typer.Typer(help="Discover, inspect, and validate local skills.", invoke_without_command=True)
+config_app = typer.Typer(help="Inspect and manage project Snappy configuration.", invoke_without_command=True)
 app.add_typer(inspect_app, name="inspect")
 app.add_typer(show_app, name="show")
 app.add_typer(refresh_app, name="refresh")
 app.add_typer(skills_app, name="skills")
+app.add_typer(config_app, name="config")
 console = Console()
 UNKNOWN_COMMAND_MESSAGE = "I don't recognize that command. Try 'help' to see what I can do."
 OUT_OF_SCOPE_MESSAGE = "I can only help with software, hardware, and technology topics."
@@ -1417,6 +1420,33 @@ def _build_agent_mode_lines(
     ]
 
 
+def _effective_config(root: Path | None = None) -> SnappyConfig:
+    return load_effective_config((root or Path.cwd()).resolve())
+
+
+def _effective_agent_mode(root: Path, session_mode: str | None = None) -> str:
+    explicit = normalize_agent_mode(session_mode)
+    if explicit is not None:
+        return explicit
+    return _effective_config(root).agent.mode
+
+
+def _effective_agent_mode_source(root: Path, session_mode: str | None = None) -> str:
+    explicit = normalize_agent_mode(session_mode)
+    if explicit is not None:
+        return "session"
+    config = _effective_config(root)
+    if any(issue.code == "invalid_env_agent_mode" for issue in config.issues):
+        return "environment-invalid"
+    if os.getenv("SNAPPY_AGENT_MODE") is not None:
+        return "environment"
+    return config.source
+
+
+def _config_issue_lines(config: SnappyConfig) -> list[str]:
+    return [f"{issue.severity}: {issue.code}: {issue.message}" for issue in validate_config(config)]
+
+
 def _render_compact_command_block(commands: list[tuple[str, str]], *, columns: int) -> str:
     command_width = max(len(name) for name, _ in commands)
     description_width = max(len(description) for _, description in commands)
@@ -2654,7 +2684,9 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
 
 def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
     """Run ask flow and render output."""
-    agent_mode = get_agent_mode(session_mode)
+    root = Path.cwd().resolve()
+    config = _effective_config(root)
+    agent_mode = _effective_agent_mode(root, session_mode)
     planning_intent = classify_planning_intent(intent)
     if agent_mode == "off" and planning_intent == PlanningIntent.PROJECT_DEVELOPER_GOAL:
         console.print("Active planning is off.")
@@ -2673,12 +2705,11 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
             skip_reason="llm_required_but_unavailable",
         )
     if agent_mode == "active":
-        root = Path.cwd().resolve()
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
-        skill_registry = discover_skills(root)
+        skill_registry = discover_skills(root, config=config)
         skill_matches = match_skills(intent, skill_registry.skills)
-        project_relationship = assess_project_relationship(intent, snapshot, skill_matches=skill_matches)
+        project_relationship = assess_project_relationship(intent, snapshot, skill_matches=skill_matches, config=config)
         related = project_relationship.is_project_related
         relevance_reason = project_relationship.reason
         emit_progress("Inspecting project context...")
@@ -2761,10 +2792,11 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     plan = create_llm_assisted_plan(
                         intent,
                         snapshot,
-                        session_mode=session_mode,
+                        session_mode=agent_mode,
                         progress=emit_progress,
                         skill_matches=skill_matches,
                         project_relationship=project_relationship,
+                        config=config,
                     )
                 else:
                     plan = build_grounded_plan(
@@ -2773,6 +2805,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                         mode=PlanningMode.DETERMINISTIC,
                         skill_matches=skill_matches,
                         project_relationship=project_relationship,
+                        config=config,
                     )
         except LLMPlannerUnavailableError as exc:
             _debug(str(exc))
@@ -2784,6 +2817,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     mode=PlanningMode.DETERMINISTIC,
                     skill_matches=skill_matches,
                     project_relationship=project_relationship,
+                    config=config,
                 )
         except LLMPlanValidationError as exc:
             console.print("LLM-assisted plan was rejected by validation.")
@@ -2806,6 +2840,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     mode=PlanningMode.DETERMINISTIC,
                     skill_matches=skill_matches,
                     project_relationship=project_relationship,
+                    config=config,
                 )
         if plan is None:
             return AgentRunResult(
@@ -2943,15 +2978,107 @@ def init(force: bool = typer.Option(False, "--force", help="Overwrite scaffold f
     console.print(result.message)
 
 
+def _config_lines(config: SnappyConfig) -> list[str]:
+    return [
+        f"Config source: {config.source}",
+        f"Agent name: {config.agent.name}",
+        f"Agent mode: {config.agent.mode}",
+        f"Agent description: {config.agent.description or '(none)'}",
+        "",
+        "Planning:",
+        f"- allow_project_extensions: {config.planning.allow_project_extensions}",
+        f"- prefer_small_steps: {config.planning.prefer_small_steps}",
+        f"- inspect_before_mutation: {config.planning.inspect_before_mutation}",
+        f"- max_context_files: {config.planning.max_context_files}",
+        "",
+        "Skills:",
+        f"- enabled: {', '.join(config.skills.enabled) if config.skills.enabled else '(all valid skills)'}",
+        f"- disabled: {', '.join(config.skills.disabled) if config.skills.disabled else '(none)'}",
+        "",
+        "Rules:",
+        f"- confirmation_required: {config.rules.confirmation_required}",
+        f"- allow_file_writes: {config.rules.allow_file_writes}",
+        f"- allow_shell_commands: {config.rules.allow_shell_commands}",
+        f"- protected_paths: {', '.join(config.rules.protected_paths)}",
+        "",
+        "Memory:",
+        f"- enabled: {config.memory.enabled}",
+        f"- snapshot_on_inspect: {config.memory.snapshot_on_inspect}",
+        "",
+        "Logging:",
+        f"- level: {config.logging.level}",
+        f"- trace_enabled: {config.logging.trace_enabled}",
+    ]
+
+
+def _render_config(config: SnappyConfig, *, title: str = "Snappy Config") -> None:
+    lines = _config_lines(config)
+    issue_lines = _config_issue_lines(config)
+    if issue_lines:
+        lines.extend(["", "Validation issues:", *issue_lines])
+    else:
+        lines.extend(["", "Validation: ok"])
+    console.print(Panel("\n".join(lines), title=title, border_style="bright_blue"))
+
+
+@config_app.callback(invoke_without_command=True)
+def config_root(ctx: typer.Context) -> None:
+    """Show effective project config."""
+    if ctx.invoked_subcommand is None:
+        _render_config(_effective_config(Path.cwd()))
+
+
+@config_app.command("init")
+def config_init() -> None:
+    """Create a safe starter .snappy/snappy.yaml."""
+    path = config_path(Path.cwd())
+    if path.exists():
+        console.print(f"Config already exists: {_display_path(path)}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(starter_config_text(), encoding="utf-8")
+    console.print(f"Created config: {_display_path(path)}")
+
+
+@config_app.command("validate")
+def config_validate() -> None:
+    """Validate .snappy/snappy.yaml."""
+    config = _effective_config(Path.cwd())
+    issues = validate_config(config)
+    if not issues:
+        console.print("Config validation passed.")
+        return
+    for issue in issues:
+        console.print(f"{issue.severity}: {issue.code}: {issue.message}", markup=False)
+    if any(issue.severity == "error" for issue in issues):
+        raise typer.Exit(code=1)
+
+
+@config_app.command("explain")
+def config_explain() -> None:
+    """Explain how project config affects Snappy behaviour."""
+    config = _effective_config(Path.cwd())
+    lines = [
+        f"This project uses {config.agent.mode} mode by default.",
+        f"Project extensions are {'allowed' if config.planning.allow_project_extensions else 'disabled by config'}.",
+        "Skills are loaded from .snappy/skills unless disabled or excluded by an enabled allowlist.",
+        "File writes still require existing safety confirmation where applicable.",
+        f"Protected paths: {', '.join(config.rules.protected_paths)}",
+    ]
+    console.print(Panel("\n".join(lines), title="Config Explain", border_style="bright_blue"))
+
+
 def _skill_status(skill: Skill, issue_codes: set[str]) -> str:
     return "warning" if issue_codes else "valid"
 
 
 def _render_skills_list(agent_mode_override: str | None = None) -> None:
-    registry = discover_skills(Path.cwd())
+    config = _effective_config(Path.cwd())
+    raw_registry = discover_skills(Path.cwd())
+    registry = discover_skills(Path.cwd(), config=config)
     legacy_registry = load_agent_skill_registry(Path.cwd(), session_mode=agent_mode_override)
-    missing_skill_md = any(issue.code == "missing_skill_md" for issue in registry.errors)
-    if registry.skills:
+    missing_skill_md = any(issue.code == "missing_skill_md" for issue in raw_registry.errors)
+    if raw_registry.skills:
         table = Table(title="Available Skills")
         table.add_column("name")
         table.add_column("risk")
@@ -2959,12 +3086,19 @@ def _render_skills_list(agent_mode_override: str | None = None) -> None:
         table.add_column("description")
         table.add_column("path")
         warning_codes_by_path: dict[Path, set[str]] = {}
-        for issue in registry.warnings:
+        for issue in raw_registry.warnings:
             if issue.path is not None:
                 warning_codes_by_path.setdefault(issue.path, set()).add(issue.code)
-        for skill in registry.skills:
+        enabled = set(config.skills.enabled)
+        disabled = set(config.skills.disabled)
+        loaded_names = {skill.metadata.name for skill in registry.skills}
+        for skill in raw_registry.skills:
             risk = str(skill.metadata.snappy.get("risk") or "")
             status = _skill_status(skill, warning_codes_by_path.get(skill.metadata.path, set()))
+            if skill.metadata.name in disabled:
+                status = "disabled by config"
+            elif enabled and skill.metadata.name not in loaded_names:
+                status = "not enabled by config"
             table.add_row(
                 skill.metadata.name,
                 risk or "-",
@@ -2986,6 +3120,8 @@ def _render_skills_list(agent_mode_override: str | None = None) -> None:
         console.print("No skills found in .snappy/skills/.")
     for issue in registry.issues:
         console.print(f"{issue.severity}: {issue.code}: {issue.message} ({_display_path(issue.path)})", markup=False)
+    for issue in _config_issue_lines(config):
+        console.print(issue, markup=False)
     for warning in legacy_registry.warnings:
         console.print(warning)
 
@@ -3163,11 +3299,13 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
         return
 
     registry = load_agent_rule_registry(root, session_mode=state.agent_mode)
+    config = _effective_config(root)
     rule_decision = before_filesystem_mutation_plan_or_execute(
         plan=state.pending_plan,
         cwd=Path.cwd(),
         workspace_root=root,
         rule_registry=registry,
+        protected_paths=config.rules.protected_paths,
     )
     if rule_decision.blocked:
         message = rule_decision.message or "Operation blocked by loaded agent rules."
@@ -3471,11 +3609,13 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
         return False
 
     registry = load_agent_rule_registry(root, session_mode=state.agent_mode)
+    config = _effective_config(root)
     rule_decision = before_filesystem_mutation_plan_or_execute(
         plan=plan,
         cwd=Path.cwd(),
         workspace_root=root,
         rule_registry=registry,
+        protected_paths=config.rules.protected_paths,
     )
     if rule_decision.blocked:
         message = rule_decision.message or "Operation blocked by loaded agent rules."
@@ -3617,11 +3757,13 @@ def _handle_fs_intent(intent: str, prompt_reader: Callable[[str], str] | None, w
         return False
 
     registry = load_agent_rule_registry(root)
+    config = _effective_config(root)
     rule_decision = before_filesystem_mutation_plan_or_execute(
         plan=plan,
         cwd=Path.cwd(),
         workspace_root=root,
         rule_registry=registry,
+        protected_paths=config.rules.protected_paths,
     )
     if rule_decision.blocked:
         message = rule_decision.message or "Operation blocked by loaded agent rules."

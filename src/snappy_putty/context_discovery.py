@@ -333,13 +333,15 @@ def discover_context(
     planner_mode: str = "llm_assisted",
     planner_version: str = PLANNER_PROMPT_VERSION,
     use_cache: bool | None = None,
+    max_selected_files: int | None = None,
 ) -> ContextDiscoveryResult:
     _emit(progress, "Building repo map...")
     repo_map = build_repo_map(snapshot)
     _emit(progress, "Analyzing relevant files...")
     terms = derive_goal_terms(goal)
     ranked = rank_files(goal, repo_map, terms=terms)
-    selected_paths = _balanced_selection(ranked, repo_map, goal=goal, max_files=MAX_SELECTED_FILES)
+    selection_limit = max_selected_files if max_selected_files is not None and max_selected_files > 0 else MAX_SELECTED_FILES
+    selected_paths = _balanced_selection(ranked, repo_map, goal=goal, max_files=selection_limit)
     cache_key = context_cache_key(
         goal,
         snapshot,
