@@ -33,6 +33,9 @@ _NOISY_DIRS = {
     "vendor",
     "target",
 }
+_NOISY_FILES = {
+    ".gitignore",
+}
 
 _CONFIG_FILES = {
     "pyproject.toml",
@@ -311,6 +314,8 @@ def _iter_project_files(root: Path) -> list[Path]:
         current_path = Path(current_root)
         dirnames[:] = [name for name in dirnames if name not in _NOISY_DIRS]
         for filename in filenames:
+            if filename in _NOISY_FILES:
+                continue
             path = current_path / filename
             if any(part in _NOISY_DIRS for part in path.parts):
                 continue

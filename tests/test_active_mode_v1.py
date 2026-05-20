@@ -922,6 +922,97 @@ def test_create_spec_goal_matches_doc_coauthoring_skill_for_node_api(tmp_path: P
     assert relationship.matched_skills == ["doc-coauthoring"]
 
 
+def test_negated_repo_context_is_not_project_related_even_with_matching_skill(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "server.js").write_text("const http = require('http')\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        "Guide users through a structured workflow for co-authoring documentation. Use when user wants to write documentation, proposals, technical specs, decision docs, or similar structured content. Trigger when user mentions writing docs, creating proposals, drafting specs, or similar documentation tasks.",
+    )
+    goal = "help me create a spec for a random API not in this repo"
+    snapshot = inspect_project(tmp_path)
+    registry = discover_skills(tmp_path)
+    skill_matches = match_skills(goal, registry.skills)
+
+    relationship = active_planner.assess_project_relationship(goal, snapshot, skill_matches=skill_matches)
+
+    assert skill_matches
+    assert not relationship.is_project_related
+    assert relationship.reason == "goal_explicitly_not_project_related"
+
+
+def test_doc_skill_direct_project_work_can_plan_without_existing_docs_convention(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "server.js").write_text(
+        "const http = require('http')\nconst controllers = require('./controllers/productControllers')\n",
+        encoding="utf-8",
+    )
+    controllers_dir = tmp_path / "controllers"
+    controllers_dir.mkdir()
+    (controllers_dir / "productControllers.js").write_text(
+        "exports.listProducts = (req, res) => res.end(JSON.stringify([]))\n",
+        encoding="utf-8",
+    )
+    _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        "Guide users through a structured workflow for co-authoring documentation. Use when user wants to write documentation, proposals, technical specs, decision docs, or similar structured content. Trigger when user mentions writing docs, creating proposals, drafting specs, or similar documentation tasks.",
+    )
+    goal = "help me draft documentation for the routes"
+    snapshot = inspect_project(tmp_path)
+    registry = discover_skills(tmp_path)
+    skill_matches = match_skills(goal, registry.skills)
+    project_relationship = active_planner.assess_project_relationship(goal, snapshot, skill_matches=skill_matches)
+
+    class InsufficientDocsConventionClient:
+        def check_context_sufficiency(self, prompt: str) -> dict[str, object]:
+            return {
+                "sufficient": False,
+                "reason": "No existing docs convention exists.",
+                "missing_context_queries": [],
+                "files_to_read_next": [],
+            }
+
+        def create_plan(self, prompt: str) -> dict[str, object]:
+            return {
+                "goal": goal,
+                "summary": "Draft route documentation from the inspected API source.",
+                "based_on_snapshot_id": snapshot.snapshot_id,
+                "files_inspected": ["server.js", "controllers/productControllers.js"],
+                "steps": [
+                    {
+                        "description": "Draft route documentation from the inspected server and controller behavior.",
+                        "files": ["server.js", "controllers/productControllers.js"],
+                        "proposed_new_files": ["docs/api.md"],
+                        "risk": "LOW",
+                        "requires_confirmation": True,
+                    }
+                ],
+                "risks": ["The documentation may omit behavior not visible in inspected files."],
+                "assumptions": ["The server and controller files define the route behavior."],
+            }
+
+    assert project_relationship.relationship.value == "direct_project_work"
+
+    plan = create_llm_assisted_plan(
+        goal,
+        snapshot,
+        client=InsufficientDocsConventionClient(),
+        skill_matches=skill_matches,
+        project_relationship=project_relationship,
+    )
+
+    assert plan.mode == PlanningMode.LLM_ASSISTED.value
+    assert plan.steps[0].proposed_new_files == ["docs/api.md"]
+
+
 def test_active_mode_without_llm_capability_creates_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",

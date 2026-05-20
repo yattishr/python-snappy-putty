@@ -433,11 +433,20 @@ def _can_plan_project_extension(
     if project_relationship.relationship not in {
         ProjectRelationship.PROJECT_EXTENSION,
         ProjectRelationship.PROJECT_ADAPTATION,
+        ProjectRelationship.DIRECT_PROJECT_WORK,
     }:
         return False
-    if skill_matches:
+    has_grounding_context = any(
+        item.kind in {"source", "config"} or item.role == "entrypoint" for item in context_bundle.selected_context
+    )
+    if project_relationship.relationship == ProjectRelationship.DIRECT_PROJECT_WORK:
+        return bool(skill_matches) and has_grounding_context
+    if skill_matches and project_relationship.relationship in {
+        ProjectRelationship.PROJECT_EXTENSION,
+        ProjectRelationship.PROJECT_ADAPTATION,
+    }:
         return True
-    return any(item.kind in {"source", "config"} or item.role == "entrypoint" for item in context_bundle.selected_context)
+    return has_grounding_context
 
 
 def validate_llm_plan(

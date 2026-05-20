@@ -42,6 +42,9 @@ EXCLUDED_DIRS = {
     ".next",
     ".nuxt",
 }
+EXCLUDED_FILES = {
+    ".gitignore",
+}
 
 CONFIG_FILES = {
     "pyproject.toml",
@@ -661,6 +664,8 @@ def _iter_files(root: Path) -> list[Path]:
         dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS]
         current = Path(current_root)
         for filename in filenames:
+            if filename in EXCLUDED_FILES:
+                continue
             path = current / filename
             rel_parts = path.relative_to(root).parts
             if any(part in EXCLUDED_DIRS for part in rel_parts):

@@ -42,6 +42,10 @@ _PROJECT_CONTEXT_PATTERNS = (
     r"\bin\s+(?:this|the\s+current)\s+(?:project|app|application|repo|repository|codebase|workspace)\b",
 )
 _PROJECT_CONTEXT_RE = re.compile("|".join(_PROJECT_CONTEXT_PATTERNS))
+_NEGATED_PROJECT_CONTEXT_RE = re.compile(
+    r"\bnot\s+in\s+(?:this|the\s+current)\s+(?:project|app|application|repo|repository|codebase|workspace|service|api|cli|script)\b"
+    r"|\bnot\s+(?:for|about)\s+(?:this|the\s+current)\s+(?:project|app|application|repo|repository|codebase|workspace|service|api|cli|script)\b"
+)
 
 _DIRECT_PROJECT_TERMS = {
     "code",
@@ -175,6 +179,9 @@ def classify_project_relationship(
     if not lowered or snapshot is None:
         return ProjectRelationshipResult(False, ProjectRelationship.UNRELATED, 0.0, "goal_not_project_related", matched_skill_names)
 
+    if _has_negated_project_context(lowered):
+        return ProjectRelationshipResult(False, ProjectRelationship.UNRELATED, 0.12, "goal_explicitly_not_project_related", matched_skill_names)
+
     if _references_snapshot_artifact(lowered, snapshot):
         return ProjectRelationshipResult(
             True,
@@ -229,6 +236,10 @@ def classify_project_relationship(
 
 def _has_project_context(text: str) -> bool:
     return bool(_PROJECT_CONTEXT_RE.search(text))
+
+
+def _has_negated_project_context(text: str) -> bool:
+    return bool(_NEGATED_PROJECT_CONTEXT_RE.search(text))
 
 
 def _references_snapshot_artifact(text: str, snapshot: ProjectSnapshot) -> bool:

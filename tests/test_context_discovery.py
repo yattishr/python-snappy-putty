@@ -81,6 +81,7 @@ def test_typescript_project_inspection_includes_tsx_sources(tmp_path: Path) -> N
 
 def test_node_project_inspection_excludes_generated_directories(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "index.js").write_text("export {}\n", encoding="utf-8")
     generated_dirs = [
@@ -104,6 +105,18 @@ def test_node_project_inspection_excludes_generated_directories(tmp_path: Path) 
 
     assert "src/index.js" in snapshot.source_files
     assert not any(path.startswith(f"{dirname}/") for dirname in generated_dirs for path in inspected)
+    assert ".gitignore" not in inspected
+
+
+def test_repo_map_excludes_gitignore(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (tmp_path / "server.js").write_text("require('http')\n", encoding="utf-8")
+
+    result = discover_context("help me improve this api", inspect_project(tmp_path))
+    paths = [item.path for item in result.repo_map.files]
+
+    assert ".gitignore" not in paths
 
 
 def test_python_project_inspection_behavior_stays_stable(tmp_path: Path) -> None:

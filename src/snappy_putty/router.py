@@ -45,6 +45,12 @@ _REFINE_STEP_PATTERN = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _REFINE_PLAN_PATTERN = re.compile(r"^\s*refine\s+plan(?:\s+(?P<change>.+))?\s*$", flags=re.IGNORECASE | re.DOTALL)
+_WRAPPING_QUOTES = {
+    '"': '"',
+    "'": "'",
+    "“": "”",
+    "‘": "’",
+}
 _DESTRUCTIVE_VERBS = (
     "delete",
     "remove",
@@ -313,7 +319,7 @@ def _is_out_of_scope_intent(text: str) -> bool:
 
 
 def classify_input(text: str) -> RouteDecision:
-    stripped = text.strip()
+    stripped = _strip_wrapping_quotes(text.strip())
     lowered = stripped.lower()
 
     destructive_payload = _destructive_intent_payload(stripped)
@@ -407,3 +413,12 @@ def classify_input(text: str) -> RouteDecision:
         return RouteDecision(route=ROUTE_ASK, payload={"intent": stripped})
 
     return RouteDecision(route=ROUTE_UNKNOWN, payload={"text": stripped})
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    if len(text) < 2:
+        return text
+    closing = _WRAPPING_QUOTES.get(text[0])
+    if closing is not None and text[-1] == closing:
+        return text[1:-1].strip()
+    return text

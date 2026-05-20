@@ -65,6 +65,8 @@ from snappy_putty.router import classify_input
         ("what is the weather in Paris", "out_of_scope"),
         ("show me sports scores", "out_of_scope"),
         ("give me the latest news on Python 3.13", "ask"),
+        ('"help me create a spec for this nodejs api"', "ask"),
+        ("“help me create a spec for this nodejs api”", "ask"),
         ("do something random and undefined", "unknown"),
     ],
 )

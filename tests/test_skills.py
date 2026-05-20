@@ -9,7 +9,7 @@ import sys
 from snappy_putty.skills import discover_skills, match_skills, validate_skill_path
 
 
-def _write_skill(root: Path, name: str = "git-commit-helper", *, description: str | None = None) -> Path:
+def _write_skill(root: Path, name: str = "git-commit-helper", *, description: str | None = None, body: str | None = None) -> Path:
     skill_dir = root / ".snappy" / "skills" / name
     (skill_dir / "scripts").mkdir(parents=True)
     (skill_dir / "examples.md").write_text("# Examples\n", encoding="utf-8")
@@ -31,11 +31,16 @@ def _write_skill(root: Path, name: str = "git-commit-helper", *, description: st
                 "  requires_confirmation: false",
                 "---",
                 "",
-                "# Git Commit Helper",
-                "",
-                "## Workflow",
-                "",
-                "Draft a concise commit message from staged changes.",
+                body
+                or "\n".join(
+                    [
+                        "# Git Commit Helper",
+                        "",
+                        "## Workflow",
+                        "",
+                        "Draft a concise commit message from staged changes.",
+                    ]
+                ),
             ]
         )
         + "\n",
@@ -132,6 +137,22 @@ def test_matching_uses_skill_description_for_documentation_phrasing_variants(tmp
         assert matches, goal
         assert matches[0].skill.metadata.name == "doc-coauthoring"
         assert matches[0].reasons
+
+
+def test_matching_handles_long_skill_bodies_without_exhaustive_fuzzy_scan(tmp_path: Path) -> None:
+    body = "\n".join(f"## Section {index}\n" + "documentation workflow " * 80 for index in range(80))
+    _write_skill(
+        tmp_path,
+        "long-doc-coauthoring",
+        description="Use when the user wants to create a spec, write documentation, or draft structured technical content.",
+        body=body,
+    )
+    registry = discover_skills(tmp_path)
+
+    matches = match_skills("help me create a spec for this nodejs api", registry.skills)
+
+    assert matches
+    assert matches[0].skill.metadata.name == "long-doc-coauthoring"
 
 
 def test_matching_respects_skill_authored_negative_indicators(tmp_path: Path) -> None:

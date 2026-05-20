@@ -257,7 +257,7 @@ def match_skills(goal: str, skills: list[Skill], *, limit: int = 3) -> list[Skil
         if description_similarity >= 0.72:
             score += 0.45
             reasons.append(f"description similarity: {description_similarity:.2f}")
-        body_similarity = _best_phrase_similarity(goal, skill.body)
+        body_similarity = _best_phrase_similarity(goal, skill.body) if len(skill.body) <= 1200 else 0.0
         if body_similarity >= 0.82:
             score += 0.25
             reasons.append(f"body similarity: {body_similarity:.2f}")
@@ -534,6 +534,8 @@ def _tokens_are_related(left: str, right: str) -> bool:
 
 def _phrase_windows(text: str, *, min_size: int, max_size: int) -> list[str]:
     tokens = _normalized_phrase_tokens(text)
+    if len(tokens) > 64:
+        tokens = tokens[:64]
     windows: list[str] = []
     for size in range(min_size, min(max_size, len(tokens)) + 1):
         for index in range(0, len(tokens) - size + 1):
