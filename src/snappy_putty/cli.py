@@ -142,6 +142,7 @@ from snappy_putty.session import (
 )
 from snappy_putty.skills import DEFAULT_SKILLS_DIR, Skill, discover_skills, match_skills, validate_skill_path
 from snappy_putty.status import busy, get_status_message
+from snappy_putty.task_router import route_task, route_to_skill_matches
 from snappy_putty.models import AgentOutput, PlanStep as AgentPlanStep
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
@@ -2708,14 +2709,22 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
         skill_registry = discover_skills(root, config=config)
-        skill_matches = match_skills(intent, skill_registry.skills)
+        skill_route = route_task(intent, skill_registry.skills, snapshot=snapshot, config=config)
+        skill_matches = route_to_skill_matches(skill_route, skill_registry.skills)
         project_relationship = assess_project_relationship(intent, snapshot, skill_matches=skill_matches, config=config)
         related = project_relationship.is_project_related
         relevance_reason = project_relationship.reason
         emit_progress("Inspecting project context...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
-        if skill_matches:
-            console.print(f"Matched skill: {skill_matches[0].skill.metadata.name}")
+        console.print(f"Matched task intent: {skill_route.task_intent.label}")
+        if skill_route.selected_skills:
+            console.print(f"Selected skill: {', '.join(skill_route.selected_skills)}")
+            console.print(f"Matched skill: {skill_route.selected_skills[0]}")
+        else:
+            console.print("No matching skill selected.")
+        for issue in skill_registry.issues:
+            if issue.code in {"skill_disabled_by_config", "skill_not_enabled_by_config"}:
+                console.print(issue.message)
         if related:
             console.print(
                 f"Classified request as {project_relationship.relationship.value}: {project_relationship.reason}"
@@ -2727,6 +2736,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 "Goal": intent,
                 "Snapshot ID": snapshot.snapshot_id,
                 "Strategy": "bounded_context_discovery_v1",
+                "Skill routing": skill_route.as_metadata(),
                 "Project relationship": project_relationship.as_metadata(),
             },
         )
@@ -2795,6 +2805,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                         session_mode=agent_mode,
                         progress=emit_progress,
                         skill_matches=skill_matches,
+                        skill_route=skill_route,
                         project_relationship=project_relationship,
                         config=config,
                     )
@@ -2804,6 +2815,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                         snapshot,
                         mode=PlanningMode.DETERMINISTIC,
                         skill_matches=skill_matches,
+                        skill_route=skill_route,
                         project_relationship=project_relationship,
                         config=config,
                     )
@@ -2816,6 +2828,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     snapshot,
                     mode=PlanningMode.DETERMINISTIC,
                     skill_matches=skill_matches,
+                    skill_route=skill_route,
                     project_relationship=project_relationship,
                     config=config,
                 )
@@ -2839,6 +2852,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     snapshot,
                     mode=PlanningMode.DETERMINISTIC,
                     skill_matches=skill_matches,
+                    skill_route=skill_route,
                     project_relationship=project_relationship,
                     config=config,
                 )
@@ -2888,6 +2902,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     "Goal": plan.goal,
                     "Matched": [match.skill.metadata.name for match in skill_matches],
                     "Scores": [match.score for match in skill_matches],
+                    "Routing": skill_route.as_metadata(),
                 },
             )
         append_history_event(

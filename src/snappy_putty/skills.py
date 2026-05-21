@@ -16,6 +16,7 @@ _VALID_SNAPPY_KEYS = {
     "tools",
     "requires_confirmation",
     "tags",
+    "task_intents",
     "project_relationships",
     "extension_targets",
     "indicators",
@@ -47,6 +48,18 @@ _STOPWORDS = {
     "write",
 }
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+_VALID_TASK_INTENTS = {
+    "code_review",
+    "frontend_build",
+    "documentation",
+    "testing",
+    "deployment",
+    "project_setup",
+    "project_extension",
+    "project_adaptation",
+    "general_project_help",
+    "unrelated",
+}
 
 
 @dataclass(frozen=True)
@@ -195,6 +208,7 @@ def load_skill(path: Path) -> tuple[Skill | None, list[SkillValidationIssue]]:
         snappy = {}
     for key in sorted(set(snappy) - _VALID_SNAPPY_KEYS):
         issues.append(_issue("warning", "unknown_x_snappy_key", f"Unknown x-snappy key '{key}'.", skill_md))
+    issues.extend(_validate_snappy_metadata(snappy, skill_md))
 
     scripts = sorted((file for file in (path / "scripts").rglob("*") if file.is_file()), key=_path_sort_key) if (path / "scripts").is_dir() else []
     if scripts:
@@ -469,6 +483,34 @@ def _parse_scalar(value: str) -> Any:
 def _looks_like_usage_description(value: str) -> bool:
     lowered = value.lower()
     return any(phrase in lowered for phrase in ("use when", "when the user", "helps", "help "))
+
+
+def _validate_snappy_metadata(snappy: dict[str, Any], path: Path) -> list[SkillValidationIssue]:
+    issues: list[SkillValidationIssue] = []
+    valid_relationships = {"direct_project_work", "project_extension", "project_adaptation", "unrelated"}
+    list_fields = {
+        "task_intents": "invalid_task_intents",
+        "project_relationships": "invalid_project_relationships",
+        "extension_targets": "invalid_extension_targets",
+        "indicators": "invalid_indicators",
+        "negative_indicators": "invalid_negative_indicators",
+    }
+    for field_name, code in list_fields.items():
+        value = snappy.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            issues.append(_issue("warning", code, f"x-snappy.{field_name} must be a list when present.", path))
+            continue
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                issues.append(_issue("warning", code, f"x-snappy.{field_name} entries must be non-empty strings.", path))
+                continue
+            if field_name == "task_intents" and item not in _VALID_TASK_INTENTS:
+                issues.append(_issue("warning", "unknown_task_intent", f"Unknown x-snappy task intent: {item}", path))
+            if field_name == "project_relationships" and item not in valid_relationships:
+                issues.append(_issue("warning", "unknown_project_relationship", f"Unknown x-snappy project relationship: {item}", path))
+    return issues
 
 
 def _headings(body: str) -> list[str]:

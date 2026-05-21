@@ -11,6 +11,7 @@ from snappy_putty import cli
 from snappy_putty.active_planner import LLMPlanValidationError, PlanningMode, create_llm_assisted_plan, validate_llm_plan
 from snappy_putty.project_inspector import inspect_project
 from snappy_putty.skills import discover_skills, match_skills
+from snappy_putty.task_router import route_task, route_to_skill_matches
 
 
 def _env() -> dict[str, str]:
@@ -602,6 +603,58 @@ def test_skill_guided_extension_bypasses_negative_sufficiency_gate(tmp_path: Pat
     assert plan.steps[0].proposed_new_files == ["admin/index.html", "admin/app.js", "admin/styles.css"]
 
 
+def test_active_planning_records_skill_routing_metadata_and_prompt_context(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"vite"}}\n', encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.tsx").write_text("export function App() { return null }\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use this skill when reviewing code changes, inspecting diffs, and producing PR or MR review feedback.",
+        relationships=["direct_project_work"],
+        indicators=["code review", "MR feedback", "PR feedback"],
+    )
+    _write_skill(
+        tmp_path,
+        "frontend-design",
+        "Use this skill when building frontend interfaces, dashboards, React components, and UI polish.",
+        relationships=["project_extension"],
+        targets=["typescript"],
+        indicators=["frontend", "dashboard", "interface"],
+    )
+    goal = "Build a frontend interface for this application."
+    snapshot = inspect_project(tmp_path)
+    registry = discover_skills(tmp_path)
+    route = route_task(goal, registry.skills, snapshot=snapshot)
+    skill_matches = route_to_skill_matches(route, registry.skills)
+    relationship = active_planner.assess_project_relationship(goal, snapshot, skill_matches=skill_matches)
+
+    class CapturingClient(active_planner._MockLLMPlannerClient):
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        def create_plan(self, prompt: str) -> dict[str, object]:
+            self.prompt = prompt
+            return super().create_plan(prompt)
+
+    client = CapturingClient()
+    plan = create_llm_assisted_plan(
+        goal,
+        snapshot,
+        client=client,
+        skill_matches=skill_matches,
+        skill_route=route,
+        project_relationship=relationship,
+    )
+
+    assert route.task_intent.label == "frontend_build"
+    assert route.selected_skills == ["frontend-design"]
+    assert "Skill: frontend-design" in client.prompt
+    assert "Skill: codeguardian-review" not in client.prompt
+    assert plan.context_selection["skill_routing"]["task_intent"]["label"] == "frontend_build"
+    assert plan.context_selection["skill_routing"]["selected_skills"] == ["frontend-design"]
+
+
 def test_api_auth_extension_bypasses_negative_sufficiency_gate_with_existing_context(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n', encoding="utf-8")
     (tmp_path / "server.js").write_text("const express = require('express')\n", encoding="utf-8")
@@ -1098,6 +1151,41 @@ def test_current_info_question_exits_cleanly(tmp_path: Path) -> None:
     assert "Active goal: (none)" in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
     assert "Last skip reason: unsupported_current_info_question" in proc.stdout
+
+
+def test_latest_changes_code_review_is_project_goal_not_current_info(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"start":"node server.js"},"dependencies":{"express":"latest"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text("const http = require('http')\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use this skill when reviewing code changes, inspecting diffs, and producing PR or MR review feedback.",
+        relationships=["direct_project_work"],
+        indicators=["code review", "review changes", "MR feedback", "PR feedback"],
+    )
+
+    assert (
+        active_planner.classify_planning_intent("Review my latest changes and give me MR-style feedback.")
+        == active_planner.PlanningIntent.STRUCTURED_PROJECT_INTENT
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="Review my latest changes and give me MR-style feedback.\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Matched task intent: code_review" in proc.stdout
+    assert "Selected skill: codeguardian-review" in proc.stdout
+    assert "current information request" not in proc.stdout
+    assert "Produce structured review feedback" in proc.stdout
+    assert "Apply the smallest project change" not in proc.stdout
+    assert "Last skip reason: (none)" in proc.stdout
 
 
 def test_rejected_grounded_planning_resets_workflow_state(tmp_path: Path) -> None:

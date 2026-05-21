@@ -71,6 +71,60 @@ def test_valid_skill_loads_with_snappy_metadata_and_scripts_are_not_executed(tmp
     assert any(issue.code == "scripts_present" for issue in registry.warnings)
 
 
+def test_valid_task_intents_are_accepted_in_skill_metadata(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path)
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8").replace(
+        "  requires_confirmation: false",
+        "  task_intents:\n"
+        "    - code_review\n"
+        "  requires_confirmation: false",
+    )
+    (skill_dir / "SKILL.md").write_text(text, encoding="utf-8")
+
+    registry = discover_skills(tmp_path)
+
+    assert registry.errors == []
+    assert not any(issue.code in {"unknown_task_intent", "invalid_task_intents"} for issue in registry.warnings)
+
+
+def test_invalid_task_intent_metadata_warns_without_rejecting_skill(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path)
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8").replace(
+        "  requires_confirmation: false",
+        "  task_intents:\n"
+        "    - teleport_database\n"
+        "  project_relationships:\n"
+        "    - moonbase\n"
+        "  indicators:\n"
+        "    - 123\n"
+        "  requires_confirmation: false",
+    )
+    (skill_dir / "SKILL.md").write_text(text, encoding="utf-8")
+
+    registry = discover_skills(tmp_path)
+
+    assert [skill.metadata.name for skill in registry.skills] == ["git-commit-helper"]
+    codes = {issue.code for issue in registry.warnings}
+    assert "unknown_task_intent" in codes
+    assert "unknown_project_relationship" in codes
+    assert "invalid_indicators" in codes
+
+
+def test_non_list_task_intents_warns_without_rejecting_skill(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path)
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8").replace(
+        "  requires_confirmation: false",
+        "  task_intents: code_review\n"
+        "  requires_confirmation: false",
+    )
+    (skill_dir / "SKILL.md").write_text(text, encoding="utf-8")
+
+    registry = discover_skills(tmp_path)
+
+    assert [skill.metadata.name for skill in registry.skills] == ["git-commit-helper"]
+    assert any(issue.code == "invalid_task_intents" for issue in registry.warnings)
+
+
 def test_validation_reports_missing_skill_md_and_malformed_frontmatter(tmp_path: Path) -> None:
     missing_dir = tmp_path / ".snappy" / "skills" / "missing"
     missing_dir.mkdir(parents=True)

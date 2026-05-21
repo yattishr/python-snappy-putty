@@ -185,6 +185,8 @@ def _is_supported_ask_intent(text: str) -> bool:
         "troubleshoot ",
         "fix ",
         "debug ",
+        "review ",
+        "inspect ",
     )
     return any(lowered.startswith(prefix) for prefix in ask_prefixes)
 
