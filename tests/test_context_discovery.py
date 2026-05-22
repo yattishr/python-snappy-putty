@@ -285,6 +285,36 @@ def test_package_lock_is_not_entrypoint_for_vanilla_node_api_goal(tmp_path: Path
     assert "src/routes.js" in selected
 
 
+def test_package_lock_is_not_added_by_context_expansion_for_non_dependency_goal(tmp_path: Path) -> None:
+    (tmp_path / "package-lock.json").write_text(
+        '{"name": "demo", "packages": {"node_modules/cac": {"version": "1.0.0"}}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node server.js"}}\n', encoding="utf-8")
+    (tmp_path / "server.js").write_text(
+        "const http = require('http')\n"
+        "http.createServer((_req, res) => res.end('ok'))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "routes.js").write_text("function listProducts() { return [] }\n", encoding="utf-8")
+    calls = 0
+
+    def checker(goal, repo_map, selected):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SufficiencyResult(False, "Need more API context.", ["api entrypoint"], ["package-lock.json"])
+        return SufficiencyResult(True, "Enough context without lockfiles.")
+
+    result = discover_context("help me design a frontend for this API", inspect_project(tmp_path), sufficiency_checker=checker)
+    selected = [item.path for item in result.selected_context]
+
+    assert calls == 1
+    assert result.expanded is False
+    assert "package-lock.json" not in result.repo_map.entrypoint_candidates
+    assert "package-lock.json" not in selected
+
+
 def test_generated_planner_payload_is_smaller_on_repeated_calls(tmp_path: Path) -> None:
     _taskcli_project(tmp_path)
     (tmp_path / "src" / "taskcli" / "storage.py").write_text(

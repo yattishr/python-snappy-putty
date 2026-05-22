@@ -364,7 +364,7 @@ def discover_context(
     rejected: list[str] = []
     final = initial
     if not initial.sufficient:
-        expansion = _expansion_paths(initial, ranked, repo_map, selected_paths, rejected)
+        expansion = _expansion_paths(initial, ranked, repo_map, selected_paths, rejected, goal=goal)
         if expansion:
             expanded = True
             _emit(progress, "Expanding context...")
@@ -695,6 +695,8 @@ def _role_hints(path: str, text: str) -> list[str]:
     name = Path(path).name
     if name in ENTRYPOINT_NAMES or path in ENTRYPOINT_NAMES or path.startswith("cmd/") and name == "main.go":
         hints.append("entrypoint_candidate")
+    if _lockfile_path(path):
+        return hints
     lowered = text.lower()
     if any(marker.lower() in lowered for marker in ENTRYPOINT_MARKERS):
         hints.append("entrypoint_candidate")
@@ -777,10 +779,15 @@ def _expansion_paths(
     repo_map: RepoMap,
     selected: list[str],
     rejected: list[str],
+    *,
+    goal: str,
 ) -> list[str]:
     known = {item.path for item in repo_map.files}
+    lockfiles_allowed = _lockfile_allowed(goal, repo_map)
     additions: list[str] = []
     for path in sufficiency.files_to_read_next:
+        if _lockfile_path(path) and not lockfiles_allowed:
+            continue
         if path in known and path not in selected:
             _append(additions, path)
         elif path not in known:
@@ -789,11 +796,15 @@ def _expansion_paths(
     if terms:
         query_ranked = rank_files(" ".join(terms), repo_map, terms=terms)
         for path in sorted(query_ranked, key=lambda item: (-query_ranked[item][0], item)):
+            if _lockfile_path(path) and not lockfiles_allowed:
+                continue
             if path not in selected:
                 _append(additions, path)
             if len(additions) >= MAX_EXPANSION_FILES:
                 break
     for path in sorted(ranked, key=lambda item: (-ranked[item][0], item)):
+        if _lockfile_path(path) and not lockfiles_allowed:
+            continue
         if path not in selected:
             _append(additions, path)
         if len(additions) >= MAX_EXPANSION_FILES:
