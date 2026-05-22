@@ -131,6 +131,7 @@ from snappy_putty.session import (
     ActiveWorkflowSnapshot,
     ClarificationContext,
     ConfirmationContext,
+    OutputGenerationContext,
     ExecutionOperation,
     ExecutionResult,
     InvalidLifecycleTransition,
@@ -139,6 +140,12 @@ from snappy_putty.session import (
     load_workflow_snapshot,
     restore_workflow_snapshot,
     SessionState,
+)
+from snappy_putty.skill_outputs import (
+    build_skill_output_request,
+    generate_skill_output,
+    output_kind_for_request,
+    render_skill_output,
 )
 from snappy_putty.skills import DEFAULT_SKILLS_DIR, Skill, discover_skills, match_skills, validate_skill_path
 from snappy_putty.status import busy, get_status_message
@@ -404,6 +411,8 @@ def _render_clarification_followup(state: SessionState, *, blocked: bool) -> Non
 
 def _confirmation_prompt_label(state: SessionState) -> str:
     context = state.pending_context
+    if isinstance(context, OutputGenerationContext):
+        return "generate [YES/NO]> "
     stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
     if stage == "overwrite":
         return "overwrite [YES/NO]> "
@@ -414,6 +423,8 @@ def _confirmation_prompt_label(state: SessionState) -> str:
 
 def _confirmation_prompt_message(state: SessionState) -> str:
     context = state.pending_context
+    if isinstance(context, OutputGenerationContext):
+        return "Type YES to generate the non-mutating skill output, or NO to cancel."
     stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
     if stage == "overwrite":
         return "Destination exists. Type YES to overwrite, or NO to cancel."
@@ -765,7 +776,15 @@ def _record_agent_planning_result(
     if result.output.question is not None:
         _set_state(state, LifecycleState.CLARIFICATION)
     elif result.plan_mode in {PlanningMode.DETERMINISTIC.value, PlanningMode.LLM_ASSISTED.value}:
-        _set_state(state, LifecycleState.CONFIRMATION)
+        output_context = _output_generation_context_for_saved_plan(Path.cwd().resolve())
+        if output_context is not None:
+            state.awaiting_confirmation = True
+            state.update_workflow_context(output_context)
+            _set_state(state, LifecycleState.CONFIRMATION)
+            _render_confirmation_prompt(state)
+            state.last_result = "Awaiting non-mutating skill output confirmation."
+        else:
+            _set_state(state, LifecycleState.CONFIRMATION)
     else:
         state.sync_active_workflow()
 
@@ -3250,6 +3269,24 @@ def _set_fs_confirmation_state(
     _set_state(state, LifecycleState.CONFIRMATION)
 
 
+def _output_generation_context_for_saved_plan(root: Path) -> OutputGenerationContext | None:
+    plan = load_grounded_plan(root)
+    routing = (plan.context_selection or {}).get("skill_routing") if plan is not None else None
+    if not isinstance(routing, dict):
+        return None
+    selected = tuple(item for item in routing.get("selected_skills", []) if isinstance(item, str))
+    task_intent = routing.get("task_intent")
+    task_intent_label = task_intent.get("label") if isinstance(task_intent, dict) else None
+    if not selected:
+        return None
+    return OutputGenerationContext(
+        plan_id=plan.plan_id,
+        task_intent=str(task_intent_label) if task_intent_label else None,
+        selected_skills=selected,
+        workspace_root=str(root),
+    )
+
+
 def _consume_confirmation_response(response: str, state: SessionState, workspace_root: Path) -> None:
     value = _normalized_confirmation_token(response)
     if value not in {"YES", "NO"}:
@@ -3260,6 +3297,9 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
         return
 
     context = state.pending_context
+    if isinstance(context, OutputGenerationContext):
+        _generate_confirmed_skill_output(state, context, workspace_root)
+        return
     if not isinstance(context, ConfirmationContext):
         _fail_active_goal(state, message="Confirmation received, but no actionable pending state remained.")
         return
@@ -3367,6 +3407,51 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
         warnings=result.warnings,
     )
     _reflect_execution_result(state, success_result)
+
+
+def _generate_confirmed_skill_output(
+    state: SessionState,
+    context: OutputGenerationContext,
+    workspace_root: Path,
+) -> None:
+    root = Path(context.workspace_root or str(workspace_root)).resolve()
+    plan = load_grounded_plan(root)
+    if plan is None or (context.plan_id is not None and plan.plan_id != context.plan_id):
+        _fail_active_goal(state, message="Confirmation received, but the grounded plan for skill output was unavailable.")
+        return
+    validity = validate_active_grounded_plan(root, plan)
+    if not validity.valid:
+        _fail_active_goal(state, message=f"Confirmation received, but the grounded plan is invalid: {validity.reason}.")
+        return
+
+    config = _effective_config(root)
+    registry = discover_skills(root, config=config)
+    request = build_skill_output_request(plan=validity.plan, skills=registry.skills, config=config)
+    output_kind, _ = output_kind_for_request(request.task_intent, request.selected_skills, registry.skills)
+    console.print("Generating skill output...")
+    console.print(f"Using skill: {', '.join(request.selected_skills)}")
+    console.print(f"Output kind: {output_kind}")
+    output = generate_skill_output(request, registry.skills)
+    console.print(render_skill_output(output), markup=False)
+
+    updated_plan = replace(validity.plan, status="output_generated")
+    save_grounded_plan(root, updated_plan, validity.snapshot)
+    append_history_event(
+        root,
+        "Skill output generated",
+        {
+            "Goal": output.summary,
+            "Plan ID": updated_plan.plan_id,
+            "Selected skill": request.selected_skills,
+            "Task intent": request.task_intent,
+            "Output kind": output.output_kind,
+            "Files referenced": output.files_referenced,
+            "Snapshot ID": request.snapshot_id or "(none)",
+            "Mutations applied": output.mutations_applied,
+        },
+    )
+    save_session_payload(root, {"last_skill_output": {"output_kind": output.output_kind, "title": output.title, "mutations_applied": False}})
+    _complete_active_goal(state, message=f"Generated {output.output_kind} without mutations.")
 
 
 def _consume_pending_question_answer(answer: str, state: SessionState) -> None:

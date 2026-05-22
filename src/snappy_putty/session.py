@@ -140,7 +140,16 @@ class ConfirmationContext:
     excess_ops: bool = False
 
 
-WorkflowContext = ClarificationContext | ConfirmationContext
+@dataclass(frozen=True)
+class OutputGenerationContext:
+    kind: Literal["output_generation"] = "output_generation"
+    plan_id: str | None = None
+    task_intent: str | None = None
+    selected_skills: tuple[str, ...] = ()
+    workspace_root: str | None = None
+
+
+WorkflowContext = ClarificationContext | ConfirmationContext | OutputGenerationContext
 
 
 @dataclass(frozen=True)
@@ -602,6 +611,16 @@ def _deserialize_workflow_context(raw_context: Any) -> WorkflowContext | None:
             allow_excess_ops=_coerce_bool(raw_context.get("allow_excess_ops"), field_name="context.allow_excess_ops"),
             excess_ops=_coerce_bool(raw_context.get("excess_ops"), field_name="context.excess_ops"),
         )
+    if kind == "output_generation":
+        raw_skills = raw_context.get("selected_skills", [])
+        if not isinstance(raw_skills, list) or not all(isinstance(item, str) for item in raw_skills):
+            raise ValueError("context.selected_skills must be a list of strings")
+        return OutputGenerationContext(
+            plan_id=_coerce_optional_string(raw_context.get("plan_id"), field_name="context.plan_id"),
+            task_intent=_coerce_optional_string(raw_context.get("task_intent"), field_name="context.task_intent"),
+            selected_skills=tuple(raw_skills),
+            workspace_root=_coerce_optional_string(raw_context.get("workspace_root"), field_name="context.workspace_root"),
+        )
     raise ValueError(f"unsupported workflow context kind: {kind!r}")
 
 
@@ -647,12 +666,14 @@ def _validate_workflow_snapshot(snapshot: ActiveWorkflowSnapshot) -> None:
     if snapshot.state == "CONFIRMATION":
         if not snapshot.awaiting_confirmation:
             raise ValueError("confirmation workflow must await confirmation")
-        if not isinstance(snapshot.context, ConfirmationContext):
-            raise ValueError("confirmation workflow requires ConfirmationContext")
+        if not isinstance(snapshot.context, (ConfirmationContext, OutputGenerationContext)):
+            raise ValueError("confirmation workflow requires a confirmation context")
         if snapshot.pending_plan_data is None:
             raise ValueError("confirmation workflow requires pending_plan_data")
-        if not isinstance(snapshot.pending_plan_data, dict):
+        if isinstance(snapshot.context, ConfirmationContext) and not isinstance(snapshot.pending_plan_data, dict):
             raise ValueError("confirmation workflow requires filesystem plan data")
+        if isinstance(snapshot.context, OutputGenerationContext) and not isinstance(snapshot.pending_plan_data, list):
+            raise ValueError("output generation confirmation workflow requires grounded plan step data")
         return
 
     if snapshot.context is not None:

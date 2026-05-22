@@ -125,6 +125,31 @@ def test_non_list_task_intents_warns_without_rejecting_skill(tmp_path: Path) -> 
     assert any(issue.code == "invalid_task_intents" for issue in registry.warnings)
 
 
+def test_output_kinds_metadata_is_optional_and_unknown_values_warn(tmp_path: Path) -> None:
+    valid_skill = _write_skill(tmp_path, "doc-skill")
+    valid_text = (valid_skill / "SKILL.md").read_text(encoding="utf-8").replace(
+        "  requires_confirmation: false",
+        "  output_kinds:\n"
+        "    - documentation_draft\n"
+        "  requires_confirmation: false",
+    )
+    (valid_skill / "SKILL.md").write_text(valid_text, encoding="utf-8")
+    invalid_skill = _write_skill(tmp_path, "odd-output")
+    invalid_text = (invalid_skill / "SKILL.md").read_text(encoding="utf-8").replace(
+        "  requires_confirmation: false",
+        "  output_kinds:\n"
+        "    - event_horizon\n"
+        "  requires_confirmation: false",
+    )
+    (invalid_skill / "SKILL.md").write_text(invalid_text, encoding="utf-8")
+
+    registry = discover_skills(tmp_path)
+
+    assert {skill.metadata.name for skill in registry.skills} == {"doc-skill", "odd-output"}
+    assert not any(issue.code == "invalid_output_kinds" for issue in registry.warnings)
+    assert any(issue.code == "unknown_output_kind" for issue in registry.warnings)
+
+
 def test_validation_reports_missing_skill_md_and_malformed_frontmatter(tmp_path: Path) -> None:
     missing_dir = tmp_path / ".snappy" / "skills" / "missing"
     missing_dir.mkdir(parents=True)

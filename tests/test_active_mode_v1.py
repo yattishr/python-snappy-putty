@@ -1502,6 +1502,41 @@ def test_active_shell_status_uses_grounded_plan_label(tmp_path: Path) -> None:
     assert "agent plan" not in proc.stdout.lower()
 
 
+def test_skill_routed_plan_confirmation_generates_non_mutating_output(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use when the user asks to review latest changes and give PR or MR feedback.",
+        indicators=["review latest changes", "MR feedback"],
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="Review my latest changes and give me MR feedback.\nYES\nstatus\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Type YES to generate the non-mutating skill output" in proc.stdout
+    assert "Generating skill output..." in proc.stdout
+    assert "Using skill: codeguardian-review" in proc.stdout
+    assert "Output kind: code_review_report" in proc.stdout
+    assert "# Code Review Report" in proc.stdout
+    assert "_No files were changed._" in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert session["last_plan"]["status"] == "output_generated"
+    assert session["last_skill_output"]["mutations_applied"] is False
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Skill output generated" in history
+    assert "Mutations applied: False" in history
+
+
 def test_plan_interaction_show_why_and_explain_step(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",

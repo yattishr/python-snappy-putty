@@ -17,6 +17,7 @@ _VALID_SNAPPY_KEYS = {
     "requires_confirmation",
     "tags",
     "task_intents",
+    "output_kinds",
     "project_relationships",
     "extension_targets",
     "indicators",
@@ -59,6 +60,15 @@ _VALID_TASK_INTENTS = {
     "project_adaptation",
     "general_project_help",
     "unrelated",
+}
+_VALID_OUTPUT_KINDS = {
+    "code_review_report",
+    "documentation_draft",
+    "frontend_design_brief",
+    "implementation_plan",
+    "testing_plan",
+    "deployment_plan",
+    "general_skill_report",
 }
 
 
@@ -490,6 +500,7 @@ def _validate_snappy_metadata(snappy: dict[str, Any], path: Path) -> list[SkillV
     valid_relationships = {"direct_project_work", "project_extension", "project_adaptation", "unrelated"}
     list_fields = {
         "task_intents": "invalid_task_intents",
+        "output_kinds": "invalid_output_kinds",
         "project_relationships": "invalid_project_relationships",
         "extension_targets": "invalid_extension_targets",
         "indicators": "invalid_indicators",
@@ -508,6 +519,8 @@ def _validate_snappy_metadata(snappy: dict[str, Any], path: Path) -> list[SkillV
                 continue
             if field_name == "task_intents" and item not in _VALID_TASK_INTENTS:
                 issues.append(_issue("warning", "unknown_task_intent", f"Unknown x-snappy task intent: {item}", path))
+            if field_name == "output_kinds" and item not in _VALID_OUTPUT_KINDS:
+                issues.append(_issue("warning", "unknown_output_kind", f"Unknown x-snappy output kind: {item}", path))
             if field_name == "project_relationships" and item not in valid_relationships:
                 issues.append(_issue("warning", "unknown_project_relationship", f"Unknown x-snappy project relationship: {item}", path))
     return issues
