@@ -2703,9 +2703,8 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
 
 
 def _confirm_generic_skill_fallback(disabled_skill: str) -> bool:
-    _ = disabled_skill
     while True:
-        response = input("Continue with generic grounded planning? [YES/NO]> ").strip().lower()
+        response = input(f"Best matching skill is disabled by config: {disabled_skill}. Continue with generic grounded planning? [YES/NO]> ").strip().lower()
         if response in {"yes", "y"}:
             return True
         if response in {"no", "n"}:
@@ -2757,7 +2756,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
             console.print("No matching skill selected.")
         filtered_skill_registry = discover_skills(root, config=config)
         for issue in filtered_skill_registry.issues:
-            if issue.code in {"skill_disabled_by_config", "skill_not_enabled_by_config"}:
+            if issue.code in {"configured_skill_missing", "skill_disabled_by_config", "skill_not_enabled_by_config"}:
                 console.print(issue.message)
         if related:
             console.print(
@@ -2860,6 +2859,15 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     skip_reason="disabled_skill_fallback_cancelled",
                 )
             console.print(f"Continuing without disabled skill: {skill_route.disabled_best_match}")
+            append_history_event(
+                root,
+                "Generic skill fallback confirmed",
+                {
+                    "Goal": intent,
+                    "Snapshot ID": snapshot.snapshot_id,
+                    "Skill routing": skill_route.as_metadata(),
+                },
+            )
             emit_progress("Generating generic grounded plan...")
         try:
             with busy(get_status_message("plan"), console=console):

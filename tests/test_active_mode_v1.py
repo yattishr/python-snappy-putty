@@ -1678,7 +1678,7 @@ def test_disabled_best_match_prompts_before_generic_fallback_yes(tmp_path: Path)
     assert "Matched task intent: code_review" in proc.stdout
     assert "Best matching skill is disabled by config: codeguardian-review" in proc.stdout
     assert "No specialized skill selected." in proc.stdout
-    assert "Continue with generic grounded planning? [YES/NO]>" in proc.stdout
+    assert "Best matching skill is disabled by config: codeguardian-review. Continue with generic grounded planning? [YES/NO]>" in proc.stdout
     assert "Continuing without disabled skill: codeguardian-review" in proc.stdout
     assert "Generating generic grounded plan" in proc.stdout
     assert "Selected skill: codeguardian-review" not in proc.stdout
@@ -1687,6 +1687,9 @@ def test_disabled_best_match_prompts_before_generic_fallback_yes(tmp_path: Path)
     assert routing["selected_skills"] == []
     assert routing["disabled_best_match"] == "codeguardian-review"
     assert routing["generic_fallback_confirmed"] is True
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Generic skill fallback confirmed" in history
+    assert "'generic_fallback_confirmed': True" in history
 
 
 def test_disabled_best_match_prompt_no_cancels_without_plan(tmp_path: Path) -> None:
@@ -1727,6 +1730,38 @@ def test_disabled_best_match_prompt_no_cancels_without_plan(tmp_path: Path) -> N
     assert "Event: Generic skill fallback cancelled" in history
     assert "'generic_fallback_confirmed': False" in history
     assert "'status': 'cancelled'" in history
+
+
+def test_missing_configured_skill_allows_generic_fallback_without_prompt(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"npm test"}}\n', encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "server.js").write_text("module.exports = {}\n", encoding="utf-8")
+    (tmp_path / ".snappy").mkdir()
+    (tmp_path / ".snappy" / "snappy.yaml").write_text(
+        "version: 1\nskills:\n  enabled:\n    - codeguardian-review\n  disabled: []\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "Review my latest changes and give me PR feedback."],
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Matched task intent: code_review" in proc.stdout
+    assert "No matching skill selected." in proc.stdout
+    assert "Configured skill is missing: codeguardian-review" in proc.stdout
+    assert "Continue with generic grounded planning?" not in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    assert "last_plan" in session
+    routing = session["last_plan"]["context_selection"]["skill_routing"]
+    assert routing["selected_skills"] == []
+    assert "disabled_best_match" not in routing
+    assert "generic_fallback_confirmed" not in routing
 
 
 def test_llm_failure_falls_back_to_deterministic_plan(tmp_path: Path) -> None:
