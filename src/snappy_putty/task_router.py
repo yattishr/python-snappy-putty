@@ -354,12 +354,13 @@ def _filter_allowed_skills(skills: list[Skill], config: SnappyConfig | None) -> 
         return list(skills)
     enabled = set(config.skills.enabled)
     disabled = set(config.skills.disabled)
+    explicit_project_config = config.path is not None
     allowed: list[Skill] = []
     for skill in skills:
         name = skill.metadata.name
         if name in disabled:
             continue
-        if enabled and name not in enabled:
+        if explicit_project_config and name not in enabled:
             continue
         allowed.append(skill)
     return allowed

@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from snappy_putty.config import load_effective_config, load_project_config
+from snappy_putty.config import init_project_config, load_effective_config, load_project_config
 from snappy_putty.project_inspector import inspect_project
 from snappy_putty.rule_hooks import before_filesystem_mutation_plan_or_execute
 from snappy_putty.agent_discovery import AgentRule, AgentRuleRegistry
@@ -170,7 +170,7 @@ def test_config_cli_show_init_and_validate(tmp_path: Path) -> None:
     assert "Agent mode: off" in show.stdout
     assert validate.returncode == 0
     assert "Config validation passed." in validate.stdout
-    assert "already exists" in second_init.stdout
+    assert ".snappy/snappy.yaml already exists and is valid. No changes made." in second_init.stdout
 
 
 def test_config_validate_reports_malformed_config(tmp_path: Path) -> None:
@@ -204,6 +204,139 @@ def test_skill_config_filters_allowlist_and_disabled_skills(tmp_path: Path) -> N
     assert [skill.metadata.name for skill in registry.skills] == ["frontend-design"]
     assert any(issue.code == "skill_disabled_by_config" for issue in registry.issues)
     assert any(issue.code == "skill_not_enabled_by_config" for issue in registry.issues)
+
+
+def test_init_project_config_creates_modern_config_with_detected_skills(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "frontend-design", "Use when building frontend interfaces.")
+    _write_skill(tmp_path, "doc-coauthoring", "Use when creating specs or documentation.")
+
+    result = init_project_config(tmp_path)
+    config = load_project_config(tmp_path)
+
+    assert result.created is True
+    assert (tmp_path / ".snappy" / "snappy.yaml").is_file()
+    assert config.agent.name == tmp_path.name
+    assert config.agent.mode == "off"
+    assert config.skills.enabled == ["doc-coauthoring", "frontend-design"]
+    assert "Enabled all detected skills by default." in result.message
+
+
+def test_init_project_config_no_skills_means_empty_enabled(tmp_path: Path) -> None:
+    result = init_project_config(tmp_path)
+    config = load_project_config(tmp_path)
+
+    assert config.skills.enabled == []
+    assert "No skills detected. skills.enabled is empty." in result.message
+
+
+def test_configured_empty_enabled_loads_no_skills_when_config_exists(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "doc-coauthoring", "Use when creating specs or documentation.")
+    _write_config(tmp_path, "version: 1\nskills:\n  enabled: []\n  disabled: []\n")
+
+    config = load_project_config(tmp_path)
+    registry = discover_skills(tmp_path, config=config)
+
+    assert registry.skills == []
+    assert any(issue.code == "skill_not_enabled_by_config" for issue in registry.issues)
+
+
+def test_missing_config_still_loads_valid_skills(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "doc-coauthoring", "Use when creating specs or documentation.")
+
+    registry = discover_skills(tmp_path, config=load_project_config(tmp_path))
+
+    assert [skill.metadata.name for skill in registry.skills] == ["doc-coauthoring"]
+
+
+def test_init_project_config_preserves_existing_skill_folders(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "doc-coauthoring", "Use when creating specs or documentation.")
+    extra = tmp_path / ".snappy" / "skills" / "draft-skill"
+    extra.mkdir()
+    (tmp_path / ".snappy" / "memory").mkdir()
+    (tmp_path / ".snappy" / "logs").mkdir()
+
+    init_project_config(tmp_path)
+
+    assert (tmp_path / ".snappy" / "skills" / "doc-coauthoring" / "SKILL.md").is_file()
+    assert extra.is_dir()
+    assert (tmp_path / ".snappy" / "memory").is_dir()
+    assert (tmp_path / ".snappy" / "logs").is_dir()
+
+
+def test_init_project_config_migrates_legacy_flat_config_with_backup(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "frontend-design", "Use when building frontend interfaces.")
+    _write_config(
+        tmp_path,
+        "name: vanilla-nodejs-rest-api\n"
+        "version: 1\n"
+        "mode: supervised\n"
+        "confirmations: true\n"
+        "dry_run: false\n"
+        "skills: []\n"
+        "rules: []\n"
+        "memory: true\n",
+    )
+
+    result = init_project_config(tmp_path)
+    config = load_project_config(tmp_path)
+    text = (tmp_path / ".snappy" / "snappy.yaml").read_text(encoding="utf-8")
+
+    assert result.migrated is True
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert config.agent.name == "vanilla-nodejs-rest-api"
+    assert config.agent.mode == "off"
+    assert config.rules.confirmation_required is True
+    assert config.memory.enabled is True
+    assert config.skills.enabled == ["frontend-design"]
+    assert "dry_run" not in text
+    assert any("dry_run" in warning for warning in result.warnings)
+
+
+def test_init_project_config_does_not_overwrite_valid_modern_config(tmp_path: Path) -> None:
+    original = "version: 1\nagent:\n  name: Custom Agent\n  mode: active\nskills:\n  enabled: []\n  disabled: []\n"
+    _write_config(tmp_path, original)
+
+    result = init_project_config(tmp_path)
+
+    assert result.changed is False
+    assert (tmp_path / ".snappy" / "snappy.yaml").read_text(encoding="utf-8") == original
+    assert "already exists and is valid" in result.message
+
+
+def test_init_project_config_enables_detected_skills_for_empty_modern_config(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "frontend-design", "Use when building frontend interfaces.")
+    _write_skill(tmp_path, "doc-coauthoring", "Use when creating specs or documentation.")
+    _write_config(
+        tmp_path,
+        "version: 1\n"
+        "agent:\n"
+        "  name: Custom Agent\n"
+        "  mode: off\n"
+        "skills:\n"
+        "  enabled: []\n"
+        "  disabled: []\n",
+    )
+
+    result = init_project_config(tmp_path)
+    config = load_project_config(tmp_path)
+
+    assert result.changed is True
+    assert result.repaired is True
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert config.agent.name == "Custom Agent"
+    assert config.skills.enabled == ["doc-coauthoring", "frontend-design"]
+    assert "Detected 2 skills and enabled them." in result.message
+
+
+def test_init_project_config_preserves_intentional_disabled_list(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "frontend-design", "Use when building frontend interfaces.")
+    original = "version: 1\nskills:\n  enabled: []\n  disabled:\n    - frontend-design\n"
+    _write_config(tmp_path, original)
+
+    result = init_project_config(tmp_path)
+
+    assert result.changed is False
+    assert (tmp_path / ".snappy" / "snappy.yaml").read_text(encoding="utf-8") == original
 
 
 def test_disabled_skill_does_not_influence_project_relevance(tmp_path: Path) -> None:

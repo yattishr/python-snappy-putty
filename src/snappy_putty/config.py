@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime
 from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
+import shutil
 from typing import Any, Mapping
 
 
@@ -77,6 +79,19 @@ class SnappyConfig:
     issues: list[ConfigIssue] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class InitConfigResult:
+    changed: bool
+    created: bool
+    migrated: bool
+    repaired: bool
+    path: Path
+    backup_path: Path | None
+    detected_skills: list[str]
+    warnings: list[str]
+    message: str
+
+
 def default_config(*, source: str = "defaults", path: Path | None = None, issues: list[ConfigIssue] | None = None) -> SnappyConfig:
     return SnappyConfig(source=source, path=path, issues=list(issues or []))
 
@@ -116,11 +131,107 @@ def validate_config(config: SnappyConfig) -> list[ConfigIssue]:
     return list(config.issues)
 
 
-def starter_config_text() -> str:
-    return """version: 1
+def init_project_config(root: Path, *, migrate: bool = True) -> InitConfigResult:
+    root = root.resolve()
+    path = config_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    detected_skills = _detect_valid_skill_names(root)
+    warnings: list[str] = []
+
+    if not path.exists():
+        path.write_text(starter_config_text(project_name=root.name or "snappy-project", enabled_skills=detected_skills), encoding="utf-8")
+        lines = [f"Created {_relative_display(path, root)}"]
+        if detected_skills:
+            lines.append(f"Detected {len(detected_skills)} skills:")
+            lines.extend(f"- {name}" for name in detected_skills)
+            lines.append("Enabled all detected skills by default.")
+        else:
+            lines.append("No skills detected. skills.enabled is empty.")
+        return InitConfigResult(True, True, False, False, path, None, detected_skills, warnings, "\n".join(lines))
+
+    try:
+        payload = _parse_yaml_mapping(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        backup_path = _write_backup(path)
+        path.write_text(starter_config_text(project_name=root.name or "snappy-project", enabled_skills=detected_skills), encoding="utf-8")
+        lines = [
+            "Detected malformed Snappy config.",
+            f"Backup written to {_relative_display(backup_path, root)}",
+            "Repaired config to current schema.",
+        ]
+        if detected_skills:
+            lines.append(f"Enabled detected skills: {', '.join(detected_skills)}")
+        else:
+            lines.append("No skills detected. skills.enabled is empty.")
+        return InitConfigResult(True, False, False, True, path, backup_path, detected_skills, warnings, "\n".join(lines))
+
+    if _is_legacy_config(payload):
+        if not migrate:
+            return InitConfigResult(False, False, False, False, path, None, detected_skills, warnings, "Detected legacy Snappy config. Migration disabled.")
+        backup_path = _write_backup(path)
+        migrated_payload = _migrate_legacy_payload(payload, root=root, detected_skills=detected_skills, warnings=warnings)
+        path.write_text(_config_text_from_payload(migrated_payload), encoding="utf-8")
+        lines = [
+            "Detected legacy Snappy config.",
+            f"Backup written to {_relative_display(backup_path, root)}",
+            "Migrated config to current schema.",
+        ]
+        if detected_skills:
+            lines.append(f"Enabled detected skills: {', '.join(detected_skills)}")
+        else:
+            lines.append("No skills detected. skills.enabled is empty.")
+        lines.extend(warnings)
+        return InitConfigResult(True, False, True, False, path, backup_path, detected_skills, warnings, "\n".join(lines))
+
+    config = _coerce_config(payload, path=path, root=root)
+    errors = [issue for issue in config.issues if issue.severity == "error"]
+    if not errors:
+        if detected_skills and not config.skills.enabled and not config.skills.disabled:
+            backup_path = _write_backup(path)
+            payload = _payload_from_config(config)
+            payload["skills"]["enabled"] = detected_skills
+            path.write_text(_config_text_from_payload(payload), encoding="utf-8")
+            lines = [
+                f"{_relative_display(path, root)} already exists and is valid.",
+                f"Backup written to {_relative_display(backup_path, root)}",
+                f"Detected {len(detected_skills)} skills and enabled them.",
+            ]
+            return InitConfigResult(True, False, False, True, path, backup_path, detected_skills, warnings, "\n".join(lines))
+        return InitConfigResult(
+            False,
+            False,
+            False,
+            False,
+            path,
+            None,
+            detected_skills,
+            warnings,
+            f"{_relative_display(path, root)} already exists and is valid. No changes made.",
+        )
+
+    backup_path = _write_backup(path)
+    path.write_text(starter_config_text(project_name=root.name or "snappy-project", enabled_skills=detected_skills), encoding="utf-8")
+    lines = [
+        "Detected invalid Snappy config.",
+        f"Backup written to {_relative_display(backup_path, root)}",
+        "Repaired config to current schema.",
+    ]
+    if detected_skills:
+        lines.append(f"Enabled detected skills: {', '.join(detected_skills)}")
+    else:
+        lines.append("No skills detected. skills.enabled is empty.")
+    return InitConfigResult(True, False, False, True, path, backup_path, detected_skills, warnings, "\n".join(lines))
+
+
+def starter_config_text(*, project_name: str = "Snappy", enabled_skills: list[str] | None = None) -> str:
+    enabled = sorted(enabled_skills or [])
+    enabled_text = "[]"
+    if enabled:
+        enabled_text = "\n" + "\n".join(f"    - {name}" for name in enabled)
+    return f"""version: 1
 
 agent:
-  name: Snappy
+  name: {project_name}
   mode: off
   description: Project-local Snappy configuration.
 
@@ -131,7 +242,7 @@ planning:
   max_context_files: null
 
 skills:
-  enabled: []
+  enabled: {enabled_text}
   disabled: []
 
 rules:
@@ -150,6 +261,132 @@ logging:
   level: info
   trace_enabled: true
 """
+
+
+def _detect_valid_skill_names(root: Path) -> list[str]:
+    from snappy_putty.skills import load_skill_registry
+
+    registry = load_skill_registry(root / ".snappy" / "skills")
+    return sorted(skill.metadata.name for skill in registry.skills)
+
+
+def _is_legacy_config(payload: dict[str, Any]) -> bool:
+    legacy_keys = {"name", "mode", "confirmations", "dry_run"}
+    return bool(legacy_keys & set(payload)) or not isinstance(payload.get("skills", {}), dict) or not isinstance(payload.get("rules", {}), dict)
+
+
+def _migrate_legacy_payload(payload: dict[str, Any], *, root: Path, detected_skills: list[str], warnings: list[str]) -> dict[str, Any]:
+    raw_mode = str(payload.get("mode") or "off").lower()
+    mode = raw_mode if raw_mode in {"active", "off"} else "off"
+    if "dry_run" in payload:
+        warnings.append("warning: unsupported legacy field dry_run was removed.")
+    default = _payload_from_config_text(starter_config_text(project_name=root.name or "snappy-project", enabled_skills=detected_skills))
+    default["agent"]["name"] = str(payload.get("name") or root.name or "snappy-project")
+    default["agent"]["mode"] = mode
+    default["rules"]["confirmation_required"] = bool(payload.get("confirmations", True))
+    default["memory"]["enabled"] = bool(payload.get("memory", True))
+    return default
+
+
+def _payload_from_config_text(text: str) -> dict[str, Any]:
+    return _parse_yaml_mapping(text)
+
+
+def _payload_from_config(config: SnappyConfig) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "agent": {
+            "name": config.agent.name,
+            "mode": config.agent.mode,
+            "description": config.agent.description,
+        },
+        "planning": {
+            "allow_project_extensions": config.planning.allow_project_extensions,
+            "prefer_small_steps": config.planning.prefer_small_steps,
+            "inspect_before_mutation": config.planning.inspect_before_mutation,
+            "max_context_files": config.planning.max_context_files,
+        },
+        "skills": {
+            "enabled": list(config.skills.enabled),
+            "disabled": list(config.skills.disabled),
+        },
+        "rules": {
+            "confirmation_required": config.rules.confirmation_required,
+            "allow_file_writes": config.rules.allow_file_writes,
+            "allow_shell_commands": config.rules.allow_shell_commands,
+            "protected_paths": list(config.rules.protected_paths),
+        },
+        "memory": {
+            "enabled": config.memory.enabled,
+            "snapshot_on_inspect": config.memory.snapshot_on_inspect,
+        },
+        "logging": {
+            "level": config.logging.level,
+            "trace_enabled": config.logging.trace_enabled,
+        },
+    }
+
+
+def _config_text_from_payload(payload: dict[str, Any]) -> str:
+    enabled = payload["skills"]["enabled"]
+    enabled_text = "[]"
+    if enabled:
+        enabled_text = "\n" + "\n".join(f"    - {name}" for name in enabled)
+    protected = "\n".join(f"    - {item}" for item in payload["rules"]["protected_paths"])
+    max_context_files = payload["planning"]["max_context_files"]
+    max_context_text = "null" if max_context_files is None else str(max_context_files)
+    return f"""version: 1
+
+agent:
+  name: {payload["agent"]["name"]}
+  mode: {payload["agent"]["mode"]}
+  description: {payload["agent"]["description"]}
+
+planning:
+  allow_project_extensions: {_yaml_bool(payload["planning"]["allow_project_extensions"])}
+  prefer_small_steps: {_yaml_bool(payload["planning"]["prefer_small_steps"])}
+  inspect_before_mutation: {_yaml_bool(payload["planning"]["inspect_before_mutation"])}
+  max_context_files: {max_context_text}
+
+skills:
+  enabled: {enabled_text}
+  disabled: []
+
+rules:
+  confirmation_required: {_yaml_bool(payload["rules"]["confirmation_required"])}
+  allow_file_writes: {_yaml_bool(payload["rules"]["allow_file_writes"])}
+  allow_shell_commands: {_yaml_bool(payload["rules"]["allow_shell_commands"])}
+  protected_paths:
+{protected}
+
+memory:
+  enabled: {_yaml_bool(payload["memory"]["enabled"])}
+  snapshot_on_inspect: {_yaml_bool(payload["memory"]["snapshot_on_inspect"])}
+
+logging:
+  level: {payload["logging"]["level"]}
+  trace_enabled: {_yaml_bool(payload["logging"]["trace_enabled"])}
+"""
+
+
+def _yaml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _write_backup(path: Path) -> Path:
+    backup = path.with_name(f"{path.name}.bak")
+    if backup.exists():
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup = path.with_name(f"{path.name}.{stamp}.bak")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _relative_display(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def _apply_env_overrides(config: SnappyConfig, env: Mapping[str, str]) -> SnappyConfig:

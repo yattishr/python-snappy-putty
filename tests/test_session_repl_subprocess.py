@@ -1261,7 +1261,7 @@ def test_repl_init_creates_snappy_directory(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "Initialized agent scaffold" in proc.stdout
+    assert "Created .snappy/snappy.yaml" in proc.stdout
     assert (tmp_path / ".snappy").is_dir()
     assert (tmp_path / ".snappy" / "snappy.yaml").is_file()
 
@@ -1278,8 +1278,8 @@ def test_repl_init_twice_does_not_crash(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "Initialized agent scaffold" in proc.stdout
-    assert "Refusing to overwrite existing .snappy/" in proc.stdout
+    assert "Created .snappy/snappy.yaml" in proc.stdout
+    assert ".snappy/snappy.yaml already exists and is valid. No changes made." in proc.stdout
 
 
 def test_repl_agent_mode_shows_default_non_interactively(tmp_path: Path) -> None:

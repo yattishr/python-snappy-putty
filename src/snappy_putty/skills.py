@@ -133,6 +133,7 @@ def discover_skills(root: Path | None = None, config: SnappyConfig | None = None
 def filter_skill_registry(registry: SkillRegistry, *, config: SnappyConfig) -> SkillRegistry:
     enabled = set(config.skills.enabled)
     disabled = set(config.skills.disabled)
+    explicit_project_config = config.path is not None
     skills: list[Skill] = []
     issues = list(registry.issues)
     known = {skill.metadata.name for skill in registry.skills}
@@ -143,7 +144,7 @@ def filter_skill_registry(registry: SkillRegistry, *, config: SnappyConfig) -> S
         if name in disabled:
             issues.append(_issue("warning", "skill_disabled_by_config", f"Skill disabled by config: {name}", skill.metadata.path))
             continue
-        if enabled and name not in enabled:
+        if explicit_project_config and name not in enabled:
             issues.append(_issue("warning", "skill_not_enabled_by_config", f"Skill not enabled by config allowlist: {name}", skill.metadata.path))
             continue
         skills.append(skill)

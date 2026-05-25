@@ -42,7 +42,7 @@ from snappy_putty.active_planner import (
     validate_plan_integrity,
 )
 from snappy_putty.agent_init import init_agent_project
-from snappy_putty.config import SnappyConfig, config_path, load_effective_config, starter_config_text, validate_config
+from snappy_putty.config import SnappyConfig, init_project_config, load_effective_config, validate_config
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, list_dir, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
@@ -3006,7 +3006,7 @@ def agent_doctor() -> None:
 
 
 @app.command()
-def init(force: bool = typer.Option(False, "--force", help="Overwrite scaffold files if .snappy already exists.")) -> None:
+def init(force: bool = typer.Option(False, "--force", help="Deprecated; init preserves existing project data.")) -> None:
     """Scaffold a minimal .snappy/ directory."""
     result = init_agent_project(Path.cwd(), force=force)
     console.print(result.message)
@@ -3026,7 +3026,7 @@ def _config_lines(config: SnappyConfig) -> list[str]:
         f"- max_context_files: {config.planning.max_context_files}",
         "",
         "Skills:",
-        f"- enabled: {', '.join(config.skills.enabled) if config.skills.enabled else '(all valid skills)'}",
+        f"- enabled: {', '.join(config.skills.enabled) if config.skills.enabled else '(none explicitly enabled)'}",
         f"- disabled: {', '.join(config.skills.disabled) if config.skills.disabled else '(none)'}",
         "",
         "Rules:",
@@ -3065,13 +3065,8 @@ def config_root(ctx: typer.Context) -> None:
 @config_app.command("init")
 def config_init() -> None:
     """Create a safe starter .snappy/snappy.yaml."""
-    path = config_path(Path.cwd())
-    if path.exists():
-        console.print(f"Config already exists: {_display_path(path)}")
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(starter_config_text(), encoding="utf-8")
-    console.print(f"Created config: {_display_path(path)}")
+    result = init_project_config(Path.cwd())
+    console.print(result.message)
 
 
 @config_app.command("validate")
@@ -3095,7 +3090,7 @@ def config_explain() -> None:
     lines = [
         f"This project uses {config.agent.mode} mode by default.",
         f"Project extensions are {'allowed' if config.planning.allow_project_extensions else 'disabled by config'}.",
-        "Skills are loaded from .snappy/skills unless disabled or excluded by an enabled allowlist.",
+        "When project config exists, only skills listed in skills.enabled are loaded unless disabled.",
         "File writes still require existing safety confirmation where applicable.",
         f"Protected paths: {', '.join(config.rules.protected_paths)}",
     ]
@@ -3131,7 +3126,7 @@ def _render_skills_list(agent_mode_override: str | None = None) -> None:
             status = _skill_status(skill, warning_codes_by_path.get(skill.metadata.path, set()))
             if skill.metadata.name in disabled:
                 status = "disabled by config"
-            elif enabled and skill.metadata.name not in loaded_names:
+            elif skill.metadata.name not in loaded_names:
                 status = "not enabled by config"
             table.add_row(
                 skill.metadata.name,

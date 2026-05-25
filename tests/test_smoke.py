@@ -101,15 +101,14 @@ def test_init_scaffolds_agent_directory() -> None:
         result = runner.invoke(app, ["init"])
 
         assert result.exit_code == 0
-        assert "Initialized agent scaffold" in result.stdout
+        assert "Created .snappy/snappy.yaml" in result.stdout
         assert Path(".snappy").is_dir()
         assert Path(".snappy/snappy.yaml").is_file()
         assert Path(".snappy/skills").is_dir()
-        assert Path(".snappy/rules").is_dir()
         assert Path(".snappy/memory").is_dir()
         manifest = Path(".snappy/snappy.yaml").read_text(encoding="utf-8")
         assert "version: 1" in manifest
-        assert "mode: supervised" in manifest
+        assert "mode: off" in manifest
 
 
 def test_init_refuses_to_overwrite_existing_agent_directory_without_force() -> None:
@@ -117,13 +116,13 @@ def test_init_refuses_to_overwrite_existing_agent_directory_without_force() -> N
         agent_root = Path(".snappy")
         agent_root.mkdir()
         manifest_path = agent_root / "snappy.yaml"
-        manifest_path.write_text("name: custom\n", encoding="utf-8")
+        manifest_path.write_text("version: 1\nagent:\n  name: custom\n  mode: off\n", encoding="utf-8")
 
         result = runner.invoke(app, ["init"])
 
         assert result.exit_code == 0
-        assert "Refusing to overwrite existing .snappy/" in result.stdout
-        assert manifest_path.read_text(encoding="utf-8") == "name: custom\n"
+        assert ".snappy/snappy.yaml already exists and is valid. No changes made." in result.stdout
+        assert manifest_path.read_text(encoding="utf-8") == "version: 1\nagent:\n  name: custom\n  mode: off\n"
 
 
 def test_init_force_overwrites_scaffold_files() -> None:
@@ -136,12 +135,12 @@ def test_init_force_overwrites_scaffold_files() -> None:
         result = runner.invoke(app, ["init", "--force"])
 
         assert result.exit_code == 0
-        assert "Initialized agent scaffold" in result.stdout
+        assert "Migrated config to current schema." in result.stdout
         manifest = manifest_path.read_text(encoding="utf-8")
-        assert "name: old" not in manifest
+        assert "name: old" in manifest
+        assert "mode: off" in manifest
         assert "version: 1" in manifest
         assert Path(".snappy/skills").is_dir()
-        assert Path(".snappy/rules").is_dir()
         assert Path(".snappy/memory").is_dir()
 
 
