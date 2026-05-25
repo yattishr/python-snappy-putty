@@ -1648,6 +1648,87 @@ def test_llm_available_creates_llm_assisted_plan(tmp_path: Path) -> None:
     assert "Event: LLM-assisted plan created" in history
 
 
+def test_disabled_best_match_prompts_before_generic_fallback_yes(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"npm test"}}\n', encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "server.js").write_text("module.exports = {}\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use this skill when the user asks for code review, PR feedback, MR feedback, or diff inspection.",
+        relationships=["direct_project_work"],
+        indicators=["PR feedback", "code review"],
+    )
+    (tmp_path / ".snappy" / "snappy.yaml").write_text(
+        "version: 1\nskills:\n  enabled: []\n  disabled:\n    - codeguardian-review\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "Review my latest changes and give me PR feedback."],
+        input="YES\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Matched task intent: code_review" in proc.stdout
+    assert "Best matching skill is disabled by config: codeguardian-review" in proc.stdout
+    assert "No specialized skill selected." in proc.stdout
+    assert "Continue with generic grounded planning? [YES/NO]>" in proc.stdout
+    assert "Continuing without disabled skill: codeguardian-review" in proc.stdout
+    assert "Generating generic grounded plan" in proc.stdout
+    assert "Selected skill: codeguardian-review" not in proc.stdout
+    session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
+    routing = session["last_plan"]["context_selection"]["skill_routing"]
+    assert routing["selected_skills"] == []
+    assert routing["disabled_best_match"] == "codeguardian-review"
+    assert routing["generic_fallback_confirmed"] is True
+
+
+def test_disabled_best_match_prompt_no_cancels_without_plan(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"npm test"}}\n', encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "server.js").write_text("module.exports = {}\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use this skill when the user asks for code review, PR feedback, MR feedback, or diff inspection.",
+        relationships=["direct_project_work"],
+        indicators=["PR feedback", "code review"],
+    )
+    (tmp_path / ".snappy" / "snappy.yaml").write_text(
+        "version: 1\nskills:\n  enabled: []\n  disabled:\n    - codeguardian-review\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "ask", "Review my latest changes and give me PR feedback."],
+        input="NO\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_llm_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Best matching skill is disabled by config: codeguardian-review" in proc.stdout
+    assert "No project plan was created." in proc.stdout
+    assert "Generating generic grounded plan" not in proc.stdout
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    if session_path.exists():
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert "last_plan" not in session
+    history = (tmp_path / ".snappy" / "memory" / "history.md").read_text(encoding="utf-8")
+    assert "Event: Generic skill fallback cancelled" in history
+    assert "'generic_fallback_confirmed': False" in history
+    assert "'status': 'cancelled'" in history
+
+
 def test_llm_failure_falls_back_to_deterministic_plan(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",

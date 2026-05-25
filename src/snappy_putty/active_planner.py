@@ -1840,10 +1840,18 @@ def _skill_route_prompt_text(skill_route: SkillRouteResult | None) -> str:
         return "No skill routing metadata available.\n"
     selected = ", ".join(skill_route.selected_skills) if skill_route.selected_skills else "(none)"
     candidates = ", ".join(f"{item.skill_name}:{item.score}" for item in skill_route.candidates[:3]) or "(none)"
+    disabled = skill_route.disabled_best_match or "(none)"
+    fallback = (
+        str(skill_route.generic_fallback_confirmed)
+        if skill_route.generic_fallback_confirmed is not None
+        else "(not requested)"
+    )
     return (
         f"Task intent: {skill_route.task_intent.label} "
         f"(confidence={skill_route.task_intent.confidence}, reason={skill_route.task_intent.reason})\n"
         f"Selected skills: {selected}\n"
+        f"Disabled best match: {disabled}\n"
+        f"Generic fallback confirmed: {fallback}\n"
         f"Route confidence: {skill_route.confidence}\n"
         f"Route reason: {skill_route.reason}\n"
         f"Candidates: {candidates}\n"

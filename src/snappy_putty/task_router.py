@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 from typing import Any
@@ -172,15 +172,36 @@ class SkillRouteResult:
     task_intent: TaskIntent
     confidence: float
     reason: str
+    disabled_best_match: str | None = None
+    disabled_best_match_score: float | None = None
+    disabled_best_match_reason: str = ""
+    generic_fallback_confirmed: bool | None = None
+    status: str = ""
 
     def as_metadata(self) -> dict[str, Any]:
-        return {
+        metadata: dict[str, Any] = {
             "task_intent": self.task_intent.as_metadata(),
             "selected_skills": list(self.selected_skills),
             "skill_route_confidence": self.confidence,
             "skill_route_reason": self.reason,
             "skill_candidates": [candidate.as_metadata() for candidate in self.candidates],
         }
+        if self.disabled_best_match:
+            metadata["disabled_best_match"] = self.disabled_best_match
+            metadata["disabled_best_match_score"] = self.disabled_best_match_score
+            metadata["disabled_best_match_reason"] = self.disabled_best_match_reason
+        if self.generic_fallback_confirmed is not None:
+            metadata["generic_fallback_confirmed"] = self.generic_fallback_confirmed
+        if self.status:
+            metadata["status"] = self.status
+        return metadata
+
+    def with_generic_fallback_confirmation(self, confirmed: bool) -> SkillRouteResult:
+        return replace(
+            self,
+            generic_fallback_confirmed=confirmed,
+            status="" if confirmed else "cancelled",
+        )
 
 
 def classify_task_intent(user_request: str, snapshot: ProjectSnapshot | None = None) -> TaskIntent:
@@ -236,8 +257,15 @@ def route_task(
     config: SnappyConfig | None = None,
     limit: int = 3,
 ) -> SkillRouteResult:
-    available_skills = _filter_allowed_skills(skills, config)
+    raw_candidates: list[SkillRouteCandidate] = []
+    disabled_names = set(config.skills.disabled) if config is not None else set()
     intent = classify_task_intent(user_request, snapshot)
+    if intent.label != "unrelated":
+        raw_candidates = [_score_skill(user_request, skill, intent, snapshot) for skill in skills]
+        raw_candidates = [candidate for candidate in raw_candidates if candidate.score >= 0.24]
+        raw_candidates.sort(key=lambda item: (-item.score, item.skill_name))
+
+    available_skills = _filter_allowed_skills(skills, config)
     if intent.label == "unrelated" and intent.confidence >= 0.7 and not _explicit_skill_request(user_request, available_skills):
         return SkillRouteResult([], [], intent, intent.confidence, "request_classified_unrelated")
 
@@ -250,7 +278,17 @@ def route_task(
     reason = "selected_matching_skill" if selected else "no_matching_skill_selected"
     if _is_ambiguous(candidates):
         reason = "ambiguous_skill_candidates"
-    return SkillRouteResult([candidate.skill_name for candidate in selected], candidates[:limit], intent, round(confidence, 3), reason)
+    disabled_best = _disabled_best_match(raw_candidates, disabled_names, selected)
+    return SkillRouteResult(
+        [candidate.skill_name for candidate in selected],
+        candidates[:limit],
+        intent,
+        round(confidence, 3),
+        reason,
+        disabled_best_match=disabled_best.skill_name if disabled_best is not None else None,
+        disabled_best_match_score=disabled_best.score if disabled_best is not None else None,
+        disabled_best_match_reason=", ".join(disabled_best.reasons) if disabled_best is not None else "",
+    )
 
 
 def route_to_skill_matches(route: SkillRouteResult, skills: list[Skill]) -> list[SkillMatch]:
@@ -347,6 +385,21 @@ def _select_candidates(candidates: list[SkillRouteCandidate], intent: TaskIntent
 
 def _is_ambiguous(candidates: list[SkillRouteCandidate]) -> bool:
     return len(candidates) > 1 and candidates[0].score >= 0.34 and candidates[0].score - candidates[1].score <= 0.08
+
+
+def _disabled_best_match(
+    raw_candidates: list[SkillRouteCandidate],
+    disabled_names: set[str],
+    selected: list[SkillRouteCandidate],
+) -> SkillRouteCandidate | None:
+    if not raw_candidates or selected:
+        return None
+    best = raw_candidates[0]
+    if best.skill_name not in disabled_names:
+        return None
+    if best.score < 0.34:
+        return None
+    return best
 
 
 def _filter_allowed_skills(skills: list[Skill], config: SnappyConfig | None) -> list[Skill]:

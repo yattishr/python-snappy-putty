@@ -158,6 +158,35 @@ def test_disabled_and_allowlist_skills_are_not_selected(tmp_path: Path) -> None:
     route = route_task("Review my latest changes and give me PR feedback.", registry.skills, config=config)
 
     assert route.selected_skills == []
+    assert route.disabled_best_match == "codeguardian-review"
+    metadata = route.as_metadata()
+    assert metadata["disabled_best_match"] == "codeguardian-review"
+    assert metadata["disabled_best_match_score"] > 0
+
+
+def test_disabled_best_match_not_recorded_when_enabled_alternative_selected(tmp_path: Path) -> None:
+    _write_common_project(tmp_path)
+    _write_common_skills(tmp_path)
+    _write_skill(
+        tmp_path,
+        "enabled-review-helper",
+        "Use this skill when reviewing code changes and writing PR feedback.",
+        task_intents=["code_review"],
+        relationships=["direct_project_work"],
+        indicators=["PR feedback"],
+    )
+    snappy_dir = tmp_path / ".snappy"
+    (snappy_dir / "snappy.yaml").write_text(
+        "version: 1\nskills:\n  enabled:\n    - enabled-review-helper\n  disabled:\n    - codeguardian-review\n",
+        encoding="utf-8",
+    )
+    config = load_project_config(tmp_path)
+    registry = discover_skills(tmp_path)
+
+    route = route_task("Review my latest changes and give me PR feedback.", registry.skills, config=config)
+
+    assert route.selected_skills == ["enabled-review-helper"]
+    assert route.disabled_best_match is None
 
 
 def test_description_only_skill_still_routes_without_x_snappy(tmp_path: Path) -> None:

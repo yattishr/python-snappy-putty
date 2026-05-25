@@ -2702,6 +2702,17 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     handle_ask(decision.payload.get("intent", intent), session_mode=None)
 
 
+def _confirm_generic_skill_fallback(disabled_skill: str) -> bool:
+    _ = disabled_skill
+    while True:
+        response = input("Continue with generic grounded planning? [YES/NO]> ").strip().lower()
+        if response in {"yes", "y"}:
+            return True
+        if response in {"no", "n"}:
+            return False
+        console.print("Please answer YES or NO.")
+
+
 def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
     """Run ask flow and render output."""
     root = Path.cwd().resolve()
@@ -2727,7 +2738,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
     if agent_mode == "active":
         snapshot = ensure_project_snapshot(root)
         planning_mode = classify_planning_mode(intent)
-        skill_registry = discover_skills(root, config=config)
+        skill_registry = discover_skills(root)
         skill_route = route_task(intent, skill_registry.skills, snapshot=snapshot, config=config)
         skill_matches = route_to_skill_matches(skill_route, skill_registry.skills)
         project_relationship = assess_project_relationship(intent, snapshot, skill_matches=skill_matches, config=config)
@@ -2739,9 +2750,13 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         if skill_route.selected_skills:
             console.print(f"Selected skill: {', '.join(skill_route.selected_skills)}")
             console.print(f"Matched skill: {skill_route.selected_skills[0]}")
+        elif skill_route.disabled_best_match:
+            console.print(f"Best matching skill is disabled by config: {skill_route.disabled_best_match}")
+            console.print("No specialized skill selected.")
         else:
             console.print("No matching skill selected.")
-        for issue in skill_registry.issues:
+        filtered_skill_registry = discover_skills(root, config=config)
+        for issue in filtered_skill_registry.issues:
             if issue.code in {"skill_disabled_by_config", "skill_not_enabled_by_config"}:
                 console.print(issue.message)
         if related:
@@ -2814,10 +2829,43 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 plan_mode=None,
                 skip_reason=relevance_reason,
             )
+        if skill_route.disabled_best_match and not skill_route.selected_skills:
+            confirmed = _confirm_generic_skill_fallback(skill_route.disabled_best_match)
+            skill_route = skill_route.with_generic_fallback_confirmation(confirmed)
+            if not confirmed:
+                append_history_event(
+                    root,
+                    "Generic skill fallback cancelled",
+                    {
+                        "Goal": intent,
+                        "Snapshot ID": snapshot.snapshot_id,
+                        "Skill routing": skill_route.as_metadata(),
+                    },
+                )
+                console.print("No project plan was created.")
+                return AgentRunResult(
+                    output=AgentOutput(
+                        goal=intent,
+                        assumptions=[f"Based on cached project snapshot: {snapshot.snapshot_id}"],
+                        question=None,
+                        plan=[],
+                        commands=[],
+                        warnings=["No project plan was created."],
+                        snippets=[],
+                    ),
+                    raw_model_text=None,
+                    parse_error=None,
+                    directory_listing=None,
+                    plan_mode=None,
+                    skip_reason="disabled_skill_fallback_cancelled",
+                )
+            console.print(f"Continuing without disabled skill: {skill_route.disabled_best_match}")
+            emit_progress("Generating generic grounded plan...")
         try:
             with busy(get_status_message("plan"), console=console):
                 if planning_mode == PlanningMode.LLM_ASSISTED:
-                    emit_progress("Generating LLM-assisted grounded plan...")
+                    if not skill_route.generic_fallback_confirmed:
+                        emit_progress("Generating LLM-assisted grounded plan...")
                     plan = create_llm_assisted_plan(
                         intent,
                         snapshot,
