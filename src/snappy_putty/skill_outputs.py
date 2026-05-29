@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any
 
 from snappy_putty.config import SnappyConfig
@@ -202,23 +203,30 @@ def generate_skill_output(request: SkillOutputRequest, skills: list[Skill] | Non
 
 
 def render_skill_output(output: SkillOutput) -> str:
-    lines = [f"# {output.title}", "", "## Summary", "", output.summary]
+    rule = "═" * max(24, min(60, len(output.title) + 8))
+    lines = [rule, output.title, rule, "", "Summary", "", output.summary]
     for section in output.sections:
-        lines.extend(["", f"## {section.heading}", ""])
+        heading = "Limitations" if section.heading == "Assumptions / Limitations" else section.heading
+        lines.extend(["", heading, ""])
         if section.body:
             lines.append(section.body)
         for item in section.items or []:
-            lines.append(f"- {item}")
+            lines.append(f"- {_format_report_item(item)}")
     if output.files_referenced:
-        lines.extend(["", "## Files Referenced", ""])
+        lines.extend(["", "Files Referenced", ""])
         lines.extend(f"- `{path}`" for path in output.files_referenced)
     if output.warnings:
-        lines.extend(["", "## Warnings", ""])
+        lines.extend(["", "Warnings", ""])
         lines.extend(f"- {item}" for item in output.warnings)
-    lines.extend(["", "_No files were changed._"])
+    lines.extend(["", "No files were changed.", "_Displayed in the terminal only. No files were created or changed._"])
     if output.output_kind in {"testing_plan", "deployment_plan"}:
         lines.append("_No commands were run._")
     return "\n".join(lines)
+
+
+def _format_report_item(item: str) -> str:
+    value = str(item)
+    return re.sub(r"^\[(?P<severity>info|low|medium|high|critical)\]", lambda match: f"{match.group('severity').title()}:", value, flags=re.IGNORECASE)
 
 
 def output_requirements(output_kind: str) -> list[str]:
@@ -289,13 +297,12 @@ def _documentation_output(request: SkillOutputRequest, files: list[str], steps: 
         "Documentation Draft",
         f"Draft documentation outline for: {request.goal}",
         [
-            SkillOutputSection("Proposed Title", body=request.goal.strip().rstrip(".") or "Project Documentation"),
             SkillOutputSection("Overview", body=_grounded_summary(request, files)),
-            SkillOutputSection("Installation / Setup", items=["Document prerequisites and setup steps visible from project configuration."]),
+            SkillOutputSection("Setup", items=["Document prerequisites and setup steps visible from project configuration."]),
             SkillOutputSection("Usage", items=["Describe the primary user workflow from the considered files."]),
             SkillOutputSection("Project Structure", items=files or ["Project structure was not available in the selected context."]),
-            SkillOutputSection("API / CLI Examples", items=["Add examples only for interfaces confirmed by grounded context."]),
-            SkillOutputSection("Next Documentation Gaps", items=[*steps, *_limitations(request)]),
+            SkillOutputSection("Examples", items=["Add examples only for interfaces confirmed by grounded context."]),
+            SkillOutputSection("Documentation Gaps", items=[*steps, *_limitations(request)]),
         ],
         warnings,
         files,
@@ -310,7 +317,7 @@ def _frontend_output(request: SkillOutputRequest, files: list[str], steps: list[
         ("API Integration Points", ["Bind UI data requirements to confirmed project interfaces only."]),
         ("Suggested File Structure", files or ["Confirm the frontend structure before proposing new file paths."]),
         ("Styling Approach", ["Reuse the existing design system and style conventions where present."]),
-        ("Accessibility", ["Cover keyboard paths, labels, focus order, contrast, and loading feedback."]),
+        ("Accessibility Notes", ["Cover keyboard paths, labels, focus order, contrast, and loading feedback."]),
         ("Implementation Sequence", steps),
     ]
     return SkillOutput(

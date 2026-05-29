@@ -63,9 +63,11 @@ def test_code_review_skill_output_is_grounded_and_non_mutating(tmp_path: Path) -
     assert output.output_kind == "code_review_report"
     assert output.mutations_applied is False
     assert output.files_referenced == plan.files_inspected
-    assert "## Findings" in rendered
+    assert "Code Review Report" in rendered
+    assert "Findings" in rendered
     assert "current workspace snapshot, not a line-by-line MR diff" in rendered
-    assert "_No files were changed._" in rendered
+    assert "_Displayed in the terminal only. No files were created or changed._" in rendered
+    assert "No files were changed." in rendered
     assert "do not claim files were changed or commands were run" in prompt
     assert all(path in request.files_considered for path in output.files_referenced)
 
@@ -78,3 +80,35 @@ def test_unknown_skill_output_kind_warns_and_falls_back_to_task_intent(tmp_path:
 
     assert kind == "code_review_report"
     assert warnings == ["Unknown skill output kind ignored: astral_report"]
+
+
+def test_documentation_and_frontend_outputs_render_polished_sections(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"dev":"vite"}}\n', encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    snapshot = inspect_project(tmp_path)
+    registry = discover_skills(tmp_path)
+
+    docs_route = route_task("Write README documentation for this project.", registry.skills, snapshot=snapshot)
+    docs_plan = build_grounded_plan(
+        "Write README documentation for this project.",
+        snapshot,
+        skill_matches=route_to_skill_matches(docs_route, registry.skills),
+        skill_route=docs_route,
+    )
+    docs_rendered = render_skill_output(generate_skill_output(build_skill_output_request(plan=docs_plan, skills=registry.skills), registry.skills))
+
+    frontend_route = route_task("Build a frontend interface for this application.", registry.skills, snapshot=snapshot)
+    frontend_plan = build_grounded_plan(
+        "Build a frontend interface for this application.",
+        snapshot,
+        skill_matches=route_to_skill_matches(frontend_route, registry.skills),
+        skill_route=frontend_route,
+    )
+    frontend_rendered = render_skill_output(generate_skill_output(build_skill_output_request(plan=frontend_plan, skills=registry.skills), registry.skills))
+
+    for heading in ["Documentation Draft", "Overview", "Setup", "Usage", "Project Structure", "Examples", "Documentation Gaps"]:
+        assert heading in docs_rendered
+    for heading in ["Frontend Design Brief", "UI Direction", "Screens / Components", "API Integration Points", "Suggested File Structure", "Accessibility Notes", "Implementation Sequence"]:
+        assert heading in frontend_rendered
+    assert "No files were changed." in docs_rendered
+    assert "No files were changed." in frontend_rendered

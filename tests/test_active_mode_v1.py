@@ -491,7 +491,7 @@ def test_node_frontend_request_is_project_extension_with_skill(tmp_path: Path) -
 
     assert proc.returncode == 0
     assert "Classified request as project_extension" in proc.stdout
-    assert "Matched skill: frontend-design" in proc.stdout
+    assert "Using: frontend-design" in proc.stdout
     assert "Grounded Plan" in proc.stdout
     assert not (tmp_path / "frontend").exists()
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
@@ -527,9 +527,9 @@ def test_skill_guided_frontend_extension_reaches_llm_when_no_frontend_exists(tmp
     )
 
     assert proc.returncode == 0
-    assert "Matched skill: frontend-design" in proc.stdout
+    assert "Using: frontend-design" in proc.stdout
     assert "LLM-assisted plan was rejected by validation." not in proc.stdout
-    assert "Generating deterministic grounded plan from inspected project context" not in proc.stdout
+    assert "Creating grounded plan from inspected project context" not in proc.stdout
     assert "Mode: llm_assisted" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     plan = session["current_plan"]
@@ -750,10 +750,10 @@ def test_python_streamlit_and_gradio_requests_are_project_extensions(tmp_path: P
 
     assert streamlit.returncode == 0
     assert "Classified request as project_extension" in streamlit.stdout
-    assert "Matched skill: streamlit-dashboard" in streamlit.stdout
+    assert "Using: streamlit-dashboard" in streamlit.stdout
     assert gradio.returncode == 0
     assert "Classified request as project_extension" in gradio.stdout
-    assert "Matched skill: gradio-interface" in gradio.stdout
+    assert "Using: gradio-interface" in gradio.stdout
     assert not (tmp_path / "streamlit_app.py").exists()
     assert not (tmp_path / "app.py").exists()
 
@@ -781,7 +781,7 @@ def test_python_flask_request_is_project_adaptation_with_skill(tmp_path: Path) -
 
     assert proc.returncode == 0
     assert "Classified request as project_adaptation" in proc.stdout
-    assert "Matched skill: flask-web-interface" in proc.stdout
+    assert "Using: flask-web-interface" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert session["current_plan"]["context_selection"]["project_relationship"]["relationship"] == "project_adaptation"
     assert not (tmp_path / "app.py").exists()
@@ -891,7 +891,7 @@ def test_broad_developer_goal_with_llm_unavailable_creates_deterministic_plan(tm
     )
 
     assert proc.returncode == 0
-    assert "Generating deterministic grounded plan from inspected project context" in proc.stdout
+    assert "Creating grounded plan from inspected project context" in proc.stdout
     assert "LLM-assisted planning is unavailable" not in proc.stdout
     assert "Apply the smallest project change" in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
@@ -937,7 +937,7 @@ def test_broad_api_goal_creates_deterministic_plan_for_node_api(tmp_path: Path) 
     assert proc.returncode == 0
     assert "This request does not appear to be related to the current project." not in proc.stdout
     assert "Classified request as direct_project_work" in proc.stdout
-    assert "Generating deterministic grounded plan from inspected project context" in proc.stdout
+    assert "Creating grounded plan from inspected project context" in proc.stdout
     assert "Pending plan: deterministic plan with" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     plan = session["current_plan"]
@@ -1180,8 +1180,8 @@ def test_latest_changes_code_review_is_project_goal_not_current_info(tmp_path: P
     )
 
     assert proc.returncode == 0
-    assert "Matched task intent: code_review" in proc.stdout
-    assert "Selected skill: codeguardian-review" in proc.stdout
+    assert "Code review detected" in proc.stdout
+    assert "Using: codeguardian-review" in proc.stdout
     assert "current information request" not in proc.stdout
     assert "Produce structured review feedback" in proc.stdout
     assert "Apply the smallest project change" not in proc.stdout
@@ -1523,12 +1523,15 @@ def test_skill_routed_plan_confirmation_generates_non_mutating_output(tmp_path: 
     )
 
     assert proc.returncode == 0
-    assert "Type YES to generate the non-mutating skill output" in proc.stdout
-    assert "Generating skill output..." in proc.stdout
+    assert "Ready to generate a CodeGuardian review report." in proc.stdout
+    assert "No files will be changed." in proc.stdout
+    assert "Generating terminal-only skill output..." in proc.stdout
     assert "Using skill: codeguardian-review" in proc.stdout
     assert "Output kind: code_review_report" in proc.stdout
-    assert "# Code Review Report" in proc.stdout
-    assert "_No files were changed._" in proc.stdout
+    assert "Code Review Report" in proc.stdout
+    assert "Review report generated successfully." in proc.stdout
+    assert "Suggested next actions:" in proc.stdout
+    assert "_Displayed in the terminal only. No files were created or changed._" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert session["last_plan"]["status"] == "output_generated"
     assert session["last_skill_output"]["mutations_applied"] is False
@@ -1639,7 +1642,7 @@ def test_llm_available_creates_llm_assisted_plan(tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0
-    assert "Generating LLM-assisted grounded plan" in proc.stdout
+    assert "Creating grounded plan" in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert session["last_plan"]["mode"] == PlanningMode.LLM_ASSISTED.value
     assert session["last_plan"]["status"] == "awaiting_confirmation"
@@ -1675,13 +1678,15 @@ def test_disabled_best_match_prompts_before_generic_fallback_yes(tmp_path: Path)
     )
 
     assert proc.returncode == 0
-    assert "Matched task intent: code_review" in proc.stdout
-    assert "Best matching skill is disabled by config: codeguardian-review" in proc.stdout
-    assert "No specialized skill selected." in proc.stdout
-    assert "Best matching skill is disabled by config: codeguardian-review. Continue with generic grounded planning? [YES/NO]>" in proc.stdout
+    assert "Code review detected" in proc.stdout
+    assert "Best matching skill is disabled: codeguardian-review" in proc.stdout
+    assert "No specialized skill will be used." in proc.stdout
+    assert "Continue with generic grounded planning?" in proc.stdout
     assert "Continuing without disabled skill: codeguardian-review" in proc.stdout
-    assert "Generating generic grounded plan" in proc.stdout
-    assert "Selected skill: codeguardian-review" not in proc.stdout
+    assert "Creating grounded plan" in proc.stdout
+    assert "Selected skill:" not in proc.stdout
+    assert "Matched skill:" not in proc.stdout
+    assert "Using: codeguardian-review" not in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     routing = session["last_plan"]["context_selection"]["skill_routing"]
     assert routing["selected_skills"] == []
@@ -1719,9 +1724,10 @@ def test_disabled_best_match_prompt_no_cancels_without_plan(tmp_path: Path) -> N
     )
 
     assert proc.returncode == 0
-    assert "Best matching skill is disabled by config: codeguardian-review" in proc.stdout
+    assert "Best matching skill is disabled: codeguardian-review" in proc.stdout
+    assert "Cancelled. No changes were made." in proc.stdout
     assert "No project plan was created." in proc.stdout
-    assert "Generating generic grounded plan" not in proc.stdout
+    assert "Creating grounded plan" not in proc.stdout
     session_path = tmp_path / ".snappy" / "memory" / "session.json"
     if session_path.exists():
         session = json.loads(session_path.read_text(encoding="utf-8"))
@@ -1752,8 +1758,8 @@ def test_missing_configured_skill_allows_generic_fallback_without_prompt(tmp_pat
     )
 
     assert proc.returncode == 0
-    assert "Matched task intent: code_review" in proc.stdout
-    assert "No matching skill selected." in proc.stdout
+    assert "Code review detected" in proc.stdout
+    assert "No specialized skill found for this request." in proc.stdout
     assert "Configured skill is missing: codeguardian-review" in proc.stdout
     assert "Continue with generic grounded planning?" not in proc.stdout
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
@@ -1786,7 +1792,7 @@ def test_llm_failure_falls_back_to_deterministic_plan(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert "LLM-assisted planning is unavailable" not in proc.stdout
-    assert "Generating deterministic grounded plan from inspected project context" in proc.stdout
+    assert "Creating grounded plan from inspected project context" in proc.stdout
     assert "Apply the smallest project change" in proc.stdout
     assert "Pending plan: deterministic plan with" in proc.stdout
     assert "Last skip reason: (none)" in proc.stdout
@@ -1815,7 +1821,7 @@ def test_llm_validation_rejection_falls_back_to_deterministic_plan(tmp_path: Pat
 
     captured = capsys.readouterr()
     assert "LLM-assisted plan was rejected by validation." in captured.out
-    assert "Generating deterministic grounded plan from inspected project context" in captured.out
+    assert "Creating grounded plan from inspected project context" in captured.out
     assert result.plan_mode == PlanningMode.DETERMINISTIC.value
     session = json.loads((tmp_path / ".snappy" / "memory" / "session.json").read_text(encoding="utf-8"))
     assert session["current_plan"]["goal"] == "help me improve this api"

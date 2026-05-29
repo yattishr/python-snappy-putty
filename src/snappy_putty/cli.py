@@ -412,7 +412,7 @@ def _render_clarification_followup(state: SessionState, *, blocked: bool) -> Non
 def _confirmation_prompt_label(state: SessionState) -> str:
     context = state.pending_context
     if isinstance(context, OutputGenerationContext):
-        return "generate [YES/NO]> "
+        return "continue [YES/NO]> "
     stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
     if stage == "overwrite":
         return "overwrite [YES/NO]> "
@@ -424,19 +424,88 @@ def _confirmation_prompt_label(state: SessionState) -> str:
 def _confirmation_prompt_message(state: SessionState) -> str:
     context = state.pending_context
     if isinstance(context, OutputGenerationContext):
-        return "Type YES to generate the non-mutating skill output, or NO to cancel."
+        return _output_generation_confirmation_message(context)
     stage = context.stage if isinstance(context, ConfirmationContext) else "apply"
     if stage == "overwrite":
-        return "Destination exists. Type YES to overwrite, or NO to cancel."
+        return "Destination exists.\n\nFiles may be modified.\n\nContinue?"
     if stage == "limit":
-        return f"Plan exceeds {MAX_OPS} operations. Type YES to continue, or NO to cancel."
-    return "Type YES to apply, or NO to cancel."
+        return f"Plan exceeds {MAX_OPS} operations.\n\nFiles may be modified.\n\nContinue?"
+    paths = _confirmation_plan_paths(state)
+    if paths:
+        listed = "\n".join(f"- {path}" for path in paths[:8])
+        extra = "" if len(paths) <= 8 else f"\n- ...and {len(paths) - 8} more"
+        return f"Ready to apply changes to:\n\n{listed}{extra}\n\nFiles may be modified.\n\nContinue?"
+    return "Ready to apply filesystem changes.\n\nFiles may be modified.\n\nContinue?"
 
 
 def _render_confirmation_prompt(state: SessionState, *, invalid: bool = False) -> None:
     if invalid:
         console.print("Please answer YES or NO.")
     console.print(_confirmation_prompt_message(state))
+
+
+_OUTPUT_CONFIRMATION_TITLES = {
+    "code_review": "generate a CodeGuardian review report",
+    "frontend_build": "create a frontend design brief",
+    "documentation": "generate documentation",
+    "testing": "generate a testing plan",
+    "deployment": "generate a deployment plan",
+    "project_setup": "generate an implementation plan",
+    "project_extension": "generate an implementation plan",
+    "project_adaptation": "generate an implementation plan",
+    "general_project_help": "generate a structured report",
+}
+
+
+def _output_generation_confirmation_message(context: OutputGenerationContext) -> str:
+    task = (context.task_intent or "").strip()
+    if not task and any("codeguardian" in skill for skill in context.selected_skills):
+        task = "code_review"
+    action = _OUTPUT_CONFIRMATION_TITLES.get(task, "generate a structured report")
+    return f"Ready to {action}.\n\nNo files will be changed.\n\nContinue?"
+
+
+def _confirmation_plan_paths(state: SessionState) -> list[str]:
+    plan = state.pending_plan
+    if not isinstance(plan, FsPlan):
+        return []
+    paths: list[str] = []
+    for op in plan.ops:
+        for value in (op.dst, op.src):
+            if value and value not in paths:
+                paths.append(value)
+    return paths
+
+
+def _build_output_generation_confirmation_question(state: SessionState) -> dict[str, object]:
+    return _build_confirmation_choice_question(state)
+
+
+def _build_confirmation_choice_question(state: SessionState) -> dict[str, object]:
+    return {
+        "type": "choice",
+        "message": _confirmation_prompt_message(state),
+        "options": [
+            {"label": "YES", "value": "YES"},
+            {"label": "NO", "value": "NO"},
+        ],
+        "selected_index": 0,
+        "footer": "(Use ↑/↓ to navigate, ENTER to select, or type YES/NO)",
+        "fallback_prompt": "Enter 1 for YES, 2 for NO, or type YES/NO: ",
+        "escape_value": "NO",
+    }
+
+
+def _should_prompt_confirmation_choice(state: SessionState) -> bool:
+    return state.current_state == LifecycleState.CONFIRMATION and state.awaiting_confirmation
+
+
+def _should_prompt_output_generation_confirmation(state: SessionState) -> bool:
+    return (
+        state.current_state == LifecycleState.CONFIRMATION
+        and state.awaiting_confirmation
+        and isinstance(state.pending_context, OutputGenerationContext)
+    )
 
 
 def _normalized_confirmation_token(value: str) -> str:
@@ -781,8 +850,7 @@ def _record_agent_planning_result(
             state.awaiting_confirmation = True
             state.update_workflow_context(output_context)
             _set_state(state, LifecycleState.CONFIRMATION)
-            _render_confirmation_prompt(state)
-            state.last_result = "Awaiting non-mutating skill output confirmation."
+            state.last_result = "Awaiting terminal-only report confirmation."
         else:
             _set_state(state, LifecycleState.CONFIRMATION)
     else:
@@ -2279,7 +2347,7 @@ def _restore_session_from_disk(state: SessionState, workspace_root: Path) -> tup
     if snapshot.state == "CLARIFICATION":
         awaiting = _workflow_pending_question(state)
     elif snapshot.state == "CONFIRMATION":
-        awaiting = "YES/NO"
+        awaiting = "YES/NO" if snapshot.awaiting_confirmation else "(none)"
     else:
         awaiting = "(none)"
     message = "\n".join(
@@ -2311,15 +2379,19 @@ def run_shell() -> None:
 
     print_repl_cheatsheet()
     if restore_warning:
-        console.print(restore_warning)
+        console.print(restore_warning, soft_wrap=True)
     if restore_message:
         console.print(restore_message)
-        if state.current_state == LifecycleState.CONFIRMATION:
-            _render_confirmation_prompt(state)
 
     while True:
         try:
-            if _is_choice_question(state.pending_question):
+            if _should_prompt_confirmation_choice(state):
+                question = _build_confirmation_choice_question(state)
+                if session is None:
+                    line = _prompt_choice_fallback(question)
+                else:
+                    line = _prompt_choice_question(session, question)
+            elif _is_choice_question(state.pending_question):
                 if session is None:
                     line = _prompt_choice_fallback(state.pending_question)
                 else:
@@ -2702,14 +2774,89 @@ def ask(intent: str = typer.Argument(..., help="What you want to accomplish.")) 
     handle_ask(decision.payload.get("intent", intent), session_mode=None)
 
 
-def _confirm_generic_skill_fallback(disabled_skill: str) -> bool:
-    while True:
-        response = input(f"Best matching skill is disabled by config: {disabled_skill}. Continue with generic grounded planning? [YES/NO]> ").strip().lower()
-        if response in {"yes", "y"}:
-            return True
-        if response in {"no", "n"}:
-            return False
-        console.print("Please answer YES or NO.")
+_FRIENDLY_TASK_LABELS = {
+    "code_review": "Code review detected",
+    "frontend_build": "Frontend build detected",
+    "documentation": "Documentation task detected",
+    "testing": "Testing task detected",
+    "deployment": "Deployment task detected",
+    "project_setup": "Project setup detected",
+    "project_extension": "Project extension detected",
+    "project_adaptation": "Project adaptation detected",
+    "general_project_help": "Project help detected",
+}
+
+
+def _friendly_task_label(label: str) -> str:
+    return _FRIENDLY_TASK_LABELS.get(label, f"{label.replace('_', ' ').title()} detected")
+
+
+def _friendly_route_reason(route_result) -> str:
+    indicators = [item.replace("_", " ") for item in route_result.task_intent.indicators[:2]]
+    if indicators:
+        return f"matched {' and '.join(indicators)} indicators"
+    reason = (route_result.reason or route_result.task_intent.reason or "project context matched").replace("_", " ")
+    return reason
+
+
+def _render_routing_summary(route_result) -> None:
+    console.print(_friendly_task_label(route_result.task_intent.label))
+    if route_result.selected_skills:
+        console.print(f"Using: {', '.join(route_result.selected_skills)}")
+    elif route_result.disabled_best_match:
+        console.print(f"Best matching skill is disabled: {route_result.disabled_best_match}")
+        console.print("No specialized skill will be used.")
+    else:
+        console.print("No specialized skill found for this request.")
+        console.print("Continuing with generic grounded planning.")
+    console.print(f"Reason: {_friendly_route_reason(route_result)}")
+    if _debug_enabled():
+        console.print(f"Task intent: {route_result.task_intent.label}")
+        console.print(f"Selected skill: {', '.join(route_result.selected_skills) or '(none)'}")
+        if route_result.candidates:
+            console.print("Candidates:")
+            for candidate in route_result.candidates:
+                console.print(f"- {candidate.skill_name}: {candidate.score:.2f}")
+
+
+def _build_generic_fallback_question(disabled_skill: str, task_label: str) -> dict[str, object]:
+    return {
+        "type": "choice",
+        "message": "\n".join(
+            [
+                f"{_friendly_task_label(task_label)}.",
+                "",
+                "Best matching skill is disabled:",
+                disabled_skill,
+                "",
+                "No specialized skill will be used.",
+                "",
+                "Continue with generic grounded planning?",
+            ]
+        ),
+        "options": [
+            {"label": "YES", "value": "YES"},
+            {"label": "NO", "value": "NO"},
+        ],
+        "selected_index": 0,
+        "footer": "(Use ↑/↓ to navigate, ENTER to select, or type YES/NO)",
+        "fallback_prompt": "Enter 1 for YES, 2 for NO, or type YES/NO: ",
+        "escape_value": "NO",
+    }
+
+
+def _confirm_generic_skill_fallback(disabled_skill: str, task_label: str = "general_project_help") -> bool:
+    question = _build_generic_fallback_question(disabled_skill, task_label)
+    if sys.stdin.isatty():
+        try:
+            from prompt_toolkit import PromptSession
+
+            response = _prompt_choice_question(PromptSession(), question)
+        except Exception:
+            response = _prompt_choice_fallback(question)
+    else:
+        response = _prompt_choice_fallback(question)
+    return _normalized_confirmation_token(response) == "YES"
 
 
 def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
@@ -2743,17 +2890,9 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
         project_relationship = assess_project_relationship(intent, snapshot, skill_matches=skill_matches, config=config)
         related = project_relationship.is_project_related
         relevance_reason = project_relationship.reason
-        emit_progress("Inspecting project context...")
+        emit_progress("Inspecting project...")
         console.print(f"Using snapshot: {snapshot.snapshot_id}")
-        console.print(f"Matched task intent: {skill_route.task_intent.label}")
-        if skill_route.selected_skills:
-            console.print(f"Selected skill: {', '.join(skill_route.selected_skills)}")
-            console.print(f"Matched skill: {skill_route.selected_skills[0]}")
-        elif skill_route.disabled_best_match:
-            console.print(f"Best matching skill is disabled by config: {skill_route.disabled_best_match}")
-            console.print("No specialized skill selected.")
-        else:
-            console.print("No matching skill selected.")
+        _render_routing_summary(skill_route)
         filtered_skill_registry = discover_skills(root, config=config)
         for issue in filtered_skill_registry.issues:
             if issue.code in {"configured_skill_missing", "skill_disabled_by_config", "skill_not_enabled_by_config"}:
@@ -2829,7 +2968,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                 skip_reason=relevance_reason,
             )
         if skill_route.disabled_best_match and not skill_route.selected_skills:
-            confirmed = _confirm_generic_skill_fallback(skill_route.disabled_best_match)
+            confirmed = _confirm_generic_skill_fallback(skill_route.disabled_best_match, skill_route.task_intent.label)
             skill_route = skill_route.with_generic_fallback_confirmation(confirmed)
             if not confirmed:
                 append_history_event(
@@ -2841,6 +2980,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                         "Skill routing": skill_route.as_metadata(),
                     },
                 )
+                console.print("Cancelled. No changes were made.")
                 console.print("No project plan was created.")
                 return AgentRunResult(
                     output=AgentOutput(
@@ -2868,12 +3008,12 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     "Skill routing": skill_route.as_metadata(),
                 },
             )
-            emit_progress("Generating generic grounded plan...")
+            emit_progress("Creating grounded plan...")
         try:
             with busy(get_status_message("plan"), console=console):
                 if planning_mode == PlanningMode.LLM_ASSISTED:
                     if not skill_route.generic_fallback_confirmed:
-                        emit_progress("Generating LLM-assisted grounded plan...")
+                        emit_progress("Creating grounded plan...")
                     plan = create_llm_assisted_plan(
                         intent,
                         snapshot,
@@ -2896,7 +3036,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     )
         except LLMPlannerUnavailableError as exc:
             _debug(str(exc))
-            console.print("Generating deterministic grounded plan from inspected project context...")
+            console.print("Creating grounded plan from inspected project context...")
             with busy(get_status_message("plan"), console=console):
                 plan = build_grounded_plan(
                     intent,
@@ -2920,7 +3060,7 @@ def handle_ask(intent: str, session_mode: str | None = None) -> AgentRunResult:
                     "Fallback": "deterministic",
                 },
             )
-            console.print("Generating deterministic grounded plan from inspected project context...")
+            console.print("Creating grounded plan from inspected project context...")
             with busy(get_status_message("plan"), console=console):
                 plan = build_grounded_plan(
                     intent,
@@ -3376,7 +3516,6 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
                 allow_excess_ops=allow_excess_ops,
                 excess_ops=excess_ops,
             )
-            _render_confirmation_prompt(state)
             return
         _set_fs_confirmation_state(
             state,
@@ -3387,7 +3526,6 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             allow_excess_ops=allow_excess_ops,
             excess_ops=excess_ops,
         )
-        _render_confirmation_prompt(state)
         return
 
     if stage == "limit":
@@ -3401,7 +3539,6 @@ def _consume_confirmation_response(response: str, state: SessionState, workspace
             allow_excess_ops=allow_excess_ops,
             excess_ops=excess_ops,
         )
-        _render_confirmation_prompt(state)
         return
 
     registry = load_agent_rule_registry(root, session_mode=state.agent_mode)
@@ -3479,11 +3616,12 @@ def _generate_confirmed_skill_output(
     registry = discover_skills(root, config=config)
     request = build_skill_output_request(plan=validity.plan, skills=registry.skills, config=config)
     output_kind, _ = output_kind_for_request(request.task_intent, request.selected_skills, registry.skills)
-    console.print("Generating skill output...")
+    console.print("Generating terminal-only skill output...")
     console.print(f"Using skill: {', '.join(request.selected_skills)}")
     console.print(f"Output kind: {output_kind}")
     output = generate_skill_output(request, registry.skills)
     console.print(render_skill_output(output), markup=False)
+    _render_skill_output_completion_summary(output.output_kind)
 
     updated_plan = replace(validity.plan, status="output_generated")
     save_grounded_plan(root, updated_plan, validity.snapshot)
@@ -3502,7 +3640,47 @@ def _generate_confirmed_skill_output(
         },
     )
     save_session_payload(root, {"last_skill_output": {"output_kind": output.output_kind, "title": output.title, "mutations_applied": False}})
-    _complete_active_goal(state, message=f"Generated {output.output_kind} without mutations.")
+    _complete_active_goal(state, message=f"Displayed {output.output_kind} in the terminal without changing files.")
+
+
+def _render_skill_output_completion_summary(output_kind: str) -> None:
+    title, suggestions = _skill_output_completion_details(output_kind)
+    lines = [title, "", "Suggested next actions:"]
+    lines.extend(f"{index}. {item}" for index, item in enumerate(suggestions[:3], start=1))
+    console.print("\n".join(lines))
+
+
+def _skill_output_completion_details(output_kind: str) -> tuple[str, list[str]]:
+    mapping = {
+        "code_review_report": (
+            "Review report generated successfully.",
+            ["Apply suggested fixes", "Generate an implementation plan", "Review another area"],
+        ),
+        "frontend_design_brief": (
+            "Frontend design brief generated successfully.",
+            ["Generate an implementation plan", "Apply design changes", "Review API integration"],
+        ),
+        "documentation_draft": (
+            "Documentation draft generated successfully.",
+            ["Save this draft to a file", "Expand setup instructions", "Review examples"],
+        ),
+        "testing_plan": (
+            "Testing plan generated successfully.",
+            ["Add focused tests", "Run the relevant test command", "Review edge cases"],
+        ),
+        "deployment_plan": (
+            "Deployment plan generated successfully.",
+            ["Review environment variables", "Validate rollback steps", "Check deployment config"],
+        ),
+        "implementation_plan": (
+            "Implementation plan generated successfully.",
+            ["Review planned steps", "Apply changes manually", "Generate tests"],
+        ),
+    }
+    return mapping.get(
+        output_kind,
+        ("Structured report generated successfully.", ["Review the report", "Refine the plan", "Generate another report"]),
+    )
 
 
 def _consume_pending_question_answer(answer: str, state: SessionState) -> None:
@@ -3826,7 +4004,6 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             allow_excess_ops=False,
             excess_ops=excess_ops,
         )
-        _render_confirmation_prompt(state)
         state.last_result = "Awaiting overwrite confirmation."
         return True
 
@@ -3840,7 +4017,6 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
             allow_excess_ops=False,
             excess_ops=excess_ops,
         )
-        _render_confirmation_prompt(state)
         state.last_result = "Awaiting large-plan confirmation."
         return True
 
@@ -3853,7 +4029,6 @@ def _handle_fs_intent_repl(intent: str, workspace_root: Path, state: SessionStat
         allow_excess_ops=False,
         excess_ops=False,
     )
-    _render_confirmation_prompt(state)
     state.last_result = "Awaiting apply confirmation."
     return True
 

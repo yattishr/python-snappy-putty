@@ -462,7 +462,8 @@ def test_shell_workflow_ux_smoke_clarification_confirmation_and_after(tmp_path: 
     assert proc.returncode == 0
     assert "Your pending question is still active." in proc.stdout
     assert "Please answer YES or NO." in proc.stdout
-    assert "Awaiting confirmation: Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Awaiting confirmation: Ready to apply changes" in proc.stdout
+    assert "Files may be modified." in proc.stdout
     assert "No pending next step." in proc.stdout
 
 
@@ -576,4 +577,5 @@ def test_shell_workflow_ux_smoke_confirm_and_info_show_policy_without_block(tmp_
     assert "Policy" in proc.stdout
     assert "Loaded rules require confirmation before filesystem changes are applied." in proc.stdout
     assert "Policy Block" not in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
+    assert "Files may be modified." in proc.stdout

@@ -484,7 +484,11 @@ def restore_workflow_snapshot(cwd: Path | None = None) -> WorkflowRestoreResult:
         clear_workflow_snapshot(cwd)
         return WorkflowRestoreResult(
             snapshot=None,
-            warning="Stored workflow snapshot was invalid and was ignored.",
+            warning=(
+                "Snappy couldn't resume the previous workflow because its saved state was inconsistent "
+                f"({exc}). I cleared that stale workflow state and started a fresh session. "
+                "Your project files and saved plans were not changed."
+            ),
             source_path=str(session_path),
         )
     return WorkflowRestoreResult(snapshot=snapshot, source_path=str(session_path))
@@ -665,6 +669,8 @@ def _validate_workflow_snapshot(snapshot: ActiveWorkflowSnapshot) -> None:
 
     if snapshot.state == "CONFIRMATION":
         if not snapshot.awaiting_confirmation:
+            if snapshot.context is None and isinstance(snapshot.pending_plan_data, list):
+                return
             raise ValueError("confirmation workflow must await confirmation")
         if not isinstance(snapshot.context, (ConfirmationContext, OutputGenerationContext)):
             raise ValueError("confirmation workflow requires a confirmation context")

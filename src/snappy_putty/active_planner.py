@@ -662,7 +662,7 @@ def grounded_plan_to_lines(plan: GroundedPlan) -> list[str]:
         intent_label = task_intent.get("label") if isinstance(task_intent, dict) else "(unknown)"
         selected = skill_routing.get("selected_skills")
         selected_text = ", ".join(selected) if isinstance(selected, list) and selected else "(none)"
-        lines.extend(["", f"Matched task intent: {intent_label}", f"Selected skill: {selected_text}"])
+        lines.extend(["", f"Task intent: {str(intent_label).replace('_', ' ')}", f"Using: {selected_text}"])
 
     skill_selection = (plan.context_selection or {}).get("skill_selection")
     if isinstance(skill_selection, dict):

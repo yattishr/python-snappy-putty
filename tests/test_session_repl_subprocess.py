@@ -51,7 +51,7 @@ def test_repl_out_of_scope_request_is_declined_without_planning(tmp_path: Path) 
     assert "I can only help with software, hardware, and technology topics." in proc.stdout
     assert "Try asking about code, debugging, CLIs, repos, APIs, or hardware." in proc.stdout
     assert "Planned Changes" not in proc.stdout
-    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+    assert "Ready to apply changes" not in proc.stdout
 
 
 def test_repl_cancel_without_pending_workflow_returns_to_prompt(tmp_path: Path) -> None:
@@ -251,8 +251,8 @@ def test_repl_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
     assert proc.returncode == 0
     assert proc.stdout.index("Goal") < proc.stdout.index("Planned Changes")
     assert proc.stdout.index("Planned Changes") < proc.stdout.index("Plan Warnings")
-    assert proc.stdout.index("Plan Warnings") < proc.stdout.index("Type YES to apply, or NO to cancel.")
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert proc.stdout.index("Plan Warnings") < proc.stdout.index("Ready to apply changes to:")
+    assert "Files may be modified." in proc.stdout
     assert (tmp_path / "README-copy.md").exists()
 
 
@@ -320,7 +320,7 @@ def test_repl_restores_confirmation_without_automatic_execution(tmp_path: Path) 
     assert "Restored pending workflow: copy README.md to README-copy.md" in proc.stdout
     assert "State: confirmation" in proc.stdout
     assert "Awaiting: YES/NO" in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
     assert "Awaiting confirmation: yes" in proc.stdout
     assert "Workflow restored from memory: yes" in proc.stdout
@@ -347,10 +347,109 @@ def test_repl_warns_and_starts_clean_when_snapshot_is_invalid(tmp_path: Path) ->
     )
 
     assert proc.returncode == 0
-    assert "Stored workflow snapshot was invalid and was ignored." in proc.stdout
+    assert "Snappy couldn't resume the previous workflow because its saved state was inconsistent" in proc.stdout
+    assert "clarification workflow is missing pending_question" in proc.stdout
+    assert "I cleared that stale workflow state and started a fresh session." in proc.stdout
+    assert "Your project files and saved plans were not changed." in proc.stdout
     assert "Current state: IDLE" in proc.stdout
     assert "Workflow restored from memory: yes" not in proc.stdout
     assert not session_path.exists()
+
+
+def test_repl_restores_advisory_confirmation_without_yes_no_prompt(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "workflow_id": "wf-plan",
+                    "state": "CONFIRMATION",
+                    "goal": "help me improve this CLI",
+                    "route": "ask",
+                    "pending_question": None,
+                    "pending_plan_summary": "llm_assisted plan with 1 step(s)",
+                    "pending_plan_mode": "llm_assisted",
+                    "awaiting_confirmation": False,
+                    "control_state": "allowed",
+                    "context": None,
+                    "pending_question_data": None,
+                    "pending_plan_data": [{"step": 1, "action": "Inspect CLI", "why": "Grounded active plan"}],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="status\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Snappy couldn't resume the previous workflow" not in proc.stdout
+    assert "Restored pending workflow: help me improve this CLI" in proc.stdout
+    assert "State: confirmation" in proc.stdout
+    assert "Awaiting: (none)" in proc.stdout
+    assert "Awaiting confirmation: no" in proc.stdout
+    assert session_path.exists()
+
+
+def test_repl_restored_output_generation_confirmation_shows_prompt_once(tmp_path: Path) -> None:
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "workflow_id": "wf-output",
+                    "state": "CONFIRMATION",
+                    "goal": "Help implement basic authentication for the API",
+                    "route": "ask",
+                    "pending_question": None,
+                    "pending_plan_summary": "llm_assisted plan with 1 step(s)",
+                    "pending_plan_mode": "llm_assisted",
+                    "awaiting_confirmation": True,
+                    "control_state": "awaiting_confirm",
+                    "context": {
+                        "kind": "output_generation",
+                        "plan_id": "plan-1",
+                        "task_intent": "code_review",
+                        "selected_skills": ["codeguardian-review"],
+                        "workspace_root": str(tmp_path),
+                    },
+                    "pending_question_data": None,
+                    "pending_plan_data": [{"step": 1, "action": "Review auth plan", "why": "Grounded active plan"}],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="2\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Restored pending workflow: Help implement basic authentication for the API" in proc.stdout
+    assert proc.stdout.count("Ready to generate a CodeGuardian review report.") == 1
+    assert proc.stdout.count("No files will be changed.") == 1
+    assert "1. YES" in proc.stdout
+    assert "2. NO" in proc.stdout
+    assert "Cancelled. No pending action was applied." in proc.stdout
 
 
 def test_repl_overwrite_confirmation_flow_applies_on_yes(tmp_path: Path) -> None:
@@ -368,8 +467,8 @@ def test_repl_overwrite_confirmation_flow_applies_on_yes(tmp_path: Path) -> None
         timeout=20,
     )
     assert proc.returncode == 0
-    assert "Destination exists. Type YES to overwrite, or NO to cancel." in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Destination exists." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert destination.read_text(encoding="utf-8") == "demo"
 
 
@@ -388,8 +487,8 @@ def test_repl_overwrite_confirmation_flow_accepts_lowercase_yes(tmp_path: Path) 
         timeout=20,
     )
     assert proc.returncode == 0
-    assert "Destination exists. Type YES to overwrite, or NO to cancel." in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Destination exists." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert destination.read_text(encoding="utf-8") == "demo"
 
 
@@ -407,7 +506,7 @@ def test_repl_invalid_confirmation_input_reprompts_cleanly(tmp_path: Path) -> No
     )
     assert proc.returncode == 0
     assert "Please answer YES or NO." in proc.stdout
-    assert proc.stdout.count("Type YES to apply, or NO to cancel.") == 2
+    assert proc.stdout.count("Ready to apply changes") >= 2
     assert (tmp_path / "README-copy.md").exists()
 
 
@@ -428,7 +527,7 @@ def test_repl_invalid_confirmation_input_keeps_control_state_pending(tmp_path: P
     assert "Please answer YES or NO." in proc.stdout
     assert "Awaiting confirmation: yes" in proc.stdout
     assert "Current control state: awaiting_confirm" in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert not (tmp_path / "README-copy.md").exists()
 
 
@@ -446,7 +545,9 @@ def test_repl_status_reprompts_confirmation_with_confirmation_prompt(tmp_path: P
     )
 
     assert proc.returncode == 0
-    assert "confirm [YES/NO]>" in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
+    assert "1. YES" in proc.stdout
+    assert "2. NO" in proc.stdout
     assert "Cancelled. No pending action was applied." in proc.stdout
 
 
@@ -463,7 +564,7 @@ def test_repl_confirmation_flow_cancels_on_no(tmp_path: Path) -> None:
         timeout=20,
     )
     assert proc.returncode == 0
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert "Cancelled. No pending action was applied." in proc.stdout
     assert "Current state: IDLE" in proc.stdout
     assert "Last cancelled goal: copy README.md README-copy.md" in proc.stdout
@@ -486,7 +587,7 @@ def test_repl_after_status_cancel(tmp_path: Path) -> None:
     assert "Session Status" in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
     assert "Awaiting confirmation: yes" in proc.stdout
-    assert "Awaiting confirmation: Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Awaiting confirmation: Ready to apply changes" in proc.stdout
     assert "Cleared pending question/plan state." in proc.stdout
     assert "Current state: IDLE" in proc.stdout
     assert "Active goal: (none)" in proc.stdout
@@ -1096,7 +1197,7 @@ def test_repl_block_rule_outranks_confirm_rule_when_both_are_loaded(tmp_path: Pa
     assert "Operation blocked by rule: protect_project_root" in proc.stdout
     assert "Additional policy context: confirmation rule(s) also matched:" in proc.stdout
     assert "require_confirm" in proc.stdout
-    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+    assert "Ready to apply changes" not in proc.stdout
     assert "Pending plan: (none)" in proc.stdout
 
 
@@ -1130,7 +1231,7 @@ def test_repl_confirm_rule_and_info_rule_require_confirmation_without_block(tmp_
     assert "Policy" in proc.stdout
     assert "Loaded rules require confirmation before filesystem changes are applied." in proc.stdout
     assert "Policy Block" not in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert "Current state: IDLE" in proc.stdout
 
 
@@ -1159,7 +1260,7 @@ def test_repl_info_rule_only_does_not_change_safe_copy_behavior(tmp_path: Path) 
     assert "Planned Changes" in proc.stdout
     assert "Policy Block" not in proc.stdout
     assert "Loaded rules require confirmation before filesystem changes are applied." not in proc.stdout
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert "Current state: CONFIRMATION" in proc.stdout
 
 
@@ -1183,7 +1284,7 @@ def test_repl_workspace_escape_without_rule_is_reported_as_blocked_request(tmp_p
     assert "outside the workspace root." in output
     assert "Path escapes workspace root:" in output
     assert "Choose a destination inside the workspace and try again." in output
-    assert "Type YES to apply, or NO to cancel." not in output
+    assert "Ready to apply changes" not in output
     assert "Current state: IDLE" in output
     assert "Pending plan: (none)" in output
     assert "Last failed goal: copy README.md to /" in output
@@ -1207,7 +1308,7 @@ def test_repl_zero_op_invalid_request_does_not_leave_pending_plan(tmp_path: Path
     assert "could not be normalized into a valid filesystem change." in output
     assert "Source does not exist: missing.txt" in output
     assert "Adjust the request and try again." in output
-    assert "Type YES to apply, or NO to cancel." not in output
+    assert "Ready to apply changes" not in output
     assert "Current state: IDLE" in output
     assert "Pending plan: (none)" in output
     assert "Last failed goal: copy missing.txt to beta.txt" in output
@@ -1547,7 +1648,7 @@ def test_fs_path_clarification_accepts_relative_directory_input(tmp_path: Path) 
         timeout=20,
     )
     assert proc.returncode == 0
-    assert "Type YES to apply, or NO to cancel." in proc.stdout
+    assert "Ready to apply changes" in proc.stdout
     assert (destination_dir / "README.md").exists()
     assert "Current state: IDLE" in proc.stdout
     assert "Last completed goal: copy README.md to tests/" in proc.stdout
@@ -1594,7 +1695,7 @@ def test_fs_destination_clarification_rejects_command_shaped_copy_repro(tmp_path
     assert proc.returncode == 0
     assert "destination path>" in proc.stdout
     assert "You have a pending question." in proc.stdout
-    assert "Type YES to apply, or NO to cancel." not in proc.stdout
+    assert "Ready to apply changes" not in proc.stdout
     assert "Current state: CLARIFICATION" in proc.stdout
     assert "Active goal: copy README.md" in proc.stdout
     assert "Pending question: destination path>" in proc.stdout

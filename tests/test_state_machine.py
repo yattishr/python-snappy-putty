@@ -20,6 +20,7 @@ from snappy_putty.session import (
     ExecutionResult,
     InvalidLifecycleTransition,
     LifecycleState,
+    OutputGenerationContext,
     SessionState,
     clear_workflow_snapshot,
     load_workflow_snapshot,
@@ -202,6 +203,24 @@ def test_load_workflow_snapshot_restores_valid_confirmation_state(tmp_path: Path
     assert restored.awaiting_confirmation is True
     assert isinstance(restored.context, ConfirmationContext)
     assert isinstance(restored.pending_plan_data, dict)
+
+
+def test_load_workflow_snapshot_restores_advisory_confirmation_without_prompt(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    session_path = tmp_path / ".snappy" / "memory" / "session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        '{"workflow": {"workflow_id": "wf-plan", "state": "CONFIRMATION", "goal": "help me improve this CLI", "route": "ask", "pending_question": null, "pending_plan_summary": "llm_assisted plan with 1 step(s)", "pending_plan_mode": "llm_assisted", "awaiting_confirmation": false, "control_state": "allowed", "context": null, "pending_question_data": null, "pending_plan_data": [{"step": 1, "action": "Inspect CLI", "why": "Grounded active plan"}]}}\n',
+        encoding="utf-8",
+    )
+
+    restored = load_workflow_snapshot(tmp_path)
+
+    assert restored is not None
+    assert restored.state == "CONFIRMATION"
+    assert restored.awaiting_confirmation is False
+    assert restored.context is None
+    assert isinstance(restored.pending_plan_data, list)
 
 
 def test_load_workflow_snapshot_ignores_invalid_snapshot_and_clears_it(tmp_path: Path, monkeypatch, caplog) -> None:
@@ -391,7 +410,11 @@ def test_restore_session_from_disk_surfaces_invalid_snapshot_warning(monkeypatch
     message, warning = cli._restore_session_from_disk(state, tmp_path)
 
     assert message is None
-    assert warning == "Stored workflow snapshot was invalid and was ignored."
+    assert warning is not None
+    assert "Snappy couldn't resume the previous workflow because its saved state was inconsistent" in warning
+    assert "clarification workflow is missing pending_question" in warning
+    assert "I cleared that stale workflow state and started a fresh session." in warning
+    assert "Your project files and saved plans were not changed." in warning
     assert state.current_state == LifecycleState.IDLE
     assert state.active_goal is None
     assert state.workflow_restored_from_memory is False
@@ -406,6 +429,43 @@ def test_render_prompt_uses_confirmation_context_when_confirmation_is_pending() 
     )
 
     assert cli.render_prompt(state) == "confirm [YES/NO]> "
+
+
+def test_output_generation_confirmation_uses_choice_question() -> None:
+    state = SessionState(
+        current_state=LifecycleState.CONFIRMATION,
+        awaiting_confirmation=True,
+        pending_context=OutputGenerationContext(plan_id="plan-1", task_intent="code_review", selected_skills=("codeguardian-review",)),
+    )
+
+    question = cli._build_output_generation_confirmation_question(state)
+
+    assert cli._should_prompt_output_generation_confirmation(state) is True
+    assert question["type"] == "choice"
+    assert "Ready to generate a CodeGuardian review report" in str(question["message"])
+    assert "No files will be changed" in str(question["message"])
+    assert question["options"] == [
+        {"label": "YES", "value": "YES"},
+        {"label": "NO", "value": "NO"},
+    ]
+    assert question["escape_value"] == "NO"
+
+
+def test_output_generation_confirmation_choice_fallback_accepts_number(monkeypatch) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(
+        current_state=LifecycleState.CONFIRMATION,
+        awaiting_confirmation=True,
+        pending_context=OutputGenerationContext(plan_id="plan-1", task_intent="code_review", selected_skills=("codeguardian-review",)),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "2")
+
+    selected = cli._prompt_choice_fallback(cli._build_output_generation_confirmation_question(state))
+
+    assert selected == "NO"
+    output = buffer.getvalue()
+    assert "YES" in output
+    assert "NO" in output
 
 
 def test_session_state_start_goal_rejects_nested_active_goal() -> None:
@@ -1227,9 +1287,9 @@ def test_confirmation_prompt_message_varies_by_stage() -> None:
     overwrite_state = SessionState(pending_context=ConfirmationContext(operation_count=1, stage="overwrite", overwrite_detected=True))
     limit_state = SessionState(pending_context=ConfirmationContext(operation_count=6, stage="limit"))
 
-    assert cli._confirmation_prompt_message(apply_state) == "Type YES to apply, or NO to cancel."
-    assert cli._confirmation_prompt_message(overwrite_state) == "Destination exists. Type YES to overwrite, or NO to cancel."
-    assert cli._confirmation_prompt_message(limit_state) == f"Plan exceeds {cli.MAX_OPS} operations. Type YES to continue, or NO to cancel."
+    assert cli._confirmation_prompt_message(apply_state) == "Ready to apply filesystem changes.\n\nFiles may be modified.\n\nContinue?"
+    assert cli._confirmation_prompt_message(overwrite_state) == "Destination exists.\n\nFiles may be modified.\n\nContinue?"
+    assert cli._confirmation_prompt_message(limit_state) == f"Plan exceeds {cli.MAX_OPS} operations.\n\nFiles may be modified.\n\nContinue?"
 
 
 def test_empty_fs_plan_feedback_distinguishes_workspace_block_from_invalid_request() -> None:
@@ -1281,7 +1341,8 @@ def test_after_uses_stage_specific_confirmation_prompt(monkeypatch) -> None:
 
     output = " ".join(buffer.getvalue().split())
     assert "Awaiting confirmation: Destination exists." in output
-    assert "Type YES to overwrite, or NO to cancel." in output
+    assert "Files may be modified." in output
+    assert "Continue?" in output
 
 
 def test_after_in_idle_reports_no_pending_next_step(monkeypatch) -> None:
