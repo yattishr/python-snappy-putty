@@ -42,7 +42,7 @@ from snappy_putty.active_planner import (
     validate_plan_integrity,
 )
 from snappy_putty.agent_init import init_agent_project
-from snappy_putty.config import SnappyConfig, init_project_config, load_effective_config, validate_config
+from snappy_putty.config import SnappyConfig, disable_project_skill, enable_project_skill, init_project_config, load_effective_config, validate_config
 from snappy_putty.context import collect_context
 from snappy_putty.fs_ops import MAX_OPS, apply_fs_plan, list_dir, looks_like_fs_mutation_intent, parse_incomplete_fs_intent, plan_fs_intent
 from snappy_putty.fs_models import FsPlan
@@ -2537,6 +2537,8 @@ def run_shell() -> None:
             continue
         if _handle_agent_mode_command(text, state, session=session):
             continue
+        if _handle_skills_mutation_repl(text):
+            continue
         if text == "home":
             print_repl_home(state, root=workspace_root)
             continue
@@ -3479,11 +3481,49 @@ def _render_skills_list(agent_mode_override: str | None = None) -> None:
         console.print(warning)
 
 
+def _handle_skill_enable_disable(action: str, name: str) -> None:
+    try:
+        if action == "enable":
+            result = enable_project_skill(Path.cwd(), name)
+        else:
+            result = disable_project_skill(Path.cwd(), name)
+    except ValueError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1)
+    console.print(result.message, markup=False)
+    console.print(f"Config updated: {_display_path(result.path)}", markup=False)
+
+
+def _handle_skills_mutation_repl(text: str) -> bool:
+    match = re.match(r"^\s*skills\s+(enable|disable)\s+(\S+)\s*$", text, flags=re.IGNORECASE)
+    if match is None:
+        return False
+    action = match.group(1).lower()
+    name = match.group(2)
+    try:
+        _handle_skill_enable_disable(action, name)
+    except typer.Exit:
+        return True
+    return True
+
+
 @skills_app.callback(invoke_without_command=True)
 def skills_root(ctx: typer.Context) -> None:
     """List discovered skills."""
     if ctx.invoked_subcommand is None:
         _render_skills_list()
+
+
+@skills_app.command("enable")
+def skills_enable(name: str = typer.Argument(..., help="Disabled skill name to enable.")) -> None:
+    """Enable a skill that is currently listed in skills.disabled."""
+    _handle_skill_enable_disable("enable", name)
+
+
+@skills_app.command("disable")
+def skills_disable(name: str = typer.Argument(..., help="Enabled skill name to disable.")) -> None:
+    """Disable a skill that is currently listed in skills.enabled."""
+    _handle_skill_enable_disable("disable", name)
 
 
 @skills_app.command("inspect")

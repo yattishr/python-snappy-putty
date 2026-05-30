@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from snappy_putty.config import load_project_config
 from snappy_putty.skills import discover_skills, match_skills, validate_skill_path
 
 
@@ -47,6 +48,55 @@ def _write_skill(root: Path, name: str = "git-commit-helper", *, description: st
         encoding="utf-8",
     )
     return skill_dir
+
+
+def _write_config(root: Path, *, enabled: list[str] | None = None, disabled: list[str] | None = None) -> Path:
+    def list_block(values: list[str] | None) -> str:
+        items = values or []
+        if not items:
+            return "[]"
+        return "\n" + "\n".join(f"    - {item}" for item in items)
+
+    config_dir = root / ".snappy"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "snappy.yaml"
+    path.write_text(
+        f"""version: 1
+
+agent:
+  name: Test Project
+  mode: off
+  description: Test config.
+
+planning:
+  allow_project_extensions: true
+  prefer_small_steps: true
+  inspect_before_mutation: true
+  max_context_files: null
+
+skills:
+  enabled: {list_block(enabled)}
+  disabled: {list_block(disabled)}
+
+rules:
+  confirmation_required: true
+  allow_file_writes: true
+  allow_shell_commands: false
+  protected_paths:
+    - .env
+    - .git/
+
+memory:
+  enabled: true
+  snapshot_on_inspect: true
+
+logging:
+  level: info
+  trace_enabled: true
+""",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _env() -> dict[str, str]:
@@ -293,6 +343,105 @@ def test_cli_skills_list_inspect_and_validate(tmp_path: Path) -> None:
     assert "Scripts (non-executable resources)" in inspected.stdout
     assert validated.returncode == 0
     assert "scripts_present" in validated.stdout
+
+
+def test_cli_skills_enable_moves_disabled_skill_to_enabled(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_config(tmp_path, enabled=[], disabled=["git-commit-helper"])
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "skills", "enable", "git-commit-helper"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    config = load_project_config(tmp_path)
+    assert proc.returncode == 0
+    assert "Enabled skill: git-commit-helper" in proc.stdout
+    assert config.skills.enabled == ["git-commit-helper"]
+    assert config.skills.disabled == []
+    assert [skill.metadata.name for skill in discover_skills(tmp_path, config=config).skills] == ["git-commit-helper"]
+
+
+def test_cli_skills_disable_moves_enabled_skill_to_disabled(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_config(tmp_path, enabled=["git-commit-helper"], disabled=[])
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "skills", "disable", "git-commit-helper"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    config = load_project_config(tmp_path)
+    assert proc.returncode == 0
+    assert "Disabled skill: git-commit-helper" in proc.stdout
+    assert config.skills.enabled == []
+    assert config.skills.disabled == ["git-commit-helper"]
+    assert discover_skills(tmp_path, config=config).skills == []
+
+
+def test_cli_skills_enable_requires_disabled_config_entry(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_config(tmp_path, enabled=[], disabled=[])
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "skills", "enable", "git-commit-helper"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 1
+    assert "Skill is not disabled in config: git-commit-helper" in proc.stdout
+    assert load_project_config(tmp_path).skills.enabled == []
+
+
+def test_cli_skills_disable_requires_enabled_config_entry(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_config(tmp_path, enabled=[], disabled=["git-commit-helper"])
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "skills", "disable", "git-commit-helper"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 1
+    assert "Skill is not enabled in config: git-commit-helper" in proc.stdout
+    assert load_project_config(tmp_path).skills.disabled == ["git-commit-helper"]
+
+
+def test_repl_skills_enable_command_updates_config(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_config(tmp_path, enabled=[], disabled=["git-commit-helper"])
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="skills enable git-commit-helper\nexit\n",
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    config = load_project_config(tmp_path)
+    assert proc.returncode == 0
+    assert "Enabled skill: git-commit-helper" in proc.stdout
+    assert config.skills.enabled == ["git-commit-helper"]
+    assert config.skills.disabled == []
 
 
 def test_cli_skills_list_shows_migration_hint_for_folders_missing_skill_md(tmp_path: Path) -> None:

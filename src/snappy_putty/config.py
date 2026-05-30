@@ -92,6 +92,16 @@ class InitConfigResult:
     message: str
 
 
+@dataclass(frozen=True)
+class SkillConfigUpdateResult:
+    changed: bool
+    path: Path
+    skill_name: str
+    enabled: list[str]
+    disabled: list[str]
+    message: str
+
+
 def default_config(*, source: str = "defaults", path: Path | None = None, issues: list[ConfigIssue] | None = None) -> SnappyConfig:
     return SnappyConfig(source=source, path=path, issues=list(issues or []))
 
@@ -129,6 +139,64 @@ def load_effective_config(root: Path, env: Mapping[str, str] | None = None) -> S
 
 def validate_config(config: SnappyConfig) -> list[ConfigIssue]:
     return list(config.issues)
+
+
+def enable_project_skill(root: Path, skill_name: str) -> SkillConfigUpdateResult:
+    config = _load_writable_project_config(root)
+    name = skill_name.strip()
+    if name not in config.skills.disabled:
+        raise ValueError(f"Skill is not disabled in config: {name}")
+    enabled = _dedupe([*config.skills.enabled, name])
+    disabled = [item for item in config.skills.disabled if item != name]
+    path = _write_skill_lists(config, root=root, enabled=enabled, disabled=disabled)
+    return SkillConfigUpdateResult(
+        changed=True,
+        path=path,
+        skill_name=name,
+        enabled=enabled,
+        disabled=disabled,
+        message=f"Enabled skill: {name}",
+    )
+
+
+def disable_project_skill(root: Path, skill_name: str) -> SkillConfigUpdateResult:
+    config = _load_writable_project_config(root)
+    name = skill_name.strip()
+    if name not in config.skills.enabled:
+        raise ValueError(f"Skill is not enabled in config: {name}")
+    enabled = [item for item in config.skills.enabled if item != name]
+    disabled = _dedupe([*config.skills.disabled, name])
+    path = _write_skill_lists(config, root=root, enabled=enabled, disabled=disabled)
+    return SkillConfigUpdateResult(
+        changed=True,
+        path=path,
+        skill_name=name,
+        enabled=enabled,
+        disabled=disabled,
+        message=f"Disabled skill: {name}",
+    )
+
+
+def _load_writable_project_config(root: Path) -> SnappyConfig:
+    active_root = root.resolve()
+    path = config_path(active_root)
+    if not path.is_file():
+        raise ValueError("Project config not initialized. Run `snappy config init` first.")
+    config = load_project_config(active_root)
+    errors = [issue for issue in config.issues if issue.severity == "error"]
+    if errors:
+        raise ValueError("Project config is invalid. Run `snappy config validate`.")
+    return config
+
+
+def _write_skill_lists(config: SnappyConfig, *, root: Path, enabled: list[str], disabled: list[str]) -> Path:
+    active_root = root.resolve()
+    path = config.path or config_path(active_root)
+    payload = _payload_from_config(config)
+    payload["skills"]["enabled"] = sorted(enabled)
+    payload["skills"]["disabled"] = sorted(disabled)
+    path.write_text(_config_text_from_payload(payload), encoding="utf-8")
+    return path
 
 
 def init_project_config(root: Path, *, migrate: bool = True) -> InitConfigResult:
@@ -332,6 +400,10 @@ def _config_text_from_payload(payload: dict[str, Any]) -> str:
     enabled_text = "[]"
     if enabled:
         enabled_text = "\n" + "\n".join(f"    - {name}" for name in enabled)
+    disabled = payload["skills"]["disabled"]
+    disabled_text = "[]"
+    if disabled:
+        disabled_text = "\n" + "\n".join(f"    - {name}" for name in disabled)
     protected = "\n".join(f"    - {item}" for item in payload["rules"]["protected_paths"])
     max_context_files = payload["planning"]["max_context_files"]
     max_context_text = "null" if max_context_files is None else str(max_context_files)
@@ -350,7 +422,7 @@ planning:
 
 skills:
   enabled: {enabled_text}
-  disabled: []
+  disabled: {disabled_text}
 
 rules:
   confirmation_required: {_yaml_bool(payload["rules"]["confirmation_required"])}
