@@ -3503,7 +3503,6 @@ def _handle_skill_enable_disable(action: str, name: str) -> None:
         console.print(str(exc), markup=False)
         raise typer.Exit(code=1)
     console.print(result.message, markup=False)
-    console.print(f"Config updated: {_display_path(result.path)}", markup=False)
 
 
 def _handle_skills_mutation_repl(text: str) -> bool:

@@ -404,6 +404,7 @@ def test_cli_skills_enable_moves_disabled_skill_to_enabled(tmp_path: Path) -> No
     config = load_project_config(tmp_path)
     assert proc.returncode == 0
     assert "Enabled skill: git-commit-helper" in proc.stdout
+    assert "Config updated:" not in proc.stdout
     assert config.skills.enabled == ["git-commit-helper"]
     assert config.skills.disabled == []
     assert [skill.metadata.name for skill in discover_skills(tmp_path, config=config).skills] == ["git-commit-helper"]
@@ -425,6 +426,7 @@ def test_cli_skills_disable_moves_enabled_skill_to_disabled(tmp_path: Path) -> N
     config = load_project_config(tmp_path)
     assert proc.returncode == 0
     assert "Disabled skill: git-commit-helper" in proc.stdout
+    assert "Config updated:" not in proc.stdout
     assert config.skills.enabled == []
     assert config.skills.disabled == ["git-commit-helper"]
     assert discover_skills(tmp_path, config=config).skills == []
@@ -483,6 +485,7 @@ def test_repl_skills_enable_command_updates_config(tmp_path: Path) -> None:
     config = load_project_config(tmp_path)
     assert proc.returncode == 0
     assert "Enabled skill: git-commit-helper" in proc.stdout
+    assert "Config updated:" not in proc.stdout
     assert config.skills.enabled == ["git-commit-helper"]
     assert config.skills.disabled == []
 
