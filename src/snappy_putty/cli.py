@@ -2688,7 +2688,7 @@ def run_shell() -> None:
         if route == ROUTE_BUILTIN_DOCTOR:
             doctor(verbose=False)
             continue
-        if text == "skills":
+        if text in {"skills", "snappy skills"}:
             _render_skills_list(agent_mode_override=state.agent_mode)
             continue
         if text == "rules":
@@ -3423,8 +3423,21 @@ def config_explain() -> None:
     console.print(Panel("\n".join(lines), title="Config Explain", border_style="bright_blue"))
 
 
-def _skill_status(skill: Skill, issue_codes: set[str]) -> str:
-    return "warning" if issue_codes else "valid"
+def _skill_config_status(
+    skill: Skill,
+    *,
+    config: SnappyConfig,
+    loaded_names: set[str],
+    warning_codes: set[str],
+) -> str:
+    name = skill.metadata.name
+    if name in loaded_names:
+        return "enabled (warning)" if warning_codes else "enabled"
+    if name in set(config.skills.disabled):
+        return "disabled"
+    if config.path is not None:
+        return "disabled (not enabled)"
+    return "disabled"
 
 
 def _render_skills_list(agent_mode_override: str | None = None) -> None:
@@ -3444,16 +3457,15 @@ def _render_skills_list(agent_mode_override: str | None = None) -> None:
         for issue in raw_registry.warnings:
             if issue.path is not None:
                 warning_codes_by_path.setdefault(issue.path, set()).add(issue.code)
-        enabled = set(config.skills.enabled)
-        disabled = set(config.skills.disabled)
         loaded_names = {skill.metadata.name for skill in registry.skills}
         for skill in raw_registry.skills:
             risk = str(skill.metadata.snappy.get("risk") or "")
-            status = _skill_status(skill, warning_codes_by_path.get(skill.metadata.path, set()))
-            if skill.metadata.name in disabled:
-                status = "disabled by config"
-            elif skill.metadata.name not in loaded_names:
-                status = "not enabled by config"
+            status = _skill_config_status(
+                skill,
+                config=config,
+                loaded_names=loaded_names,
+                warning_codes=warning_codes_by_path.get(skill.metadata.path, set()),
+            )
             table.add_row(
                 skill.metadata.name,
                 risk or "-",

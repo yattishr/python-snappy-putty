@@ -345,6 +345,49 @@ def test_cli_skills_list_inspect_and_validate(tmp_path: Path) -> None:
     assert "scripts_present" in validated.stdout
 
 
+def test_cli_skills_list_shows_enabled_and_disabled_status(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_skill(tmp_path, "docker-logs", description="Use when inspecting Docker logs.")
+    _write_config(tmp_path, enabled=["git-commit-helper"], disabled=["docker-logs"])
+
+    listed = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "skills"],
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert listed.returncode == 0
+    assert "git-commit-helper" in listed.stdout
+    assert "docker-logs" in listed.stdout
+    assert "enabled" in listed.stdout
+    assert "disabled" in listed.stdout
+
+
+def test_repl_snappy_skills_alias_shows_enabled_and_disabled_status(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "git-commit-helper")
+    _write_skill(tmp_path, "docker-logs", description="Use when inspecting Docker logs.")
+    _write_config(tmp_path, enabled=["git-commit-helper"], disabled=["docker-logs"])
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="snappy skills\nexit\n",
+        cwd=tmp_path,
+        env=_env(),
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "git-commit-helper" in proc.stdout
+    assert "docker-logs" in proc.stdout
+    assert "enabled" in proc.stdout
+    assert "disabled" in proc.stdout
+
+
 def test_cli_skills_enable_moves_disabled_skill_to_enabled(tmp_path: Path) -> None:
     _write_skill(tmp_path, "git-commit-helper")
     _write_config(tmp_path, enabled=[], disabled=["git-commit-helper"])
