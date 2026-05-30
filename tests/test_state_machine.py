@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tests.agent_fixtures import load_agent_fixture
 from snappy_putty import cli
 from snappy_putty.fs_models import FsApplyItem, FsApplyResult, FsPlan, PlannedOp
+from snappy_putty.memory import save_project_snapshot
+from snappy_putty.project_inspector import inspect_project
 from snappy_putty.session import (
     ActiveGoalConflictError,
     ActiveWorkflowSnapshot,
@@ -33,6 +35,47 @@ def _capture_console(monkeypatch):
     test_console = Console(file=buffer, force_terminal=False, color_system=None)
     monkeypatch.setattr(cli, "console", test_console)
     return buffer
+
+
+def _write_config(root: Path, *, name: str = "Home Demo", mode: str = "active", skills: list[str] | None = None) -> None:
+    enabled = "\n".join(f"    - {skill}" for skill in skills or [])
+    enabled_block = f"\n{enabled}" if enabled else " []"
+    config_dir = root / ".snappy"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "snappy.yaml").write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "",
+                "agent:",
+                f"  name: {name}",
+                f"  mode: {mode}",
+                "",
+                "skills:",
+                f"  enabled:{enabled_block}",
+                "  disabled: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_skill(root: Path, name: str) -> None:
+    skill_dir = root / ".snappy" / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"""---
+name: {name}
+description: Use when testing the home screen.
+x-snappy:
+  risk: low
+---
+
+Test skill.
+""",
+        encoding="utf-8",
+    )
 
 
 def test_session_state_defaults_to_idle_and_preserves_history_on_clear_pending() -> None:
@@ -739,6 +782,79 @@ def test_repl_help_includes_agent_commands_with_readable_formatting(monkeypatch)
     assert "Use 'after' to see the next expected input." in output
     assert '"copy README.md"' in output
     assert '"destination path> tests/"' in output
+
+
+def test_repl_home_shows_compact_project_status_without_skill_names(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    (tmp_path / "package.json").write_text('{"dependencies":{"express":"latest"}}\n', encoding="utf-8")
+    _write_skill(tmp_path, "code-review")
+    _write_config(tmp_path, name="Home Screen Project", mode="active", skills=["code-review"])
+    save_project_snapshot(tmp_path, inspect_project(tmp_path))
+
+    cli.print_repl_home(SessionState(), root=tmp_path)
+
+    output = buffer.getvalue()
+    assert "Snappy PuTTy" in output
+    assert "Project-Aware AI Co-Pilot" in output
+    assert "Project" in output
+    assert "Home Screen Project" in output
+    assert "Active" in output
+    assert "Snapshot ready" in output
+    assert "1 skill enabled" in output
+    assert "code-review" not in output
+    assert "Build a frontend for this API" in output
+    assert "help • skills • inspect • status • exit" in output
+    assert "Quick commands" not in output
+    assert "Workflow tips" not in output
+
+
+def test_repl_home_shows_last_activity_when_available(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    state = SessionState(last_completed_goal="Review my latest changes and give me MR-style feedback")
+
+    cli.print_repl_home(state, root=tmp_path)
+
+    output = buffer.getvalue()
+    assert "Last Activity" in output
+    assert "Review my latest changes and give me MR-style feedback" in output
+
+
+def test_repl_home_shows_last_activity_fallback(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+
+    cli.print_repl_home(SessionState(), root=tmp_path)
+
+    output = buffer.getvalue()
+    assert "No recent command yet" in output
+
+
+def test_repl_home_handles_missing_config_and_no_snapshot(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+
+    cli.print_repl_home(SessionState(), root=tmp_path)
+
+    output = buffer.getvalue()
+    assert tmp_path.name in output
+    assert "Config not initialized" in output
+    assert "Off" in output
+    assert "No snapshot yet" in output
+    assert "0 skills enabled" in output
+    assert "Inspect this project" in output
+    assert "Explain this codebase" in output
+    assert "Show available skills" in output
+
+
+def test_repl_home_handles_malformed_config_without_crashing(monkeypatch, tmp_path: Path) -> None:
+    buffer = _capture_console(monkeypatch)
+    config_dir = tmp_path / ".snappy"
+    config_dir.mkdir()
+    (config_dir / "snappy.yaml").write_text("version: [broken\n", encoding="utf-8")
+
+    cli.print_repl_home(SessionState(), root=tmp_path)
+
+    output = buffer.getvalue()
+    assert "Config warning: run `snappy config validate`" in output
+    assert tmp_path.name in output
 
 
 def test_agent_mode_choice_question_defaults_to_current_selection() -> None:

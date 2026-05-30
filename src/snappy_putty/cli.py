@@ -1429,6 +1429,7 @@ def print_repl_cheatsheet() -> None:
     tools = " ".join(f"{name} {'✓' if found else '✗'}" for name, found in snapshot.tools.items())
     quick_commands = [
         ("doctor", "Planning diagnostics."),
+        ("home", "Home screen."),
         ("agent", "Agent summary."),
         ("agent mode", "Edit runtime mode."),
         ("init", "Scaffold .snappy/."),
@@ -1494,6 +1495,130 @@ def print_repl_cheatsheet() -> None:
         ]
     )
     console.print(Panel(content, title="Welcome", border_style="bright_blue"))
+
+
+def print_repl_home(state: SessionState | None = None, *, root: Path | None = None) -> None:
+    workspace_root = (root or Path.cwd()).resolve()
+    session_state = state or SessionState()
+    config = load_effective_config(workspace_root)
+    snapshot = load_project_snapshot(workspace_root, warn=False)
+    snapshot_file = project_snapshot_path(workspace_root)
+    config_file = workspace_root / ".snappy" / "snappy.yaml"
+    config_errors = [issue for issue in config.issues if issue.severity == "error"]
+    skill_count = _home_skill_count(workspace_root, config)
+    status_lines = _home_status_lines(
+        workspace_root=workspace_root,
+        config_file=config_file,
+        config_errors=config_errors,
+        snapshot=snapshot,
+        snapshot_file=snapshot_file,
+        skill_count=skill_count,
+        session_mode=session_state.agent_mode,
+    )
+    suggestions = _home_suggestions(snapshot)
+    content = "\n".join(
+        [
+            "[bold]Snappy PuTTy[/bold]",
+            "Project-Aware AI Co-Pilot",
+            "",
+            "[bold]Project[/bold]",
+            f"  {_home_project_name(workspace_root, config, config_file, config_errors)}",
+            "",
+            "[bold]Status[/bold]",
+            *status_lines,
+            "",
+            "[bold]Last Activity[/bold]",
+            f"  {_home_last_activity(workspace_root, session_state)}",
+            "",
+            "[bold]Try asking:[/bold]",
+            *(f"  • {suggestion}" for suggestion in suggestions),
+            "",
+            "[bold]Commands:[/bold]",
+            "  help • skills • inspect • status • exit",
+        ]
+    )
+    console.print(Panel(content, border_style="bright_blue"))
+
+
+def _home_project_name(root: Path, config: SnappyConfig, config_file: Path, config_errors: list[object]) -> str:
+    if config_file.is_file() and not config_errors and config.agent.name and config.agent.name != "Snappy":
+        return config.agent.name
+    return root.name or "(unknown project)"
+
+
+def _home_status_lines(
+    *,
+    workspace_root: Path,
+    config_file: Path,
+    config_errors: list[object],
+    snapshot: ProjectSnapshot | None,
+    snapshot_file: Path,
+    skill_count: int,
+    session_mode: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    if not config_file.is_file():
+        lines.append("  ! Config not initialized")
+    elif config_errors:
+        lines.append("  ! Config warning: run `snappy config validate`")
+
+    mode = _effective_agent_mode(workspace_root, session_mode)
+    lines.append(f"  ✓ {'Active' if mode == 'active' else 'Off'}")
+
+    if snapshot is not None:
+        lines.append("  ✓ Snapshot ready")
+    elif snapshot_file.is_file():
+        lines.append("  ! Snapshot stale")
+    else:
+        lines.append("  ! No snapshot yet")
+
+    skill_word = "skill" if skill_count == 1 else "skills"
+    prefix = "✓" if skill_count else "!"
+    lines.append(f"  {prefix} {skill_count} {skill_word} enabled")
+    return lines
+
+
+def _home_skill_count(root: Path, config: SnappyConfig) -> int:
+    try:
+        return len(discover_skills(root, config=config).skills)
+    except Exception:
+        return len(config.skills.enabled)
+
+
+def _home_last_activity(root: Path, state: SessionState) -> str:
+    for value in (
+        state.active_goal,
+        state.last_completed_goal,
+        state.last_failed_goal,
+        state.last_cancelled_goal,
+        state.last_blocked_goal,
+        state.last_skipped_goal,
+    ):
+        if value:
+            return value
+    payload = load_session_payload(root)
+    for key in ("last_goal", "last_completed_goal", "last_failed_goal", "last_skipped_goal"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    workflow = payload.get("workflow")
+    if isinstance(workflow, dict):
+        goal = workflow.get("goal")
+        if isinstance(goal, str) and goal.strip():
+            return goal.strip()
+    return "No recent command yet"
+
+
+def _home_suggestions(snapshot: ProjectSnapshot | None) -> list[str]:
+    if snapshot is None:
+        return ["Inspect this project", "Explain this codebase", "Show available skills"]
+    languages = {item.lower() for item in snapshot.languages}
+    package_managers = {item.lower() for item in snapshot.package_managers}
+    if languages & {"javascript", "typescript"} or package_managers & {"npm", "pnpm", "yarn"}:
+        return ["Review my latest changes", "Build a frontend for this API", "Explain the API structure"]
+    if "python" in languages:
+        return ["Review my latest changes", "Create a Streamlit dashboard", "Generate project documentation"]
+    return ["Review my latest changes", "Build a frontend for this API", "Generate project documentation"]
 
 
 def _build_agent_mode_lines(
@@ -2377,7 +2502,7 @@ def run_shell() -> None:
         except Exception:
             session = None
 
-    print_repl_cheatsheet()
+    print_repl_home(state, root=workspace_root)
     if restore_warning:
         console.print(restore_warning, soft_wrap=True)
     if restore_message:
@@ -2411,6 +2536,9 @@ def run_shell() -> None:
         if not text:
             continue
         if _handle_agent_mode_command(text, state, session=session):
+            continue
+        if text == "home":
+            print_repl_home(state, root=workspace_root)
             continue
         if text == "init":
             init(force=False)
@@ -3431,6 +3559,12 @@ def shell() -> None:
 def help_command() -> None:
     """Show the interactive help panel."""
     print_repl_cheatsheet()
+
+
+@app.command("home")
+def home_command() -> None:
+    """Show the compact project home panel."""
+    print_repl_home()
 
 
 def _set_fs_confirmation_state(

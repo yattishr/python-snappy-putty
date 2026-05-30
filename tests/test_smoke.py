@@ -322,7 +322,10 @@ def test_shell_starts_and_exits_with_exit_input() -> None:
     )
     assert proc.returncode == 0
     assert "Snappy PuTTy" in proc.stdout
-    assert "give me a file listing for src" in proc.stdout
+    assert "Project-Aware AI Co-Pilot" in proc.stdout
+    assert "Try asking:" in proc.stdout
+    assert "help • skills • inspect • status • exit" in proc.stdout
+    assert "Quick commands" not in proc.stdout
 
 
 def test_shell_agent_command_runs() -> None:

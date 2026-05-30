@@ -20,6 +20,46 @@ def _repl_env() -> dict[str, str]:
     return env
 
 
+def test_repl_startup_shows_compact_home_not_full_command_wall(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="exit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Project-Aware AI Co-Pilot" in proc.stdout
+    assert "Project" in proc.stdout
+    assert tmp_path.name in proc.stdout
+    assert "Status" in proc.stdout
+    assert "Last Activity" in proc.stdout
+    assert "Try asking:" in proc.stdout
+    assert "help • skills • inspect • status • exit" in proc.stdout
+    assert "Quick commands" not in proc.stdout
+    assert "Workflow tips" not in proc.stdout
+
+
+def test_repl_help_command_still_shows_detailed_help(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_repl_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Project-Aware AI Co-Pilot" in proc.stdout
+    assert "Quick commands" in proc.stdout
+    assert "Workflow tips" in proc.stdout
+
+
 def test_repl_pending_question_consumes_next_input_as_answer(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "snappy_putty.cli", "shell"],
