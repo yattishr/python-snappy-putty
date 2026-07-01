@@ -295,6 +295,43 @@ def test_explain_does_not_claim_local_repo_or_cwd() -> None:
     assert str(Path.cwd()) not in result.stdout
 
 
+def test_explain_this_codebase_describes_project() -> None:
+    result = runner.invoke(app, ["explain", "this codebase"])
+    assert result.exit_code == 0
+    assert "Codebase Explanation" in result.stdout
+    assert "Suggestion-only CLI planner" in result.stdout
+    assert "src/snappy_putty/cli.py" in result.stdout
+    assert "What to look for first" not in result.stdout
+
+
+def test_explain_this_project_uses_llm_when_available(monkeypatch) -> None:
+    monkeypatch.setenv("SNAPPY_AGENT_MODE", "active")
+    monkeypatch.setattr(agent_module, "is_llm_available", lambda session_mode=None: True)
+    seen: dict[str, str] = {}
+
+    async def fake_run_project_explanation(user_text, snapshot) -> str:
+        seen["user_text"] = user_text
+        seen["snapshot_root"] = snapshot.root_path
+        return """{
+  "goal": "Explain project",
+  "assumptions": ["grounded in repo context"],
+  "question": null,
+  "plan": [{"step": 1, "action": "Describe architecture", "why": "LLM synthesized selected files"}],
+  "commands": [],
+  "warnings": [],
+  "snippets": [{"title": "Codebase Explanation", "language": "markdown", "content": "LLM-grounded developer explanation"}]
+}"""
+
+    monkeypatch.setattr(agent_module, "_run_project_explanation_with_sdk", fake_run_project_explanation)
+
+    result = runner.invoke(app, ["explain", "this project"])
+
+    assert result.exit_code == 0
+    assert seen["user_text"] == "this project"
+    assert seen["snapshot_root"] == str(Path.cwd())
+    assert "LLM-grounded developer explanation" in result.stdout
+
+
 def test_ask_git_worktree_listing_mentions_repo_requirement() -> None:
     result = runner.invoke(app, ["ask", "give me a git worktree listing"])
     assert result.exit_code == 0
@@ -326,6 +363,22 @@ def test_shell_starts_and_exits_with_exit_input() -> None:
     assert "Try asking:" in proc.stdout
     assert "help • skills • inspect • status • exit" in proc.stdout
     assert "Quick commands" not in proc.stdout
+
+
+def test_shell_explain_this_codebase_describes_project() -> None:
+    env = _shell_env()
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="explain this codebase\nexit\n",
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert "Codebase Explanation" in proc.stdout
+    assert "Suggestion-only CLI planner" in proc.stdout
+    assert "What to look for first" not in proc.stdout
 
 
 def test_shell_agent_command_runs() -> None:
