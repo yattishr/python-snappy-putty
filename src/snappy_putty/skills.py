@@ -69,6 +69,7 @@ _VALID_OUTPUT_KINDS = {
     "testing_plan",
     "deployment_plan",
     "general_skill_report",
+    "pr_summary",
 }
 
 

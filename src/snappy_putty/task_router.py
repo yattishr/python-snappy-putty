@@ -273,7 +273,7 @@ def route_task(
     candidates = [candidate for candidate in candidates if candidate.score >= 0.24]
     candidates.sort(key=lambda item: (-item.score, item.skill_name))
 
-    selected = _select_candidates(candidates, intent, limit=limit)
+    selected = _select_candidates(candidates, intent, limit=limit, user_request=user_request)
     confidence = min(1.0, selected[0].score if selected else intent.confidence)
     reason = "selected_matching_skill" if selected else "no_matching_skill_selected"
     if _is_ambiguous(candidates):
@@ -372,12 +372,20 @@ def _score_skill(
     )
 
 
-def _select_candidates(candidates: list[SkillRouteCandidate], intent: TaskIntent, *, limit: int) -> list[SkillRouteCandidate]:
+def _select_candidates(
+    candidates: list[SkillRouteCandidate],
+    intent: TaskIntent,
+    *,
+    limit: int,
+    user_request: str = "",
+) -> list[SkillRouteCandidate]:
     if not candidates:
         return []
     best = candidates[0]
     if best.score < 0.34 and intent.confidence < 0.55:
         return []
+    if _is_multi_deliverable_request(user_request):
+        return [candidate for candidate in candidates[:limit] if candidate.score >= 0.34]
     if _is_ambiguous(candidates):
         return [candidate for candidate in candidates[:limit] if best.score - candidate.score <= 0.08]
     return [best]
@@ -385,6 +393,15 @@ def _select_candidates(candidates: list[SkillRouteCandidate], intent: TaskIntent
 
 def _is_ambiguous(candidates: list[SkillRouteCandidate]) -> bool:
     return len(candidates) > 1 and candidates[0].score >= 0.34 and candidates[0].score - candidates[1].score <= 0.08
+
+
+def _is_multi_deliverable_request(user_request: str) -> bool:
+    lowered = user_request.lower()
+    return bool(
+        re.search(r"\b(and|then|after|using)\b", lowered)
+        and re.search(r"\b(review|analyze|inspect)\b", lowered)
+        and re.search(r"\b(generate|draft|write|summarize|summary|notes|guide|documentation)\b", lowered)
+    )
 
 
 def _disabled_best_match(

@@ -17,6 +17,7 @@ SUPPORTED_OUTPUT_KINDS = {
     "testing_plan",
     "deployment_plan",
     "general_skill_report",
+    "pr_summary",
 }
 
 _INTENT_OUTPUT_KINDS = {
@@ -285,6 +286,13 @@ def output_requirements(output_kind: str) -> list[str]:
             "Files likely involved",
             "Risks",
             "Acceptance checks",
+            "Explicitly state that no files were changed",
+        ],
+        "pr_summary": [
+            "Title",
+            "Concise summary",
+            "Bulleted changes or findings",
+            "Risks and test notes",
             "Explicitly state that no files were changed",
         ],
     }

@@ -1540,6 +1540,114 @@ def test_skill_routed_plan_confirmation_generates_non_mutating_output(tmp_path: 
     assert "Mutations applied: False" in history
 
 
+def test_multi_skill_workflow_orchestration_generates_pr_summary(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (tmp_path / "server.js").write_text("export function api() { return true }\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use when the user asks to review an API and produce PR review findings.",
+        indicators=["review this API"],
+    )
+    review_skill = tmp_path / ".snappy" / "skills" / "codeguardian-review" / "SKILL.md"
+    review_skill.write_text(
+        review_skill.read_text(encoding="utf-8").replace(
+            "description: Use when the user asks to review an API and produce PR review findings.",
+            "description: Use when the user asks to review an API and produce PR review findings.\n"
+            "accepts:\n"
+            "  - project_context\n"
+            "  - source_files\n"
+            "produces:\n"
+            "  - review_report\n"
+            "preferred_position: analysis",
+        ),
+        encoding="utf-8",
+    )
+    _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        "Use when the user asks to review an API and generate a PR summary.",
+        indicators=["generate a PR summary"],
+    )
+    doc_skill = tmp_path / ".snappy" / "skills" / "doc-coauthoring" / "SKILL.md"
+    doc_skill.write_text(
+        doc_skill.read_text(encoding="utf-8").replace(
+            "description: Use when the user asks to review an API and generate a PR summary.",
+            "description: Use when the user asks to review an API and generate a PR summary.\n"
+            "accepts:\n"
+            "  - project_context\n"
+            "  - review_report\n"
+            "produces:\n"
+            "  - markdown_document\n"
+            "  - pr_summary\n"
+            "preferred_position: synthesis",
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me review this API and generate a PR summary\nYES\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Workflow orchestration enabled." in proc.stdout
+    assert "codeguardian-review" in proc.stdout
+    assert "review_report" in proc.stdout
+    assert "doc-coauthoring" in proc.stdout
+    assert "pr_summary" in proc.stdout
+    assert "Running workflow step 1/2: codeguardian-review" in proc.stdout
+    assert "Running workflow step 2/2: doc-coauthoring" in proc.stdout
+    assert "Workflow completed successfully." in proc.stdout
+    assert "Output kind: pr_summary" in proc.stdout
+    assert "_Displayed in the terminal only. No files were created or changed._" in proc.stdout
+
+
+def test_multi_skill_workflow_infers_known_skill_artifacts_without_metadata(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (tmp_path / "server.js").write_text("export function api() { return true }\n", encoding="utf-8")
+    _write_skill(
+        tmp_path,
+        "codeguardian-review",
+        "Use when the user asks to review an API and produce PR review findings.",
+        indicators=["review this API"],
+    )
+    _write_skill(
+        tmp_path,
+        "doc-coauthoring",
+        "Use when the user asks to review an API and generate a PR summary.",
+        indicators=["generate a PR summary"],
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "snappy_putty.cli", "shell"],
+        input="help me review this API and generate a PR summary\nYES\nexit\n",
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=_env(),
+        timeout=20,
+    )
+
+    assert proc.returncode == 0
+    assert "Workflow orchestration enabled." in proc.stdout
+    assert "codeguardian-review" in proc.stdout
+    assert "review_report" in proc.stdout
+    assert "doc-coauthoring" in proc.stdout
+    assert "pr_summary" in proc.stdout
+    assert "Running workflow step 1/2: codeguardian-review" in proc.stdout
+    assert "Running workflow step 2/2: doc-coauthoring" in proc.stdout
+    assert "Output kind: pr_summary" in proc.stdout
+    assert "Output kind: general_skill_report" not in proc.stdout
+
+
 def test_plan_interaction_show_why_and_explain_step(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[project]\nname = 'demo'\n[project.scripts]\nsnappy = 'snappy_putty.cli:app'\n",

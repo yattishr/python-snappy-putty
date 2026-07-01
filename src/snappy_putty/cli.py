@@ -151,6 +151,9 @@ from snappy_putty.skills import DEFAULT_SKILLS_DIR, Skill, discover_skills, matc
 from snappy_putty.status import busy, get_status_message
 from snappy_putty.task_router import route_task, route_to_skill_matches
 from snappy_putty.models import AgentOutput, PlanStep as AgentPlanStep
+from snappy_putty.workflow_executor import execute_workflow_plan
+from snappy_putty.workflow_orchestrator import build_workflow_plan, render_workflow_plan_text
+from snappy_putty.workflow_models import WorkflowPlan
 
 app = typer.Typer(help="Snappy PuTTy CLI", invoke_without_command=True)
 inspect_app = typer.Typer(help="Read-only project inspection commands.", invoke_without_command=False)
@@ -847,6 +850,9 @@ def _record_agent_planning_result(
     elif result.plan_mode in {PlanningMode.DETERMINISTIC.value, PlanningMode.LLM_ASSISTED.value}:
         output_context = _output_generation_context_for_saved_plan(Path.cwd().resolve())
         if output_context is not None:
+            workflow_plan = _workflow_plan_for_saved_plan(Path.cwd().resolve())
+            if workflow_plan is not None and workflow_plan.workflow_required:
+                console.print(render_workflow_plan_text(workflow_plan), markup=False)
             state.awaiting_confirmation = True
             state.update_workflow_context(output_context)
             _set_state(state, LifecycleState.CONFIRMATION)
@@ -3663,6 +3669,26 @@ def _output_generation_context_for_saved_plan(root: Path) -> OutputGenerationCon
     )
 
 
+def _workflow_plan_for_saved_plan(root: Path) -> WorkflowPlan | None:
+    if os.getenv("SNAPPY_WORKFLOW_ORCHESTRATION", "").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    plan = load_grounded_plan(root)
+    if plan is None:
+        return None
+    routing = (plan.context_selection or {}).get("skill_routing")
+    if not isinstance(routing, dict):
+        return None
+    selected = [item for item in routing.get("selected_skills", []) if isinstance(item, str)]
+    if len(selected) < 2:
+        return None
+    config = _effective_config(root)
+    registry = discover_skills(root, config=config)
+    by_name = {skill.metadata.name: skill for skill in registry.skills}
+    matched = [by_name[name] for name in selected if name in by_name]
+    workflow_plan = build_workflow_plan(plan.goal, matched, plan)
+    return workflow_plan if workflow_plan.workflow_required else None
+
+
 def _consume_confirmation_response(response: str, state: SessionState, workspace_root: Path) -> None:
     value = _normalized_confirmation_token(response)
     if value not in {"YES", "NO"}:
@@ -3801,10 +3827,28 @@ def _generate_confirmed_skill_output(
     registry = discover_skills(root, config=config)
     request = build_skill_output_request(plan=validity.plan, skills=registry.skills, config=config)
     output_kind, _ = output_kind_for_request(request.task_intent, request.selected_skills, registry.skills)
-    console.print("Generating terminal-only skill output...")
-    console.print(f"Using skill: {', '.join(request.selected_skills)}")
+    workflow_plan = build_workflow_plan(validity.plan.goal, [skill for skill in registry.skills if skill.metadata.name in request.selected_skills], validity.plan)
+    if workflow_plan.workflow_required:
+        console.print("Generating workflow output...")
+        for index, step in enumerate(workflow_plan.steps, start=1):
+            inputs = ", ".join(step.input_artifacts) if step.input_artifacts else "(none)"
+            console.print(f"Running workflow step {index}/{len(workflow_plan.steps)}: {step.skill_name}")
+            if inputs != "(none)":
+                console.print(f"Using artifact: {inputs}")
+            if step.output_artifact:
+                console.print(f"Artifact generated: {step.output_artifact}")
+        execution = execute_workflow_plan(workflow_plan, request, registry.skills)
+        if not execution.success or execution.final_output is None:
+            _fail_active_goal(state, message=execution.summary)
+            return
+        output = execution.final_output
+        output_kind = execution.final_output_kind
+        console.print("Workflow completed successfully.")
+    else:
+        console.print("Generating terminal-only skill output...")
+        console.print(f"Using skill: {', '.join(request.selected_skills)}")
+        output = generate_skill_output(request, registry.skills)
     console.print(f"Output kind: {output_kind}")
-    output = generate_skill_output(request, registry.skills)
     console.print(render_skill_output(output), markup=False)
     _render_skill_output_completion_summary(output.output_kind)
 
@@ -3837,6 +3881,10 @@ def _render_skill_output_completion_summary(output_kind: str) -> None:
 
 def _skill_output_completion_details(output_kind: str) -> tuple[str, list[str]]:
     mapping = {
+        "pr_summary": (
+            "Workflow completed successfully.",
+            ["Review the PR summary", "Refine the summary", "Generate another report"],
+        ),
         "code_review_report": (
             "Review report generated successfully.",
             ["Apply suggested fixes", "Generate an implementation plan", "Review another area"],
