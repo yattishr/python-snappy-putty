@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from snappy_putty.skill_outputs import SkillOutputRequest
-from snappy_putty.workflow_executor import execute_workflow_plan
+from snappy_putty.skill_outputs import SkillOutputRequest, render_skill_output
+from snappy_putty.workflow_executor import _default_step_runner, execute_workflow_plan
 from snappy_putty.workflow_models import WorkflowArtifact, WorkflowPlan, WorkflowStep
 
 
@@ -64,6 +64,37 @@ def test_executes_steps_in_dependency_order_and_passes_artifacts() -> None:
     assert result.final_output.output_kind == "pr_summary"
 
 
+def test_pr_summary_consumes_upstream_review_report_content() -> None:
+    def runner(step, artifacts, request, skills):
+        if step.output_artifact == "review_report":
+            return WorkflowArtifact(
+                name="review_report",
+                kind="review_report",
+                producer_step_id=step.id,
+                data={
+                    "summary": "Review found brittle API validation.",
+                    "findings": ["server.js accepts invalid payloads without returning a 400."],
+                    "files_referenced": ["server.js", "tests/api.test.js"],
+                    "risks": ["Invalid requests can reach downstream handlers."],
+                    "plan_context": ["Add validation before handler dispatch."],
+                    "test_notes": ["Add a regression test for invalid payloads."],
+                },
+                summary="Review found brittle API validation.",
+            )
+        return _default_step_runner(step, artifacts, request, skills)
+
+    result = execute_workflow_plan(_workflow(), _request(), step_runner=runner)
+
+    assert result.success is True
+    assert result.final_output is not None
+    rendered = render_skill_output(result.final_output)
+    assert "server.js accepts invalid payloads without returning a 400." in rendered
+    assert "Invalid requests can reach downstream handlers." in rendered
+    assert "Add validation before handler dispatch." in rendered
+    assert "Workflow Trace" in rendered
+    assert rendered.count("\nSummary\n") == 1
+
+
 def test_failed_step_halts_workflow() -> None:
     seen: list[str] = []
 
@@ -79,4 +110,3 @@ def test_failed_step_halts_workflow() -> None:
     assert seen == ["codeguardian-review"]
     assert result.workflow_plan.status == "failed"
     assert "review failed" in result.summary
-

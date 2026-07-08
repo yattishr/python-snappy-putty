@@ -87,6 +87,10 @@ def _default_step_runner(
     if missing:
         raise ValueError(f"missing input artifacts: {', '.join(missing)}")
     output_kind = step.output_artifact or "general_skill_report"
+    if output_kind == "review_report":
+        return _review_report_artifact(step, output_context)
+    if output_kind == "pr_summary":
+        return _pr_summary_artifact(step, available, output_context)
     return WorkflowArtifact(
         name=output_kind,
         kind=output_kind,
@@ -101,6 +105,69 @@ def _default_step_runner(
     )
 
 
+def _review_report_artifact(step: WorkflowStep, output_context: SkillOutputRequest) -> WorkflowArtifact:
+    files = _dedupe(output_context.files_considered)
+    findings = _review_findings(output_context)
+    risks = output_context.plan_risks or [
+        "No explicit diff was available, so review findings are grounded in the selected project context and plan only.",
+        "Downstream summary quality depends on preserving structured review artifact fields.",
+    ]
+    plan_context = _plan_context_items(output_context)
+    data = {
+        "skill": step.skill_name,
+        "inputs": list(step.input_artifacts),
+        "goal": output_context.goal,
+        "summary": output_context.plan_summary or f"Review findings for: {output_context.goal}",
+        "findings": findings,
+        "files_referenced": files,
+        "risks": risks,
+        "plan_context": plan_context,
+        "test_notes": _test_notes(files),
+        "assumptions": list(output_context.plan_assumptions),
+    }
+    return WorkflowArtifact(
+        name="review_report",
+        kind="review_report",
+        producer_step_id=step.id,
+        data=data,
+        summary=data["summary"],
+    )
+
+
+def _pr_summary_artifact(
+    step: WorkflowStep,
+    available: dict[str, WorkflowArtifact],
+    output_context: SkillOutputRequest,
+) -> WorkflowArtifact:
+    review = available.get("review_report")
+    review_data = review.data if review is not None else {}
+    findings = _string_list(review_data.get("findings")) or ["No concrete review findings were available from upstream artifacts."]
+    files = _dedupe([*_string_list(review_data.get("files_referenced")), *output_context.files_considered])
+    risks = _string_list(review_data.get("risks")) or ["Validate the generated summary against the actual PR diff before publishing."]
+    plan_context = _string_list(review_data.get("plan_context")) or _plan_context_items(output_context)
+    test_notes = _string_list(review_data.get("test_notes")) or _test_notes(files)
+    summary = _pr_summary_text(output_context, findings, files)
+    data = {
+        "skill": step.skill_name,
+        "inputs": list(step.input_artifacts),
+        "goal": output_context.goal,
+        "summary": summary,
+        "findings": findings,
+        "files_referenced": files,
+        "risks": risks,
+        "plan_context": plan_context,
+        "test_notes": test_notes,
+        "source_artifacts": [name for name in step.input_artifacts if name in available],
+    }
+    return WorkflowArtifact(
+        name="pr_summary",
+        kind="pr_summary",
+        producer_step_id=step.id,
+        data=data,
+        summary=summary,
+    )
+
+
 def _artifact_to_skill_output(
     workflow_plan: WorkflowPlan,
     artifact: WorkflowArtifact,
@@ -108,9 +175,14 @@ def _artifact_to_skill_output(
 ) -> SkillOutput:
     if artifact.kind == "pr_summary":
         title = "PR Summary"
-        summary = f"Workflow output for: {output_context.goal}"
+        summary = str(artifact.data.get("summary") or artifact.summary or f"PR summary for: {output_context.goal}")
+        files = _dedupe([*_string_list(artifact.data.get("files_referenced")), *output_context.files_considered])
         sections = [
-            SkillOutputSection("Summary", body=summary),
+            SkillOutputSection("Review Findings", items=_string_list(artifact.data.get("findings")) or ["No concrete review findings were available from upstream artifacts."]),
+            SkillOutputSection("Files Referenced", items=files or ["No grounded file references were available."]),
+            SkillOutputSection("Risks", items=_string_list(artifact.data.get("risks")) or ["Validate the generated summary against the actual PR diff before publishing."]),
+            SkillOutputSection("Testing Notes", items=_string_list(artifact.data.get("test_notes")) or _test_notes(files)),
+            SkillOutputSection("Grounded Plan Context", items=_string_list(artifact.data.get("plan_context")) or _plan_context_items(output_context)),
             SkillOutputSection(
                 "Workflow Trace",
                 items=[
@@ -118,14 +190,11 @@ def _artifact_to_skill_output(
                     for index, step in enumerate(workflow_plan.steps, start=1)
                 ],
             ),
-            SkillOutputSection("Files Referenced", items=output_context.files_considered or ["No grounded file references were available."]),
-            SkillOutputSection("Risks", items=["Generated from confirmed terminal-only workflow output; no files were changed."]),
         ]
     else:
         title = artifact.kind.replace("_", " ").title()
         summary = artifact.summary or f"Workflow output for: {output_context.goal}"
         sections = [
-            SkillOutputSection("Summary", body=summary),
             SkillOutputSection(
                 "Workflow Trace",
                 items=[
@@ -140,6 +209,60 @@ def _artifact_to_skill_output(
         summary=summary,
         sections=sections,
         warnings=[],
-        files_referenced=list(output_context.files_considered),
+        files_referenced=files if artifact.kind == "pr_summary" else list(output_context.files_considered),
         mutations_applied=False,
     )
+
+
+def _pr_summary_text(output_context: SkillOutputRequest, findings: list[str], files: list[str]) -> str:
+    file_text = ", ".join(f"`{path}`" for path in files[:3]) if files else "the grounded project context"
+    subject = output_context.plan_summary or output_context.goal
+    first_sentence = subject.rstrip(".")
+    return f"{first_sentence}. Upstream review identified {len(findings)} finding(s) covering {file_text}. No files were changed by this workflow."
+
+
+def _review_findings(output_context: SkillOutputRequest) -> list[str]:
+    concrete_risks = [item for item in output_context.plan_risks if "confirm manually" not in item.lower()]
+    if concrete_risks:
+        return concrete_risks
+    if output_context.plan_summary:
+        return [output_context.plan_summary]
+    return [
+        "Review the confirmed workflow paths and artifact contracts before relying on generated output.",
+        "Confirm behavior with focused tests around artifact handoff and final rendering.",
+    ]
+
+
+def _plan_context_items(output_context: SkillOutputRequest) -> list[str]:
+    items = [_step_description(step) for step in output_context.plan_steps]
+    if output_context.context_summary:
+        items.append(output_context.context_summary)
+    return _dedupe(items) or ["No grounded plan context was available."]
+
+
+def _test_notes(files: list[str]) -> list[str]:
+    referenced = ", ".join(files[:3]) if files else "the affected workflow paths"
+    return [
+        f"Run focused regression checks around {referenced}.",
+        "Confirm the final terminal output contains artifact-derived content and no duplicate summary section.",
+    ]
+
+
+def _step_description(step: object) -> str:
+    if isinstance(step, dict):
+        return str(step.get("description") or step.get("action") or "Review the grounded workflow step.")
+    return str(getattr(step, "description", None) or getattr(step, "action", None) or step)
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))

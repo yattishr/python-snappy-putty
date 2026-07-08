@@ -43,6 +43,9 @@ class SkillOutputRequest:
     context_summary: str
     plan_steps: list[Any]
     skill_context: str
+    plan_summary: str | None = None
+    plan_risks: list[str] = field(default_factory=list)
+    plan_assumptions: list[str] = field(default_factory=list)
     config: SnappyConfig | None = None
 
 
@@ -118,6 +121,9 @@ def build_skill_output_request(
         context_summary=_context_summary(context, files_considered),
         plan_steps=list(getattr(plan, "steps", [])),
         skill_context=skill_context,
+        plan_summary=getattr(plan, "summary", None),
+        plan_risks=[item for item in getattr(plan, "risks", []) if isinstance(item, str)],
+        plan_assumptions=[item for item in getattr(plan, "assumptions", []) if isinstance(item, str)],
         config=config,
     )
 
@@ -213,7 +219,8 @@ def render_skill_output(output: SkillOutput) -> str:
             lines.append(section.body)
         for item in section.items or []:
             lines.append(f"- {_format_report_item(item)}")
-    if output.files_referenced:
+    section_headings = {section.heading for section in output.sections}
+    if output.files_referenced and "Files Referenced" not in section_headings:
         lines.extend(["", "Files Referenced", ""])
         lines.extend(f"- `{path}`" for path in output.files_referenced)
     if output.warnings:
